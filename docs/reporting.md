@@ -120,3 +120,5 @@ served; this is not a filesystem browser or a remote command API.
 This viewer is read-only and snapshot-based: refreshing the browser does not
 re-read the capture. Re-run `view` to obtain a newer snapshot. HTTPS, live updates,
 remote session control, and indexed viewport queries are future capabilities.
+The [remote-operation plan](remote-operation.md) includes a manual SSH-tunnel
+example for the current snapshot viewer and the proposed automated modes.

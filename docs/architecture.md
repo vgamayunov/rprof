@@ -77,6 +77,7 @@ projection engine remain proposed components.
 | `rprof-perf` (planned) | Linux PMU counting and sampling |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
+| `rprof-remote` (planned) | SSH transport, capture-source adapters, remote session control and reconnectable transfer |
 | `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |
 
 Keep MPI and CUDA dependencies optional so the base CLI builds without vendor
@@ -142,6 +143,16 @@ on-demand queries and live updates are future extensions. Chrome Trace export
 streams all selected-domain spans/counters independently of HTML retention limits,
 with bounded correlation reconstruction. See [reporting](reporting.md) and the
 [browser model contract](report-model.md).
+
+## Remote operation
+
+Support a remote query/view service reached by an SSH-forwarded browser port and a
+local backend reaching a remote worker over SSH stdio. Both modes reuse the same
+capture-source/query/session abstractions and renderer. Target-local buffering is
+independent of transport; persistent job ownership is independent of viewer or SSH
+connection lifetime. The existing loopback snapshot viewer supports the manual
+tunnel pattern already. Automated deployment, session control, resumable transfers,
+and live/indexed queries are planned in [remote operation](remote-operation.md).
 
 ## Hardware what-if projection
 

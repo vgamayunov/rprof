@@ -150,7 +150,31 @@ Detailed design and incremental delivery are in
 phases 2–7; projection implementation can begin once the relevant collectors supply
 enough data, without waiting for every collector to be complete.
 
-## 9. Combined-workload validation and release
+## 9. Remote collection and viewing
+
+- Support remote query/view services through SSH-forwarded browser ports, and a
+  local backend that controls collection and accesses target data over SSH.
+- Reuse OpenSSH configuration/ProxyJump and a shared capture-source/query API;
+  negotiate capture, report, and remote protocol versions explicitly.
+- Deliver automated snapshot viewing first, then completed-capture fetch/cache,
+  persistent remote sessions, reconnect/resume, and bounded live/viewport queries.
+- Keep target-local capture buffering independent of network/viewer connectivity.
+  Preserve shard/clock identities and separate collector loss from transport backlog.
+- Start with explicit compute-node targets and existing allocations; add Slurm job
+  lifecycle and node discovery for `tst9`/`h100` and `tst4`/`hbv4` as integration matures.
+- Use HTTP inside encrypted SSH tunnels initially; add authenticated direct HTTPS
+  as an optional deployment mode when needed.
+
+**Exit criterion:** both modes can view equivalent captures and manage remote
+sessions with explicit ownership, bounded queries/transfers, and recoverable SSH
+disconnects, without coupling workload lifetime to the browser connection.
+
+See [remote operation](remote-operation.md) for architecture and rollout. Manual
+snapshot tunneling already works with phase 2's `view --port`; the initial remote
+automation can be implemented alongside early collector work rather than waiting
+for projection or all hardware collectors.
+
+## 10. Combined-workload validation and release
 
 - Validate mixed MPI+OpenMP+CUDA+I/O workloads and distributed merging at scale.
 - Validate projection reports and reproducibility across hardware-profile/model

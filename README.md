@@ -20,6 +20,11 @@ will include runtime/scaling estimates, bottleneck analysis, assumptions and
 uncertainty ranges, and a projected timeline alongside the measured baseline.
 See the [projection plan](docs/hardware-projection.md).
 
+Planned [remote operation](docs/remote-operation.md) supports both an SSH-tunneled
+remote viewer and a local backend connected to target systems over SSH. The current
+snapshot viewer already supports manual SSH port forwarding; automated collection,
+session management, reconnectable transfer, and live queries will extend it.
+
 ## Implemented: capture foundation and timeline reports
 
 - Rust workspace: shared schema, streaming capture library, and CLI.
