@@ -4,6 +4,7 @@ compile_error!("rprof process supervision currently requires Linux");
 mod record;
 mod report;
 mod supervisor;
+mod view;
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
@@ -26,8 +27,10 @@ struct Cli {
 enum Action {
     /// Supervise a workload and stream a recoverable process capture.
     Record(RecordArgs),
-    /// Print a text summary, including partial-capture and event-loss status.
-    Report { input: PathBuf },
+    /// Generate a text summary, offline HTML timeline, or Chrome Trace/Perfetto JSON.
+    Report(report::ReportArgs),
+    /// Serve an offline report snapshot on a loopback-only local browser endpoint.
+    View(view::ViewArgs),
     /// Merge same-session capture shards deterministically, preserving clock domains.
     Merge {
         #[arg(short, long)]
@@ -75,8 +78,12 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         Action::Record(args) => record::record(args),
-        Action::Report { input } => {
-            report::report(&input)?;
+        Action::Report(args) => {
+            report::report(args)?;
+            Ok(0)
+        }
+        Action::View(args) => {
+            view::view(args)?;
             Ok(0)
         }
         Action::Merge { output, inputs } => {

@@ -1,156 +1,105 @@
 use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::{BufRead, BufReader, Read, Write},
-    path::Path,
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, ensure};
-use rprof_core::{Capture, SCHEMA_VERSION};
+use clap::{Args, ValueEnum};
+use rprof_report::{Limits, analyze, write_html, write_text, write_trace};
 
-pub(crate) fn report(path: &Path) -> Result<()> {
-    let mut reader =
-        BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?);
-    // Bootstrap v1 captures are pretty-printed JSON objects, v2 begins with a
-    // compact header frame. Probe a bounded line, then reopen for actual reading.
-    let mut first = String::new();
-    (&mut reader)
-        .take(rprof_capture::MAX_FRAME_BYTES as u64)
-        .read_line(&mut first)?;
-    let stream = serde_json::from_str::<serde_json::Value>(&first)
-        .ok()
-        .is_some_and(|v| v.get("record").is_some());
-    let file = File::open(path)?;
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    if !stream {
-        ensure!(
-            file.metadata()?.len() <= 16 * 1024 * 1024,
-            "legacy v1 capture exceeds 16 MiB; use streaming v2 for large captures"
-        );
-        let capture: Capture =
-            serde_json::from_reader(BufReader::new(file.take(16 * 1024 * 1024 + 1)))
-                .context("reading legacy capture (or invalid stream header)")?;
-        ensure!(
-            capture.schema_version == SCHEMA_VERSION,
-            "unsupported legacy schema version {}",
-            capture.schema_version
-        );
-        writeln!(out, "Format:     legacy v1 JSON")?;
-        writeln!(out, "Command:    {:?}", capture.metadata.command)?;
-        writeln!(
-            out,
-            "Collectors: {}",
-            capture.metadata.collectors.join(", ")
-        )?;
-        writeln!(
-            out,
-            "Wall time:  {:.6} s",
-            capture.metadata.duration_ns as f64 / 1e9
-        )?;
-        writeln!(out, "Exit code:  {:?}", capture.metadata.exit_code)?;
-        writeln!(out, "Signal:     {:?}", capture.metadata.signal)?;
-        writeln!(out, "Tracks:     {}", capture.tracks.len())?;
-        writeln!(out, "Spans:      {}", capture.spans.len())?;
-        writeln!(out, "Counters:   {}", capture.counters.len())?;
-        return Ok(());
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    Text,
+    Html,
+    #[value(alias = "chrome", alias = "perfetto")]
+    Trace,
+}
+
+#[derive(Args)]
+pub struct ReportArgs {
+    pub input: PathBuf,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    format: Format,
+    /// Output artifact; otherwise write to stdout. Existing files are never replaced.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Clock domain to export for --format trace (list IDs in the text report).
+    #[arg(long)]
+    domain: Option<String>,
+    #[command(flatten)]
+    pub limits: TimelineLimits,
+}
+
+#[derive(Args)]
+pub struct TimelineLimits {
+    /// Maximum retained timeline observations; full-capture summaries remain exact.
+    #[arg(long, default_value_t = 200_000, value_parser = clap::value_parser!(u32).range(0..=2_000_000))]
+    max_events: u32,
+    /// Encoded-event retention budget for HTML reports, in MiB.
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=512))]
+    max_report_mib: u32,
+}
+
+impl TimelineLimits {
+    pub fn options(&self, retain_timeline: bool) -> Limits {
+        Limits {
+            retain_timeline,
+            max_events: self.max_events as usize,
+            max_bytes: self.max_report_mib as usize * 1024 * 1024,
+        }
     }
-    let summary = rprof_capture::summarize(BufReader::new(file))?;
-    writeln!(
-        out,
-        "Format:     rprof stream v{}",
-        summary.header.schema_version
-    )?;
-    writeln!(out, "Session:    {}", summary.header.session_id)?;
-    writeln!(
-        out,
-        "Status:     {}",
-        if summary.is_complete() {
-            "complete"
-        } else {
-            "partial/recovered"
-        }
-    )?;
-    writeln!(out, "Shards:     {}", summary.shards.len())?;
-    writeln!(
-        out,
-        "Tail:       {}",
-        if summary.truncated_tail {
-            "truncated (ignored)"
-        } else {
-            "intact"
-        }
-    )?;
-    writeln!(out, "Recovered inputs: {}", summary.header.recovered_inputs)?;
-    let domains: BTreeSet<_> = summary
-        .shards
-        .values()
-        .map(|s| (&s.shard.hostname, &s.shard.boot_id))
-        .collect();
-    writeln!(
-        out,
-        "Clock domains: {}{}",
-        domains.len(),
-        if domains.len() > 1 {
-            " (unaligned across hosts/boots)"
-        } else {
-            " (same-domain monotonic origins recorded)"
-        }
-    )?;
-    for (id, shard) in &summary.shards {
-        writeln!(out, "\nShard:      {id}")?;
-        writeln!(out, "Host:       {}", shard.shard.hostname)?;
-        writeln!(out, "Command:    {:?}", shard.shard.command)?;
-        writeln!(
-            out,
-            "Collectors: {}",
-            shard
-                .shard
-                .collectors
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )?;
-        let duration = shard
-            .end
-            .as_ref()
-            .map_or(shard.observed_ns, |e| e.duration_ns);
-        writeln!(
-            out,
-            "{} {:.6} s",
-            if shard.end.is_some() {
-                "Duration:  "
-            } else {
-                "Observed:  "
-            },
-            duration as f64 / 1e9
-        )?;
-        if let Some(end) = &shard.end {
-            writeln!(out, "End reason: {:?}", end.reason)?;
-            writeln!(out, "Exit code:  {:?}", end.exit_code)?;
-            writeln!(out, "Signal:     {:?}", end.signal)?;
-            writeln!(out, "Interrupted by: {:?}", end.interrupted_by)?;
-        } else {
-            writeln!(out, "End reason: unknown (missing footer)")?;
-        }
-        writeln!(
-            out,
-            "Tracks:     {}\nSpans:      {}\nCounters:   {}\nDependencies: {}",
-            shard.tracks, shard.spans, shard.counters, shard.dependencies
-        )?;
-        writeln!(
-            out,
-            "Dropped:    {} (queue-full: {}, oversized: {}){}",
-            shard.loss.total(),
-            shard.loss.queue_full,
-            shard.loss.oversized,
-            if shard.end.is_none() {
-                " — checkpointed lower bound"
-            } else {
-                ""
+}
+
+pub fn report(args: ReportArgs) -> Result<()> {
+    ensure!(
+        args.domain.is_none() || args.format == Format::Trace,
+        "--domain applies to --format trace; HTML has a domain selector"
+    );
+    let render = |out: &mut dyn Write| -> Result<()> {
+        match args.format {
+            Format::Trace => write_trace(&args.input, out, args.domain.as_deref()),
+            Format::Text | Format::Html => {
+                let report = analyze(
+                    &args.input,
+                    args.limits.options(args.format == Format::Html),
+                )?;
+                if args.format == Format::Html {
+                    write_html(&report, out)
+                } else {
+                    write_text(&report, out)
+                }
             }
-        )?;
+        }
+    };
+    if let Some(path) = args.output {
+        write_artifact(&path, render)?;
+        eprintln!("Report written to {}", path.display());
+    } else {
+        let mut out = BufWriter::new(std::io::stdout().lock());
+        render(&mut out)?;
+        out.flush()?;
     }
+    Ok(())
+}
+
+pub fn write_artifact(
+    path: &Path,
+    render: impl FnOnce(&mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    ensure!(!path.exists(), "output {} already exists", path.display());
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating report in {}", parent.display()))?;
+    {
+        let mut out = BufWriter::new(file.as_file_mut());
+        render(&mut out)?;
+        out.flush()?;
+    }
+    file.as_file().sync_all()?;
+    file.persist_noclobber(path)
+        .with_context(|| format!("publishing {}", path.display()))?;
     Ok(())
 }

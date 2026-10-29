@@ -7,9 +7,11 @@ Recommended implementation: a **Rust core with thin C/C++ instrumentation adapte
 where native APIs warrant them, plus a **TypeScript browser UI**. See the
 [language decision](docs/architecture.md#language-decision) for alternatives.
 
-The main report will be an interactive HTML timeline showing MPI ranks, CPU
-threads, GPU streams, and I/O activity on a shared time axis. Text summaries and
-self-contained HTML reports will support command-line and batch workflows.
+The main report is an interactive HTML timeline with hierarchical rank, CPU-thread,
+GPU-stream, and I/O tracks. Text summaries, self-contained HTML reports, and
+Chrome Trace/Perfetto export support command-line and batch workflows. Related
+shards share a time axis within their monotonic clock domain; separate hosts/boots
+remain visibly unaligned until clock calibration is available.
 
 Another planned capability is **hardware what-if projection**: estimate how a
 profiled application would perform on a different CPU, GPU, interconnect, storage
@@ -18,7 +20,7 @@ will include runtime/scaling estimates, bottleneck analysis, assumptions and
 uncertainty ranges, and a projected timeline alongside the measured baseline.
 See the [projection plan](docs/hardware-projection.md).
 
-## Implemented: capture foundation
+## Implemented: capture foundation and timeline reports
 
 - Rust workspace: shared schema, streaming capture library, and CLI.
 - Linux process-group supervision, signal forwarding, escalation, and descendant reaping.
@@ -26,9 +28,12 @@ See the [projection plan](docs/hardware-projection.md).
 - Recoverable JSON Lines captures with session/shard IDs and clock-domain metadata.
 - Deterministic, bounded-memory shard merging and text summaries.
 - Tracks, spans, typed attributes, dependency links, and counter records for future collectors.
+- Shared report analysis, offline Canvas timeline, exact-value inspectors, and counter plots.
+- Chrome Trace/Perfetto JSON export and a loopback-only local browser viewer.
+- Synthetic multitrack fixtures, browser tests, and source/bundle consistency checks.
 
-MPI, OpenMP, CUDA, I/O interception, PMU collection, and HTML rendering are planned;
-they are not implemented yet. The process span covers the supervised workload,
+MPI, OpenMP, CUDA, I/O interception, and PMU collection are planned; they are not
+implemented yet. The process span covers the supervised workload,
 including launch, wait, and descendant cleanup. Running `mpirun` currently measures
 the launcher; automatic rank/thread discovery comes with the respective collectors.
 
@@ -41,6 +46,8 @@ cargo build --workspace
 cargo run -p rprof-cli -- --help
 cargo run -p rprof-cli -- record -o demo.rprof.jsonl -- /bin/sleep 0.1
 cargo run -p rprof-cli -- report demo.rprof.jsonl
+cargo run -p rprof-cli -- report demo.rprof.jsonl --format html -o demo.html
+cargo run -p rprof-cli -- view demo.rprof.jsonl --open
 ```
 
 Workloads inherit the current environment, working directory, and standard I/O.
@@ -53,6 +60,23 @@ members of the workload process group are terminated when its leader exits.
 Existing output files are never overwritten. Reports can read incomplete captures
 and bootstrap v1 JSON captures. Executable arguments are passed losslessly to the
 child; non-UTF-8 bytes in the JSON command description are replaced for display.
+
+### Timeline and reference-viewer reports
+
+Open an exported HTML file directly in a modern browser; it works offline. The
+same UI is served by `rprof view`, which prints a `127.0.0.1` URL and accepts a
+fixed `--port` when desired. It serves a snapshot, not live capture updates.
+
+```sh
+target/debug/rprof report fixtures/multitrack.jsonl --format html -o multitrack.html
+target/debug/rprof report fixtures/multitrack.jsonl --format trace --domain 0 -o trace.json
+```
+
+The checked-in fixture demonstrates ranks, OpenMP threads, GPUs, I/O, counters, and
+dependencies without requiring those collectors or hardware. Use the domain
+selector, name/category/rank filter, wheel zoom, drag pan, and clickable bars/points.
+See [reporting](docs/reporting.md) for controls, retention limits, clock handling,
+and reference-viewer compatibility.
 
 ### Multiple shards
 
@@ -84,6 +108,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+Cargo embeds the checked-in UI bundle and needs no Node installation. For UI work,
+use Node 24 and the commands in [ui/README.md](ui/README.md). GitHub CI checks Rust,
+TypeScript, generated assets, and headless browser interactions.
 
 See [architecture](docs/architecture.md), the [implementation plan](docs/roadmap.md),
 and [testing](docs/testing.md), including the GPU/MPI test environments.

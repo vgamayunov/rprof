@@ -15,9 +15,9 @@ clap.workspace = true
 rprof-core.workspace = true
 serde_json.workspace = true
 rprof-capture.workspace = true
+rprof-report.workspace = true
 libc.workspace = true
 signal-hook.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+tiny_http.workspace = true

@@ -31,7 +31,7 @@ fine-grained process/thread events and injected per-child writers arrive with th
 native collectors. Deliberately detached process groups require a future cgroup
 backend. Native allocation-free ingress buffers are also part of collector work.
 
-## 2. Timeline and reports — early vertical slice
+## 2. Timeline and reports — implemented
 
 - Extract report analysis from the CLI; add `report --format text|html`.
 - Build a self-contained HTML timeline: hierarchical tracks, zoom/pan, filtering,
@@ -44,6 +44,14 @@ backend. Native allocation-free ingress buffers are also part of collector work.
 
 **Exit criterion:** a captured command and a representative multitrack fixture
 render correctly in an offline HTML report and a reference trace viewer.
+
+Delivered: shared `rprof-report` analysis; text/HTML/Chrome Trace output; an offline
+TypeScript/Canvas timeline with hierarchical lanes, filtering, zoom/pan, exact-value
+inspectors, counters, and correlations; and `rprof view` serving the same snapshot
+on loopback. Browser-facing integer values are lossless. HTML retention limits are
+explicit, summaries cover the full input snapshot, and multiple clock domains stay
+separate. Synthetic multitrack fixtures, headless browser tests, and Perfetto import
+validation exercise the collection-to-report path. See [reporting](reporting.md).
 
 ## 3. I/O profiling via preload
 
@@ -155,8 +163,9 @@ enough data, without waiting for every collector to be complete.
 
 ## Suggested next task
 
-Deliver phase 2's HTML timeline vertical slice on the streaming reader, including
-synthetic rank/thread/GPU/I/O fixtures and a shared text/HTML report analysis layer.
+Implement phase 3's POSIX I/O preload collector with thin C wrappers and Rust
+buffering, using the existing capture/report path to validate resource identity,
+operation durations, bytes, and thread attribution.
 
 The proposed order can be adjusted once the primary MPI implementation, OpenMP
 runtime, workload scale, and deployment constraints are known. Preferred test

@@ -58,8 +58,9 @@ versioned captures + source/target hardware profiles + workload scaling model
 ```
 
 The CLI, shared data model, supervised process capture, streaming storage,
-deterministic merge, and text summaries are implemented. Hardware/runtime collectors,
-the projection engine, and HTML rendering remain proposed components.
+deterministic merge, shared report analysis, offline HTML timeline, local viewer,
+and Chrome Trace export are implemented. Hardware/runtime collectors and the
+projection engine remain proposed components.
 
 ## Workspace boundaries
 
@@ -74,9 +75,9 @@ the projection engine, and HTML rendering remain proposed components.
 | `rprof-ompt` (planned) | OpenMP Tools interface callbacks |
 | `rprof-cuda` (planned) | CUPTI activity/callback integration and device clock mapping |
 | `rprof-perf` (planned) | Linux PMU counting and sampling |
-| `rprof-report` (planned) | Shared analysis, text and self-contained HTML export |
+| `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
-| `ui/` (planned) | Browser timeline and local HTML GUI using the same report assets |
+| `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |
 
 Keep MPI and CUDA dependencies optional so the base CLI builds without vendor
 SDKs or an MPI installation. Cargo remains the top-level build entry point;
@@ -124,15 +125,23 @@ central writer bottleneck. Measure overhead against uninstrumented baselines.
 
 ## Reporting
 
-The first HTML milestone should show even the initial process span, then expand
-to rank/thread/GPU/I/O tracks as collectors land. Support zoom, pan, filtering,
-span details, counters, and correlation highlighting. Render dense timelines with
-Canvas/WebGL and viewport-based loading rather than one DOM element per event.
+The HTML report shows the process span and all declared rank/thread/GPU/I/O tracks.
+It supports zoom, pan, filtering, span/counter inspection, hierarchy collapse,
+correlation highlighting, and dependency links. TypeScript and Canvas provide
+viewport culling and bounded drawing work; no frontend framework or CDN is needed.
 
-Use common analysis code for text and HTML summaries. Escape workload-provided
-labels and embed data safely in standalone HTML; support offline use without a CDN.
-Add Chrome Trace/Perfetto export early as an independent way to inspect and
-validate captures. Decide on a frontend framework after the timeline prototype.
+`rprof-report` performs full-capture streaming summary analysis and optionally
+retains a bounded event subset for the standalone browser model. Counts and
+inclusive category totals cover the full validated snapshot; omitted timeline
+events and collector loss are reported separately. All large integers are strings
+at the browser boundary, with BigInt-based timeline arithmetic. Data is embedded in
+inert, escaped JSON, and workload labels use text/Canvas rendering.
+
+`rprof view` serves the same self-contained artifact over loopback HTTP. Indexed
+on-demand queries and live updates are future extensions. Chrome Trace export
+streams all selected-domain spans/counters independently of HTML retention limits,
+with bounded correlation reconstruction. See [reporting](reporting.md) and the
+[browser model contract](report-model.md).
 
 ## Hardware what-if projection
 
