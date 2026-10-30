@@ -6,6 +6,7 @@ mod cuda_collector;
 mod mpi_collector;
 mod native_collector;
 mod openmp_collector;
+mod pmu_collector;
 mod record;
 mod report;
 mod supervisor;
@@ -88,6 +89,18 @@ pub(crate) struct RecordArgs {
     /// Target-built CUPTI injection library (default: librprof_cuda.so alongside rprof).
     #[arg(long)]
     cuda_library: Option<PathBuf>,
+    /// Perf event names or rHEX raw encodings (default: cycles,instructions,cache-references,cache-misses,task-clock).
+    #[arg(long, value_delimiter = ',')]
+    pmu_events: Vec<String>,
+    /// Count the root thread alone, or aggregate it with inherited threads/children.
+    #[arg(long, value_enum, default_value_t = PmuScope::WorkloadTree)]
+    pmu_scope: PmuScope,
+    /// Include kernel execution (default: userspace only; no permission fallback).
+    #[arg(long)]
+    pmu_kernel: bool,
+    /// Approximate counter-read interval; final counts are always read after cleanup.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(10..=60000))]
+    pmu_interval_ms: u64,
     /// Grace before SIGKILL after interruption or leader exit with live descendants.
     #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(0..=60000))]
     grace_ms: u64,
@@ -104,6 +117,21 @@ pub(crate) enum CollectorKind {
     #[value(alias = "omp")]
     Openmp,
     Cuda,
+    Pmu,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PmuScope {
+    WorkloadTree,
+    RootThread,
+}
+impl PmuScope {
+    fn name(self) -> &'static str {
+        match self {
+            Self::WorkloadTree => "workload-tree",
+            Self::RootThread => "root-thread",
+        }
+    }
 }
 
 fn main() -> ExitCode {

@@ -31,6 +31,7 @@ pub struct Config {
     pub poll_interval: Duration,
     pub environment: Vec<(OsString, OsString)>,
     pub heartbeat_interval: Duration,
+    pub perf: Option<rprof_perf::ChildSetup>,
 }
 
 impl Default for Config {
@@ -40,6 +41,7 @@ impl Default for Config {
             poll_interval: Duration::from_millis(10),
             environment: Vec::new(),
             heartbeat_interval: Duration::from_millis(100),
+            perf: None,
         }
     }
 }
@@ -290,9 +292,11 @@ pub fn supervise(
     process.args(&command[1..]);
     process.envs(config.environment);
     let tty = foreground.as_ref().map(|value| value.fd);
-    // SAFETY: setpgid and the foreground handoff use only async-signal-safe
-    // syscalls. Transferring in the child before exec avoids a stdin/SIGTTIN
-    // race without blocking Command::spawn's exec-error handshake.
+    let perf = config.perf;
+    // SAFETY: group/terminal setup and optional perf installation use only
+    // syscalls and preallocated/stack data. Perf fds are sent without waiting
+    // for the parent, preserving Command::spawn's exec-error handshake.
+    // Terminal transfer before exec avoids a stdin/SIGTTIN race.
     unsafe {
         process.pre_exec(move || {
             if libc::setpgid(0, 0) != 0 {
@@ -300,6 +304,9 @@ pub fn supervise(
             }
             if let Some(fd) = tty {
                 set_foreground(fd, libc::getpgrp())?;
+            }
+            if let Some(perf) = &perf {
+                perf.install()?;
             }
             Ok(())
         });

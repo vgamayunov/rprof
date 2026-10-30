@@ -359,6 +359,7 @@ dependencies = [
  "rprof-io-protocol",
  "rprof-mpi-protocol",
  "rprof-ompt-protocol",
+ "rprof-perf",
  "rprof-report",
  "serde_json",
  "signal-hook",
@@ -423,6 +424,13 @@ name = "rprof-ompt-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "rprof-perf"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rprof-preload"
 version = "0.1.0"
 dependencies = [
@@ -437,6 +445,7 @@ dependencies = [
  "anyhow",
  "rprof-capture",
  "rprof-core",
+ "rprof-perf",
  "serde",
  "serde_json",
  "tempfile",

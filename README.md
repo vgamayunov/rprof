@@ -47,8 +47,12 @@ read-only feature.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
 - Optional CUDA 13 CUPTI injection adapter with GPU kernels/copies/memsets, CPU API calls,
   stream tracks, launch correlations, device metadata, and source-health reporting.
+- Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
+  capability diagnostics, and PMU text/HTML summaries.
 
-PMU collection is planned. GCC/libgomp support is a planned GNU-runtime
+Hardware counters and multiplexing have been checked against `perf stat` on HBv4;
+software events and unsupported-event behavior were also validated on the H100 VM.
+GCC/libgomp support is a planned GNU-runtime
 adapter; the current OpenMP collector requires OMPT.
 The process span covers the supervised workload,
 including launch, wait, and descendant cleanup. Wrapping only `mpirun` measures
@@ -159,6 +163,18 @@ The adapter uses CUDA injection and CUPTI's concurrent activity collection. GPU
 execution and CPU API durations remain distinct; device/context/stream identities
 and CPU–GPU correlations are preserved. See [CUDA profiling](docs/cuda-profiling.md)
 for SDK compatibility, clock normalization, buffer losses, and validation.
+
+### Collect Linux perf counters
+
+```sh
+target/release/rprof record --collect pmu -o counters.rprof.jsonl -- ./application
+target/release/rprof report counters.rprof.jsonl --format html -o counters.html
+```
+
+Choose events with `--pmu-events`, scope with `--pmu-scope workload-tree|root-thread`,
+and read frequency with `--pmu-interval-ms`. Unavailable events remain explicit;
+counts are never replaced with fabricated zeros. See [PMU profiling](docs/pmu-profiling.md)
+for scaling semantics, permissions, source hardware metadata, and validation status.
 
 ### Multiple shards
 

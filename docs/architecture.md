@@ -64,8 +64,8 @@ deterministic merge, shared report analysis, offline HTML timeline, local viewer
 and Chrome Trace export are implemented, along with POSIX I/O interposition and
 per-file analysis. Initial PMPI call/request profiling and estimated MPI clock
 alignment are also implemented. OMPT host collection and cross-runtime capability
-reporting are implemented for LLVM/Intel. CUDA 13 CUPTI collection is implemented;
-PMU, the GNU-runtime adapter, and
+reporting are implemented for LLVM/Intel. CUDA 13 CUPTI and Linux perf counting are
+implemented, including hardware PMU validation on HBv4; the GNU-runtime adapter and
 the projection engine remain proposed components.
 
 ## Workspace boundaries
@@ -85,7 +85,7 @@ the projection engine remain proposed components.
 | Python/PyTorch adapters (planned) | CPython monitoring/sampling, optional Python bootstrap, PyTorch/Kineto import and correlation |
 | `crates/rprof-cuda` (exists) | Target-SDK C++ CUPTI injection adapter and Rust native transport |
 | `crates/rprof-cuda-protocol` (exists) | Pointer-free CUDA activities, API callbacks, capabilities and diagnostics |
-| `rprof-perf` (planned) | Linux PMU counting and sampling |
+| `crates/rprof-perf` (exists) | Pre-exec Linux perf counters, descriptor handoff, exact readings; sampling remains planned |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
 | `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |

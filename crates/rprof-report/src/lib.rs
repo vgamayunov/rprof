@@ -8,6 +8,7 @@ mod io_summary;
 mod model;
 mod mpi_summary;
 mod openmp_summary;
+mod pmu_summary;
 mod text;
 mod trace;
 

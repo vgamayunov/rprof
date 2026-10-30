@@ -103,6 +103,48 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
             )?;
         }
     }
+    if let Some(pmu) = &report.pmu {
+        writeln!(
+            out,
+            "\nPMU counters (cumulative raw counts; independent events, scaled values are estimates):"
+        )?;
+        for event in &pmu.events {
+            writeln!(
+                out,
+                "  {} / {}: {} [{}; {}]; raw={} {}; enabled={} ns running={} ns ({}%); scaled={}; final={}",
+                event.shard,
+                event.name,
+                event.status,
+                event.scope,
+                event.privilege,
+                event.raw.as_deref().unwrap_or("unavailable"),
+                event.unit,
+                event.time_enabled_ns.as_deref().unwrap_or("unavailable"),
+                event.time_running_ns.as_deref().unwrap_or("unavailable"),
+                event.running_percent.as_deref().unwrap_or("unknown"),
+                event.scaled_estimate.as_deref().unwrap_or("unavailable"),
+                event.final_read
+            )?;
+        }
+        for metrics in &pmu.metrics {
+            writeln!(
+                out,
+                "  {}: estimated IPC={}; cache-miss/reference percent={} (independently scheduled counters)",
+                metrics.shard,
+                metrics.ipc_estimate.as_deref().unwrap_or("unavailable"),
+                metrics
+                    .cache_miss_percent_estimate
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            )?;
+        }
+        for host in &pmu.hosts {
+            writeln!(out, "  PMU source host {}:", host.shard)?;
+            for (key, value) in &host.metadata {
+                writeln!(out, "    {key}: {value}")?;
+            }
+        }
+    }
     if let Some(cuda) = &report.cuda {
         writeln!(
             out,

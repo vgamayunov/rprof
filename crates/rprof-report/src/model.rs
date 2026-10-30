@@ -25,6 +25,50 @@ pub struct Report {
     pub openmp: Option<OpenmpSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cuda: Option<CudaSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pmu: Option<PmuSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PmuSummary {
+    pub hosts: Vec<PmuHost>,
+    pub events: Vec<PmuEvent>,
+    pub metrics: Vec<PmuMetrics>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PmuHost {
+    pub shard: String,
+    pub domain: String,
+    pub metadata: BTreeMap<String, String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PmuEvent {
+    pub shard: String,
+    pub domain: String,
+    pub name: String,
+    pub pid: String,
+    pub scope: String,
+    pub privilege: String,
+    pub event_type: String,
+    pub config: String,
+    pub unit: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub raw: Option<String>,
+    pub time_enabled_ns: Option<String>,
+    pub time_running_ns: Option<String>,
+    pub scaled_estimate: Option<String>,
+    pub running_percent: Option<String>,
+    pub multiplexed: bool,
+    pub samples: String,
+    pub final_read: bool,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PmuMetrics {
+    pub shard: String,
+    pub domain: String,
+    pub ipc_estimate: Option<String>,
+    pub cache_miss_percent_estimate: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

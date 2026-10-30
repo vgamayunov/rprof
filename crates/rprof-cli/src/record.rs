@@ -51,6 +51,25 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mpi_enabled = args.collectors.contains(&CollectorKind::Mpi);
     let openmp_enabled = args.collectors.contains(&CollectorKind::Openmp);
     let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
+    let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
+    let pmu_settings = crate::pmu_collector::Settings {
+        scope: args.pmu_scope,
+        kernel: args.pmu_kernel,
+        interval_ms: args.pmu_interval_ms,
+    };
+    ensure!(
+        pmu_enabled
+            || (args.pmu_events.is_empty()
+                && !args.pmu_kernel
+                && args.pmu_scope == crate::PmuScope::WorkloadTree
+                && args.pmu_interval_ms == 100),
+        "PMU options require --collect pmu"
+    );
+    let mut pmu_prepared = if pmu_enabled {
+        Some(crate::pmu_collector::prepare(&args)?)
+    } else {
+        None
+    };
     ensure!(
         cuda_enabled || args.cuda_library.is_none(),
         "--cuda-library requires --collect cuda"
@@ -156,6 +175,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             mpi_enabled.then_some("mpi"),
             openmp_enabled.then_some("openmp"),
             cuda_enabled.then_some("cuda"),
+            pmu_enabled.then_some("pmu"),
         ]
         .into_iter()
         .flatten()
@@ -177,6 +197,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut mpi_running = None;
     let mut openmp_running = None;
     let mut cuda_running = None;
+    let mut pmu_running = None;
     let mut environment = vec![
         (
             OsString::from("RPROF_SESSION_ID"),
@@ -233,7 +254,12 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         &args.command,
         supervisor::Config {
             grace: Duration::from_millis(args.grace_ms),
-            heartbeat_interval: Duration::from_millis(args.flush_interval_ms),
+            heartbeat_interval: Duration::from_millis(if pmu_enabled {
+                args.flush_interval_ms.min(args.pmu_interval_ms)
+            } else {
+                args.flush_interval_ms
+            }),
+            perf: pmu_prepared.as_ref().map(|p| p.child.clone()),
             environment,
             ..Default::default()
         },
@@ -264,6 +290,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                             start_ns: None,
                         },
                     ))?;
+                    if let Some(prepared) = pmu_prepared.take() {
+                        pmu_running = Some(crate::pmu_collector::Running::start(
+                            prepared,
+                            pmu_settings,
+                            pid,
+                            &mut out,
+                            origin,
+                            now,
+                        )?);
+                    }
                     drop(out);
                     if let Some(prepared) = io_prepared.take() {
                         io_running = Some(prepared.start(Arc::clone(&sink), origin)?);
@@ -279,6 +315,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     }
                 }
                 supervisor::Event::Heartbeat { .. } => {
+                    if let Some(pmu) = &mut pmu_running {
+                        pmu.sample(&mut out, now, false)?;
+                    }
                     out.emit(Event::new(now, Payload::Heartbeat))?;
                     out.recorder.flush()?;
                     if let Some(io) = &io_running {
@@ -312,7 +351,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let cuda_result = cuda_running
         .map(native_collector::Running::finish)
         .transpose();
+    let pmu_result = pmu_running
+        .map(|pmu| {
+            let mut out = sink
+                .lock()
+                .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+            pmu.finish(&mut out, elapsed()?)
+        })
+        .transpose();
     let result = result.and_then(|outcome| {
+        pmu_result?;
         if let Some(io) = io_result? {
             eprintln!("I/O: {} attempted, {} received, {} ingress drops across {} process images", io.attempted, io.received, io.dropped, io.initialized);
             ensure!(io.initialized > 0, "I/O preload collector did not initialize; check dynamic linking, LD_PRELOAD support, and the library path");

@@ -36,6 +36,20 @@ export interface Report {
   mpi?: MpiCallSummary[];
   openmp?: OpenmpSummary | null;
   cuda?: CudaSummary | null;
+  pmu?: PmuSummary | null;
+}
+
+export interface PmuSummary { hosts: PmuHost[]; events: PmuEvent[]; metrics: PmuMetrics[] }
+export interface PmuHost { shard: string; domain: string; metadata: Record<string, string> }
+export interface PmuEvent {
+  shard: string; domain: string; name: string; pid: string; scope: string; privilege: string;
+  event_type: string; config: string; unit: string; status: string; error: string | null;
+  raw: string | null; time_enabled_ns: string | null; time_running_ns: string | null;
+  scaled_estimate: string | null; running_percent: string | null; multiplexed: boolean;
+  samples: string; final_read: boolean;
+}
+export interface PmuMetrics {
+  shard: string; domain: string; ipc_estimate: string | null; cache_miss_percent_estimate: string | null;
 }
 
 export interface CudaSummary {
@@ -265,6 +279,8 @@ export function indexReport(report: Report): Map<string, TrackData> {
   }
   for (const counter of report.counters) {
     if (isCollectorHealth(counter.name)) continue;
+    // An unscheduled perf event returned no measurement, not a measured zero.
+    if (counter.attributes['pmu.role'] === 'count' && counter.attributes['pmu.status'] !== 'measured') continue;
     if (!counters.has(counter.track)) counters.set(counter.track, new Map());
     const groups = counters.get(counter.track)!;
     const series = `${counter.name} [${counter.unit}; ${counter.value_type}]`;
@@ -282,7 +298,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
 
 export function isCollectorHealth(name: string): boolean {
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
-    name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') ||
+    name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') || name.startsWith('pmu.meta.') ||
     /^cuda\.(attempted_events|received_events|ingress_dropped_events|cupti_dropped_records|source_errors|finalized|initialized_images|invalid_timing_records|unattributed_records|unresolved_correlations|ambiguous_correlations)$/.test(name);
 }
 

@@ -180,6 +180,18 @@ traces do not yet provide hardware performance metrics. See [CUDA profiling](cud
 **Exit criterion:** supported counts agree with `perf stat` within an established
 tolerance on controlled workloads, and unsupported events are reported accurately.
 
+**Implemented and validated:** pre-exec `perf_event_open` counting,
+workload-tree/root-thread scopes, generic hardware/software and raw events, exact
+raw/enabled/running values, independent-event scaling and derived estimates,
+source CPU/cache/NUMA context, timeline counters, and text/HTML diagnostics.
+Five-run `perf stat` comparisons passed on HBv4 for cycles (0.0263%), instructions
+(0.000010%), cache and branch counters, thread/fork inheritance, root-thread scope,
+and user+kernel counting. Eight hardware events forced real multiplexing at
+71.54–77.26% running coverage; all scaled-count comparisons passed unchanged
+tolerances. Bus/ref cycles were correctly reported unsupported. Software-event
+comparisons also passed on H100. Sampling and broader CPU/event matrices remain
+follow-ups. See [PMU profiling](pmu-profiling.md).
+
 ## 8. Hardware what-if projection
 
 - Add versioned source/target hardware profiles for CPU, GPU, interconnect, storage,
@@ -269,8 +281,7 @@ integrated GPU collection builds on phase 6. These are planned capabilities.
 
 ## Suggested next task
 
-Implement phase 7's Linux PMU counters with raw/multiplexed count provenance and
-`perf stat` comparisons. Expand the OpenMP runtime matrix and GNU adapter
+Begin phase 8's evidence-aware hardware projection. Expand the OpenMP runtime matrix and GNU adapter
 coverage alongside the remaining collector work.
 
 The proposed order can be adjusted once the primary MPI implementation, OpenMP

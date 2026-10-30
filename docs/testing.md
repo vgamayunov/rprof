@@ -95,6 +95,19 @@ results, CUDA-event and Nsight Systems reference timing, and subscriber/exit con
 The exported H100 trace also imported into Perfetto with six `timed_add` slices,
 35,737,523 ns total kernel duration, 92 flows, and no nonzero import errors.
 
+## PMU checks
+
+`cargo test --workspace` includes exact scaling and summary tests plus native PMU
+fixtures. Software events must be permitted for successful-count and inheritance
+checks; hosts denying perf still run deterministic denial/invalid-option checks.
+`bash scripts/test-pmu.sh reports/fresh-pmu-reference` adds a five-run comparison
+against `perf stat`. See [PMU profiling](pmu-profiling.md#validation-and-current-coverage)
+for the measured software-event results and HBv4 hardware/multiplexing comparisons.
+`--require-multiplexing` in the comparison tool verifies actual reduced running
+coverage in both tools, rather than assuming a large event set was multiplexed.
+Run `python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'` for reference
+CSV/capture parsing tests (also run in CI).
+
 ## Timeline/report checks
 
 Rust tests cover shared summaries, domain offsets/identities, large integers,

@@ -224,12 +224,14 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut mpi = crate::mpi_summary::MpiAnalysis::default();
     let mut openmp = crate::openmp_summary::OpenmpAnalysis::default();
     let mut cuda = crate::cuda_summary::CudaAnalysis::default();
+    let mut pmu = crate::pmu_summary::PmuAnalysis::default();
     let data = scan(path, None, |record| {
         io.observe(&record);
         clocks.observe(&record);
         mpi.observe(&record);
         openmp.observe(&record);
         cuda.observe(&record);
+        pmu.observe(&record);
         if let Record::Chunk(chunk) = record {
             for event in chunk.events {
                 if let Payload::Span(span) = &event.payload {
@@ -520,6 +522,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     };
     let openmp = openmp.finish(&shards, &mut warnings);
     let cuda = cuda.finish(&shards, &mut warnings);
+    let pmu = pmu.finish(&shards, &mut warnings);
     Ok(Report {
         source_bytes: data.source_bytes,
         version: 1,
@@ -569,5 +572,6 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         mpi,
         openmp,
         cuda,
+        pmu,
     })
 }

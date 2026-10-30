@@ -1,5 +1,5 @@
 import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, PmuHost, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 
@@ -87,6 +87,11 @@ class Viewer {
   private cudaErrorPage = 0;
   private cudaSourcePage = 0;
   private selectedCudaRuntime: CudaRuntime | undefined;
+  private pmuEventPage = 0;
+  private pmuMetricPage = 0;
+  private pmuHostPage = 0;
+  private pmuMetadataPage = 0;
+  private selectedPmuHost: PmuHost | undefined;
   private theme: Theme = startingTheme;
   private colors = canvasThemes[startingTheme];
 
@@ -103,6 +108,7 @@ class Viewer {
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p>Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only</p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><details id="openmp-runtimes"><summary>Runtime and callback registration details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
     if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
+    if (report.pmu) root.insertAdjacentHTML('beforeend', `<section class="io-section pmu-section" id="pmu-panel"><div class="io-heading"><div><h2>Linux perf counters (PMU)</h2><p>Selected clock domain · workload-tree aggregates or root-thread counts, not per-thread attribution. Hardware, software and raw perf events are distinguished below; software task-clock is not a hardware metric.</p></div><span id="pmu-count"></span></div><p class="io-note">Timeline pmu.EVENT.raw samples are cumulative raw counts, not rates. A missing or failed read is unknown, not zero. Scaled count = raw × enabled / running is an estimate under multiplexing, not an exact count. Events are independently scheduled: IPC and cache-miss ratios are estimates, not jointly scheduled measurements; only valid final pairs yield metrics.</p><div class="io-wrap"><table id="pmu-events"><thead><tr><th>Event / perf type</th><th>PID / shard</th><th>Scope / privilege</th><th>Status / error</th><th>Raw / unit</th><th>Enabled / running (exact ns)</th><th>Running %</th><th>Scaled estimate</th><th>Final read / samples</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-event-pager"></div><h3>Estimated ratios <span id="pmu-metric-count"></span></h3><div class="io-wrap"><table id="pmu-metrics"><thead><tr><th>Shard</th><th>IPC estimate (instructions / cycles)</th><th>Cache-miss estimate (%)</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-metric-pager"></div><details id="pmu-hosts"><summary>Host context at launch (not continuously sampled CPU frequency) <span id="pmu-host-count"></span></summary><p class="io-note">Kernel, CPUID model/vendor, affinity, CPU0 cache, NUMA and frequency context where available. Frequency metadata is launch-time context, not a continuous frequency trace.</p><div id="pmu-host-list"></div><div class="io-pager" id="pmu-host-pager"></div><div id="pmu-host-detail"></div></details></section>`);
     const legend = root.querySelector('.timeline-footer span')!;
     legend.append(node('i', 'legend-swatch mpi-key'), document.createTextNode(' MPI'));
     if (report.openmp) legend.append(node('i', 'legend-swatch openmp-key'), document.createTextNode(' OpenMP'));
@@ -294,6 +300,9 @@ class Viewer {
     this.selectedCudaDevice = undefined;
     this.selectedCudaRuntime = undefined;
     if (this.report.cuda) this.renderCuda();
+    this.pmuEventPage = this.pmuMetricPage = this.pmuHostPage = this.pmuMetadataPage = 0;
+    this.selectedPmuHost = undefined;
+    if (this.report.pmu) this.renderPmu();
     this.selection = undefined;
     this.related.clear();
     this.showDetails();
@@ -587,6 +596,77 @@ class Viewer {
     detail.append(errors);
     const errorPager = node('div', 'io-pager'); errorPager.id = 'cuda-error-pager'; detail.append(errorPager);
     this.renderPager(errorPager, runtime.errors.length, this.cudaErrorPage, page => { this.cudaErrorPage = page; this.renderCudaRuntimeDetail(); });
+  }
+
+  private renderPmu(): void {
+    const pmu = this.report.pmu;
+    if (!pmu) return;
+    const domain = this.domain?.id;
+    const events = pmu.events.filter(event => event.domain === domain);
+    const metrics = pmu.metrics.filter(metric => metric.domain === domain);
+    const hosts = pmu.hosts.filter(host => host.domain === domain);
+    this.get('pmu-count').textContent = `${events.length} events`;
+    const body = this.get('pmu-events').querySelector('tbody')!; body.replaceChildren();
+    const typeName = (type: string): string => ({ '0': 'Hardware', '1': 'Software', '4': 'Raw hardware' })[type as '0' | '1' | '4'] ?? `Perf type ${type}`;
+    for (const event of events.slice(this.pmuEventPage * IO_PAGE_SIZE, (this.pmuEventPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      const identity = node('td'); identity.append(node('strong', '', event.name), node('div', 'io-note', `${typeName(event.event_type)} · config ${event.config}`));
+      const valid = event.status === 'measured';
+      const count = valid && event.raw !== null ? event.raw : 'Unavailable';
+      row.append(identity, node('td', '', `PID ${event.pid} · ${event.shard}`),
+        node('td', '', `${event.scope} · ${event.privilege}`),
+        node('td', '', `${event.status}${event.error === null ? '' : ` · ${event.error}`}`),
+        node('td', '', `${count} ${event.unit}`),
+        node('td', '', `${optionalNs(event.time_enabled_ns)} / ${optionalNs(event.time_running_ns)}`),
+        node('td', '', valid && event.running_percent !== null ? `${event.running_percent}%` : 'Unavailable'),
+        node('td', '', valid && event.time_running_ns !== '0' && event.scaled_estimate !== null ? event.scaled_estimate : 'Unavailable'),
+        node('td', '', `${event.final_read ? 'Yes' : 'No · checkpoint, not a workload total'} / ${event.samples}`));
+      body.append(row);
+    }
+    if (!events.length) this.emptyCudaRow(body, 9, 'No PMU events recorded in this clock domain.');
+    this.renderPager(this.get('pmu-event-pager'), events.length, this.pmuEventPage, page => { this.pmuEventPage = page; this.renderPmu(); });
+
+    this.get('pmu-metric-count').textContent = `· ${metrics.length} shards`;
+    const metricBody = this.get('pmu-metrics').querySelector('tbody')!; metricBody.replaceChildren();
+    for (const metric of metrics.slice(this.pmuMetricPage * IO_PAGE_SIZE, (this.pmuMetricPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', metric.shard),
+        node('td', '', metric.ipc_estimate ?? 'Unavailable — no valid final pair'),
+        node('td', '', metric.cache_miss_percent_estimate === null ? 'Unavailable — no valid final pair' : `${metric.cache_miss_percent_estimate}%`));
+      metricBody.append(row);
+    }
+    if (!metrics.length) this.emptyCudaRow(metricBody, 3, 'No final valid PMU metric pairs in this clock domain.');
+    this.renderPager(this.get('pmu-metric-pager'), metrics.length, this.pmuMetricPage, page => { this.pmuMetricPage = page; this.renderPmu(); });
+
+    this.get('pmu-host-count').textContent = `· ${hosts.length} hosts`;
+    const list = this.get('pmu-host-list'); list.replaceChildren();
+    for (const host of hosts.slice(this.pmuHostPage * IO_PAGE_SIZE, (this.pmuHostPage + 1) * IO_PAGE_SIZE)) {
+      const button = node('button', 'io-file', `Shard ${host.shard}`); button.type = 'button';
+      button.addEventListener('click', () => { this.selectedPmuHost = host; this.pmuMetadataPage = 0; this.renderPmuHostDetail(); });
+      const line = node('div', 'openmp-runtime-row'); line.append(button, node('span', '', `${Object.keys(host.metadata).length} metadata entries`));
+      list.append(line);
+    }
+    if (!hosts.length) list.append(node('p', 'io-note', 'No host metadata recorded in this clock domain.'));
+    this.renderPager(this.get('pmu-host-pager'), hosts.length, this.pmuHostPage, page => { this.pmuHostPage = page; this.renderPmu(); });
+    this.renderPmuHostDetail();
+  }
+
+  private renderPmuHostDetail(): void {
+    const detail = this.get('pmu-host-detail'); detail.replaceChildren();
+    const host = this.selectedPmuHost;
+    if (!host) return;
+    detail.append(node('h3', '', `Launch-time host metadata · shard ${host.shard}`));
+    const entries = Object.entries(host.metadata);
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'pmu-host-metadata';
+    const head = node('thead'); const heading = node('tr');
+    heading.append(node('th', '', 'Key'), node('th', '', 'Value')); head.append(heading); table.append(head);
+    const body = node('tbody');
+    for (const [key, value] of entries.slice(this.pmuMetadataPage * IO_PAGE_SIZE, (this.pmuMetadataPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', key), node('td', '', value)); body.append(row);
+    }
+    if (!entries.length) this.emptyCudaRow(body, 2, 'No host metadata entries recorded.');
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'pmu-metadata-pager'; detail.append(pager);
+    this.renderPager(pager, entries.length, this.pmuMetadataPage, page => { this.pmuMetadataPage = page; this.renderPmuHostDetail(); });
   }
 
   private hitAt(x: number, y: number): Hit | undefined {

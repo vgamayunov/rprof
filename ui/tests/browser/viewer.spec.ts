@@ -329,11 +329,117 @@ test('I/O panel paginates exact values, shows per-operation latency, escapes hos
 });
 
 test('older reports without an io field show an empty I/O panel', async ({ page }) => {
-  await loaded(page, injected('old-model', report => { delete report.io; delete report.openmp; delete report.cuda; }));
+  await loaded(page, injected('old-model', report => { delete report.io; delete report.openmp; delete report.cuda; delete report.pmu; }));
   await expect(page.locator('#io-count')).toHaveText('0 files');
   await expect(page.locator('#io-table')).toContainText('No per-file I/O recorded');
   await expect(page.locator('#openmp-panel')).toHaveCount(0);
   await expect(page.locator('#cuda-panel')).toHaveCount(0);
+  await expect(page.locator('#pmu-panel')).toHaveCount(0);
+});
+
+test('PMU panel preserves exact counts, unavailable reads, final state and multiplex context in dark and light modes', async ({ page }) => {
+  const huge = '340282366920938463463374607431768211455';
+  const hostile = '<img src=x onerror="globalThis.rprofInjected=true">';
+  const url = injected('pmu-values', report => {
+    const event = (name: string, status: string, extras: Record<string, unknown> = {}) => ({
+      shard: 's0', domain: '0', name, pid: '9007199254740993', scope: 'workload-tree', privilege: 'user+kernel',
+      event_type: '0', config: '0', unit: 'count', status, error: null, raw: null, time_enabled_ns: null,
+      time_running_ns: null, scaled_estimate: null, running_percent: null, multiplexed: false,
+      samples: '0', final_read: false, ...extras,
+    });
+    report.pmu = { hosts: [{ shard: 's0', domain: '0', metadata: { kernel: '6.12', cpu_model: hostile, affinity: '0-3',
+      cpu0_cache0: 'L1', numa: 'node0', frequency: 'launch-time only', [hostile]: hostile } }],
+      events: [event('cycles', 'measured', { raw: huge, time_enabled_ns: huge, time_running_ns: '9007199254740993',
+        running_percent: '50.000', scaled_estimate: huge, multiplexed: true, final_read: true, samples: '17' }),
+      event('task-clock', 'measured', { scope: 'root-thread', privilege: 'user', event_type: '1', unit: 'ns', raw: '0',
+        time_enabled_ns: '100', time_running_ns: '100', running_percent: '100.000', scaled_estimate: '0', final_read: true, samples: '1' }),
+      event('raw-event', 'measured', { event_type: '4', config: '9007199254740993', raw: '9007199254740993',
+        time_enabled_ns: '100', time_running_ns: '0', scaled_estimate: null, final_read: false, samples: '2' }),
+      ...['permission_denied', 'unsupported', 'unsupported_or_invalid', 'resource_unavailable', 'read_error', 'not_counted'].map(status =>
+        event(status, status, { error: hostile, raw: null, time_enabled_ns: null, time_running_ns: null }))],
+      metrics: [{ shard: 's0', domain: '0', ipc_estimate: null, cache_miss_percent_estimate: null }] };
+    const track = report.tracks.find((entry: any) => entry.rank === 0 && entry.parent === null);
+    report.counters.push({ track: track.id, name: 'pmu.meta.event', timestamp_ns: '100', value: '1',
+      value_type: 'integer', unit: 'metadata', attributes: {} },
+    { track: track.id, name: 'pmu.cycles.raw', timestamp_ns: '1000000', value: huge,
+      value_type: 'integer', unit: 'count', attributes: { 'pmu.time_enabled_ns': huge, 'pmu.time_running_ns': '10', 'pmu.read_window_ns': '1000000' } });
+  });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loaded(page, url);
+  await expect(page.locator('#pmu-panel')).toHaveCSS('background-color', 'rgb(24, 42, 56)');
+  await expect(page.locator('#pmu-count')).toHaveText('9 events');
+  await expect(page.locator('#pmu-events tbody tr').first()).toContainText(huge);
+  await expect(page.locator('#pmu-events tbody tr').first()).toContainText('Hardware');
+  await expect(page.locator('#pmu-events tbody tr').first()).toContainText('9007199254740993');
+  await expect(page.locator('#pmu-events tbody tr').first()).toContainText('workload-tree · user+kernel');
+  await expect(page.locator('#pmu-events tbody tr').nth(1)).toContainText('Software');
+  await expect(page.locator('#pmu-events tbody tr').nth(1)).toContainText('root-thread · user');
+  await expect(page.locator('#pmu-events tbody tr').nth(1)).toContainText('0 ns');
+  await expect(page.locator('#pmu-events tbody tr').nth(2)).toContainText('Raw hardware');
+  await expect(page.locator('#pmu-events tbody tr').nth(2)).toContainText('No · checkpoint, not a workload total');
+  await expect(page.locator('#pmu-events tbody tr').nth(2).locator('td').nth(7)).toHaveText('Unavailable');
+  for (const status of ['permission_denied', 'unsupported', 'unsupported_or_invalid', 'resource_unavailable', 'read_error', 'not_counted']) {
+    const row = page.locator('#pmu-events tbody tr').filter({ has: page.locator('strong', { hasText: new RegExp(`^${status}$`) }) });
+    await expect(row.locator('td').nth(3)).toContainText(status);
+    await expect(row.locator('td').nth(4)).toHaveText('Unavailable count');
+  }
+  await expect(page.locator('#pmu-metrics tbody')).toContainText('Unavailable — no valid final pair');
+  await expect(page.locator('#pmu-panel')).toContainText('cumulative raw counts, not rates');
+  await expect(page.locator('#pmu-panel')).toContainText('independently scheduled');
+  await page.locator('#pmu-hosts summary').click();
+  await page.locator('#pmu-host-list .io-file').click();
+  await expect(page.locator('#pmu-host-metadata')).toContainText('cpu_model');
+  await expect(page.locator('#pmu-host-metadata')).toContainText(hostile);
+  await page.locator('#filter-input').fill('pmu.meta');
+  await expect(page.locator('#timeline-tooltip')).toBeHidden();
+  await page.locator('#filter-input').fill('pmu.cycles.raw');
+  await clickEvent(page, 'pmu.cycles.raw', 'counter', 0);
+  await expect(page.locator('#detail-content')).toContainText(huge);
+  await expect(page.locator('#detail-content')).toContainText('pmu.time_enabled_ns');
+  await expect(page.locator('#detail-content')).toContainText('pmu.time_running_ns');
+  await expect(page.locator('#detail-content')).toContainText('pmu.read_window_ns');
+  await page.getByRole('button', { name: 'Switch to light theme' }).click();
+  await expect(page.locator('#pmu-panel')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  expect(await page.evaluate(() => 'rprofInjected' in globalThis)).toBe(false);
+  expect(await page.locator('img').count()).toBe(0);
+});
+
+test('PMU event, metric, host and host-metadata lists page by domain and reset on domain change', async ({ page }) => {
+  await loaded(page, injected('pmu-pages', report => {
+    const event = (domain: string, name: string) => ({ shard: 's', domain, name, pid: '3', scope: 'root-thread',
+      privilege: 'user', event_type: '0', config: '0', unit: 'count', status: 'measured', error: null,
+      raw: '1', time_enabled_ns: '10', time_running_ns: '10', scaled_estimate: '1', running_percent: '100.000',
+      multiplexed: false, samples: '1', final_read: true });
+    const metric = (domain: string, shard: string) => ({ domain, shard, ipc_estimate: '1.500000', cache_miss_percent_estimate: '2.500000' });
+    const host = (domain: string, shard: string) => ({ domain, shard,
+      metadata: Object.fromEntries(Array.from({ length: 101 }, (_, i) => [`key-${i}`, `value-${i}`])) });
+    report.pmu = { events: [...Array.from({ length: 101 }, (_, i) => event('0', `event-${i}`)), event('1', 'foreign-event')],
+      metrics: [...Array.from({ length: 101 }, (_, i) => metric('0', `metric-${i}`)), metric('1', 'foreign-metric')],
+      hosts: [...Array.from({ length: 101 }, (_, i) => host('0', `host-${i}`)), host('1', 'foreign-host')] };
+  }));
+  await expect(page.locator('#pmu-events tbody tr')).toHaveCount(100);
+  await expect(page.locator('#pmu-metrics tbody tr')).toHaveCount(100);
+  await expect(page.locator('#pmu-events')).not.toContainText('foreign-event');
+  await page.locator('#pmu-event-pager button').last().click();
+  await expect(page.locator('#pmu-event-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#pmu-events tbody')).toContainText('event-100');
+  await page.locator('#pmu-metric-pager button').last().click();
+  await expect(page.locator('#pmu-metric-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#pmu-metrics tbody')).toContainText('metric-100');
+  await page.locator('#pmu-hosts summary').click();
+  await expect(page.locator('#pmu-host-list .openmp-runtime-row')).toHaveCount(100);
+  await page.locator('#pmu-host-list .io-file').first().click();
+  await expect(page.locator('#pmu-host-metadata tbody tr')).toHaveCount(100);
+  await page.locator('#pmu-metadata-pager button').last().click();
+  await expect(page.locator('#pmu-metadata-pager')).toContainText('101–101 of 101');
+  await page.locator('#pmu-host-pager button').last().click();
+  await expect(page.locator('#pmu-host-pager')).toContainText('101–101 of 101');
+  await page.locator('#domain-select').selectOption('1');
+  await expect(page.locator('#pmu-count')).toHaveText('1 events');
+  await expect(page.locator('#pmu-events')).toContainText('foreign-event');
+  await expect(page.locator('#pmu-metrics')).toContainText('foreign-metric');
+  await expect(page.locator('#pmu-host-list')).toContainText('foreign-host');
+  await expect(page.locator('#pmu-host-detail')).toBeEmpty();
 });
 
 test('CUDA panel filters domains, pages all arrays, shows exact values and partial source health safely in light mode', async ({ page }) => {

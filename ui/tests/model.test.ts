@@ -19,6 +19,23 @@ test('CUDA metadata and diagnostic counters are not timeline samples', () => {
   assert.equal(indexReport(report).get('t')?.counters.size, 0);
 });
 
+test('PMU metadata is diagnostic while cumulative raw perf counts remain timeline samples', () => {
+  for (const name of ['pmu.meta.event', 'pmu.meta.host.kernel', 'pmu.meta.read_error']) {
+    assert.equal(isCollectorHealth(name), true, name);
+  }
+  assert.equal(isCollectorHealth('pmu.cycles.raw'), false);
+  const report = { tracks: [{ id: 't' }], spans: [], counters: [
+    { track: 't', name: 'pmu.meta.event', value: '1', timestamp_ns: '0', value_type: 'integer', unit: 'metadata', attributes: {} },
+    { track: 't', name: 'pmu.instructions.raw', value: '0', timestamp_ns: '0', value_type: 'integer', unit: 'count',
+      attributes: { 'pmu.role': 'count', 'pmu.status': 'not_counted', 'pmu.time_running_ns': '0' } },
+    { track: 't', name: 'pmu.cycles.raw', value: '340282366920938463463374607431768211455', timestamp_ns: '1',
+      value_type: 'integer', unit: 'count', attributes: { 'pmu.time_enabled_ns': '100', 'pmu.time_running_ns': '50', 'pmu.read_window_ns': '25' } },
+  ] } as unknown as Report;
+  const series = indexReport(report).get('t')!.counters;
+  assert.deepEqual([...series.keys()], ['pmu.cycles.raw [count; integer]']);
+  assert.equal(series.values().next().value?.[0]?.counter.attributes['pmu.time_running_ns'], '50');
+});
+
 test('CUDA device activity matches full image/shard/domain identity', () => {
   const device = { shard: 's', domain: '0', instance: 'image', device: '0' };
   const activity = { ...device, context: 'c', stream: '1' };

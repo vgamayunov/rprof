@@ -31,6 +31,15 @@
 .cuda-section summary{cursor:pointer;color:#a6e2cb;font-size:12px;font-weight:600}
 .cuda-errors{max-height:300px;overflow:auto;overflow-wrap:anywhere}
 .cuda-errors p{margin:5px 0}
+.pmu-section .io-wrap table{min-width:1250px}
+.pmu-section #pmu-metrics,.pmu-section #pmu-host-metadata{min-width:650px}
+.pmu-section h3{font-size:14px;overflow-wrap:anywhere;margin:16px 0 8px}
+.pmu-section h3 span,.pmu-section summary span{color:#91adba;font-size:11px;font-weight:400}
+.pmu-section details{margin-top:16px;border-top:1px solid #324a58;padding-top:12px}
+.pmu-section summary{cursor:pointer;color:#a6e2cb;font-size:12px;font-weight:600}
+.pmu-section #pmu-host-detail{border-top:1px solid #324a58;margin-top:14px}
+.pmu-section #pmu-host-detail:empty{display:none}
+.pmu-section #pmu-host-metadata td{white-space:normal;overflow-wrap:anywhere;max-width:660px}
 
 /* Theme overrides keep the shared report/viewer layout unchanged. */
 :root{color-scheme:dark}
@@ -68,12 +77,15 @@
 :root[data-theme="light"] .openmp-section summary span,
 :root[data-theme="light"] .openmp-runtime-row{color:#526b79}
 :root[data-theme="light"] .cuda-section h3 span{color:#526b79}
+:root[data-theme="light"] .pmu-section h3 span,
+:root[data-theme="light"] .pmu-section summary span{color:#526b79}
 :root[data-theme="light"] .eyebrow,
 :root[data-theme="light"] .side-title,
 :root[data-theme="light"] .io-heading span,
 :root[data-theme="light"] .io-file,
 :root[data-theme="light"] .openmp-section summary{color:#176b61}
 :root[data-theme="light"] .cuda-section summary{color:#176b61}
+:root[data-theme="light"] .pmu-section summary{color:#176b61}
 :root[data-theme="light"] .toolbar-heading span{color:#805600}
 :root[data-theme="light"] .field select,
 :root[data-theme="light"] .field input,
@@ -100,6 +112,8 @@
 :root[data-theme="light"] .cuda-section details,
 :root[data-theme="light"] .cuda-section #cuda-device-detail,
 :root[data-theme="light"] .cuda-section #cuda-runtime-detail{border-color:#d6e0e8}
+:root[data-theme="light"] .pmu-section details,
+:root[data-theme="light"] .pmu-section #pmu-host-detail{border-color:#d6e0e8}
 :root[data-theme="light"] .plot-scroll,
 :root[data-theme="light"] .detail-content{scrollbar-color:#9bb0be #f8fafc}
 :root[data-theme="light"] .badge{background:#edf3f7;color:#405f70;border-color:#b9cdd9}
