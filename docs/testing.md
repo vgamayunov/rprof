@@ -65,6 +65,21 @@ supervised user+system CPU time was 0.017 s, with no dropped events. This is a
 sanity check of idle supervision, not a substitute for representative HPC overhead
 measurements once native collectors are implemented.
 
+## Native I/O checks
+
+`make test` builds the optional preload shared library, then runs the full Rust
+suite including native C fixtures. The I/O integration suite also builds the library
+on demand under `cargo test`; set `RPROF_TEST_IO_LIBRARY` to use a prebuilt artifact.
+A C compiler, make, and Linux/glibc development headers are required for these tests.
+
+Fixtures cover byte counts/content, return values/errno, file modes, invalid
+pointers, partial operations, large-file/fortified aliases, descriptor reuse and
+duplication, multiple threads, normal fork/exec, signal termination, deferred
+pthread cancellation, long/non-UTF-8 paths, and ingress/writer loss accounting.
+Browser tests include a real preload capture, per-file summaries, and named MPI
+call filtering/hover/inspection. See [I/O profiling](io-profiling.md) for the support
+matrix and cached-I/O overhead probe.
+
 ## Timeline/report checks
 
 Rust tests cover shared summaries, domain offsets/identities, large integers,
@@ -96,6 +111,37 @@ rprof report fixtures/multitrack.jsonl --format trace --domain 0 -o reference.js
 trace_processor_shell query reference.json "SELECT name, ts, dur FROM slice"
 trace_processor_shell query reference.json "SELECT name, value FROM stats WHERE severity = 'error' AND value > 0"
 ```
+
+## MPI checks
+
+Pure Rust tests cover request/source timestamps, tracking release, correlation
+namespaces, combined collector loss, and explicit-versus-missing clock calibration.
+`bash scripts/test-mpi-local.sh` builds the PMPI adapter and runs local two-rank
+Open MPI fixtures; GitHub CI has a separate MPI job for it. The script requires
+Open MPI, a C compiler, Rust, make, and Node for report assertions.
+
+Two HBv4 nodes were used for real InfiniBand validation of basic calls, wait/test
+variants and truncation, combined MPI/I/O, and MPI_THREAD_MULTIPLE. See
+[MPI profiling](mpi-profiling.md) for counts, runtime settings, and coverage, and
+[glibc compatibility](glibc-compatibility.md) for target artifact requirements.
+
+## OpenMP checks
+
+Base Rust tests exercise cross-collector identity/correlation namespaces, migrated
+task segments, detached late fulfillment, and sequence-gap invalidation. The native
+OpenMP integration suite includes an explicit no-runtime failure and actual GCC
+runtime probing without substitution. Optional Clang/runtime tests run with:
+
+```sh
+bash scripts/test-openmp.sh
+```
+
+Use the `RPROF_TEST_OMP_*` variables described in [OpenMP profiling](openmp-profiling.md)
+for alternate toolchains. LLVM libomp 20.1.8 and Intel libiomp5 2025.3 passed these
+checks locally with Clang 20.1.8 code generation. Both also passed two-rank/four-thread
+hybrid validation on HBv4. GitHub CI has an OpenMP job using Clang/libomp.
+Browser tests cover the optional panel, callback capability versus observation,
+domain filters, exact large values, and older models without OpenMP summaries.
 
 ## Preferred remote test environments
 

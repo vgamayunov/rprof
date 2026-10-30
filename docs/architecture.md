@@ -33,9 +33,11 @@ concurrency correctness and a more involved dependency/build setup. C alone is a
 good adapter language but less attractive for the complete analysis/storage stack.
 
 Go is less suitable for injected hot-path collectors because of its runtime and
-C interop overhead; it offers little benefit over Rust for this project. No Python
-component is proposed. TypeScript is for browser interaction/rendering; aggregation
-stays in Rust, with WebAssembly an option only if browser-side analysis needs it.
+C interop overhead; it offers little benefit over Rust for this project. Optional
+Python/PyTorch integration will use a small application-facing package and native
+adapters where needed. Collection infrastructure, analysis, and reports remain
+Rust-based. TypeScript handles browser interaction/rendering, with WebAssembly an
+option only if browser-side analysis needs it.
 
 ## Data flow
 
@@ -59,8 +61,11 @@ versioned captures + source/target hardware profiles + workload scaling model
 
 The CLI, shared data model, supervised process capture, streaming storage,
 deterministic merge, shared report analysis, offline HTML timeline, local viewer,
-and Chrome Trace export are implemented. Hardware/runtime collectors and the
-projection engine remain proposed components.
+and Chrome Trace export are implemented, along with POSIX I/O interposition and
+per-file analysis. Initial PMPI call/request profiling and estimated MPI clock
+alignment are also implemented. OMPT host collection and cross-runtime capability
+reporting are implemented for LLVM/Intel; CUDA/PMU, the GNU-runtime adapter, and
+the projection engine remain proposed components.
 
 ## Workspace boundaries
 
@@ -70,20 +75,23 @@ projection engine remain proposed components.
 | `crates/rprof-capture` (exists) | Bounded writer, recovery/validation reader, shard merge and loss accounting |
 | `crates/rprof-cli` (exists) | CLI, Linux process supervision, capture configuration, text summary |
 | `rprof-collector` (planned) | Native callback lifecycle and allocation-free per-thread ingress buffers |
-| `rprof-preload` (planned shared library) | Dynamically linked POSIX I/O interception, C wrappers and Rust buffering |
-| `rprof-mpi` (planned) | PMPI wrappers; implementation-specific ABI adapters where needed |
-| `rprof-ompt` (planned) | OpenMP Tools interface callbacks |
+| `crates/rprof-preload` (exists) | C POSIX wrappers and allocation-free Rust runtime, linked into `librprof_io.so` |
+| `crates/rprof-io-protocol` (exists) | Fixed-layout same-host I/O observations and shared counters |
+| `crates/rprof-mpi` (exists) | Target-header PMPI wrappers and Rust native transport |
+| `crates/rprof-mpi-protocol` (exists) | Pointer-free MPI wire observations |
+| `crates/rprof-ompt` (exists) | OMPT callbacks and Rust transport; runtime-negotiated capabilities |
+| `crates/rprof-ompt-protocol` (exists) | Pointer-free host callback observations and per-thread sequences |
+| Python/PyTorch adapters (planned) | CPython monitoring/sampling, optional Python bootstrap, PyTorch/Kineto import and correlation |
 | `rprof-cuda` (planned) | CUPTI activity/callback integration and device clock mapping |
 | `rprof-perf` (planned) | Linux PMU counting and sampling |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
-| `rprof-remote` (planned) | SSH transport, capture-source adapters, remote session control and reconnectable transfer |
 | `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |
 
 Keep MPI and CUDA dependencies optional so the base CLI builds without vendor
-SDKs or an MPI installation. Cargo remains the top-level build entry point;
-adapter crates can compile small C/C++ sources through the `cc` build dependency.
-Add a larger native build system only if integration complexity justifies it.
+SDKs or an MPI installation. Cargo builds the Rust workspace; `make preload` links
+the optional C interposition surface around the Rust static library. This separate
+link step preserves C variadic exports that a Rust cdylib export map would hide.
 Use narrow C ABI boundaries and generated bindings where appropriate. Do not
 unwind Rust panics across foreign callbacks.
 
@@ -118,11 +126,20 @@ unwind Rust panics across foreign callbacks.
 | CUDA | CUPTI activities for kernels/copies plus callbacks for host APIs | Host API duration is not GPU execution duration; correlate device/stream operations; detect support and buffer loss |
 | I/O | `LD_PRELOAD` interposition on selected POSIX functions | Reentrancy guards, `errno`, partial I/O, descriptor reuse, fork/exec, and profiler self-I/O exclusion; static binaries/direct syscalls bypass interception |
 | PMU | `perf_event_open` counters, then optional sampling | Permissions, event availability, thread/process scope, multiplex scaling via time enabled/running, and CPU topology |
+| Python | Optional CPython monitoring/profiling and stack sampling | Interpreter/version compatibility, async/generator semantics, native-thread identity, GIL/free-threaded distinctions |
+| PyTorch | `torch.profiler`/Kineto import first, then optional runtime integration | Operator/autograd metadata, CPU–GPU correlation, distributed backends, profiler ownership and version coverage |
 
 Collectors should avoid blocking, formatting, symbolization, and allocation on hot
 paths where possible. Use bounded thread-local buffering, explicit event-loss
 counts, and deferred processing. Start with per-process/per-rank files to avoid a
 central writer bottleneck. Measure overhead against uninstrumented baselines.
+
+The I/O collector currently sends fixed observations to the supervising process
+through inherited local datagram/shared-memory descriptors. A bounded raw queue
+decouples receipt from JSON conversion, and all observed process/thread/file tracks
+are written to that invocation's shard. Native callbacks allocate no event objects
+and own no writer threads. The format separates ingress drops from writer loss.
+See [I/O profiling](io-profiling.md) for lifecycle, resource bounds, and limitations.
 
 ## Reporting
 
@@ -144,15 +161,36 @@ streams all selected-domain spans/counters independently of HTML retention limit
 with bounded correlation reconstruction. See [reporting](reporting.md) and the
 [browser model contract](report-model.md).
 
+## OpenMP runtime coverage
+
+GCC libgomp, LLVM libomp, and Intel libiomp5 are explicit support targets. OMPT
+handles LLVM/Intel initially; a GNU ABI backend is planned for libgomp releases
+without OMPT. Compiler/runtime pairs are validated separately. Registration status,
+received callback counts, unmatched endpoints, and sequence gaps remain visible.
+Task lifetime and scheduled execution are separate, and wait/implicit scopes are
+inclusive rather than estimates of CPU utilization.
+
+Native collectors share a process-image hash and physical thread registry, with
+collector-specific correlation namespaces. This permits MPI, I/O, and OpenMP events
+to appear on the same thread while keeping exec/process instances distinct. See
+[OpenMP profiling](openmp-profiling.md) and [runtime support](openmp-runtimes.md).
+
 ## Remote operation
 
-Support a remote query/view service reached by an SSH-forwarded browser port and a
-local backend reaching a remote worker over SSH stdio. Both modes reuse the same
-capture-source/query/session abstractions and renderer. Target-local buffering is
-independent of transport; persistent job ownership is independent of viewer or SSH
-connection lifetime. The existing loopback snapshot viewer supports the manual
-tunnel pattern already. Automated deployment, session control, resumable transfers,
-and live/indexed queries are planned in [remote operation](remote-operation.md).
+For the first version, users launch collection directly on the remote system and
+view saved captures through an SSH tunnel to the existing loopback `rprof view`
+server. This uses current commands and adds no remote service or orchestration
+code. A later read-only remote-file source may let the local GUI fetch/cache an
+existing capture for local analysis. See [remote operation](remote-operation.md).
+
+## Python and PyTorch
+
+Add language/framework adapters without making Python or PyTorch a dependency of
+the base CLI. Normalize imported or collected events into the shared report model,
+retaining source units, precision, correlation namespaces, profiler schedules, and
+provenance. Python frames, native runtime calls, PyTorch operators, and GPU activity
+are separate attribution layers; overlapping durations must not be double-counted
+as total application time. See [Python and PyTorch](python-pytorch.md).
 
 ## Hardware what-if projection
 

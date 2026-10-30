@@ -140,13 +140,25 @@ fn main() -> Result<()> {
                 track_id: 0,
                 name: "solver step".into(),
                 correlation_id: 99,
+                start_ns: None,
             },
         ));
         events.extend([
             span(0, "solver step", Category::Process, 0, 40, 99),
             span(1, "parallel region", Category::Openmp, 1, 15, 10),
             span(2, "compute tile", Category::Openmp, 2, 3, 11),
-            span(1, "MPI exchange", Category::Mpi, 18, 2, 12),
+            span(
+                1,
+                match rank {
+                    0 => "MPI_Send",
+                    1 => "MPI_Recv",
+                    _ => "MPI_Waitall",
+                },
+                Category::Mpi,
+                18,
+                2,
+                12,
+            ),
             span(1, "cudaLaunchKernel", Category::Cuda, 5, 1, 20),
             span(4, "stencil kernel", Category::Cuda, 6, 8, 20),
         ]);
@@ -204,6 +216,7 @@ fn main() -> Result<()> {
                 track_id: 5,
                 name: "unfinished flush".into(),
                 correlation_id: 777,
+                start_ns: None,
             },
         ));
         events.sort_by_key(|e| e.timestamp_ns);

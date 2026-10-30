@@ -11,7 +11,7 @@ The main report is an interactive HTML timeline with hierarchical rank, CPU-thre
 GPU-stream, and I/O tracks. Text summaries, self-contained HTML reports, and
 Chrome Trace/Perfetto export support command-line and batch workflows. Related
 shards share a time axis within their monotonic clock domain; separate hosts/boots
-remain visibly unaligned until clock calibration is available.
+remain visibly unaligned unless explicit MPI clock calibration is recorded.
 
 Another planned capability is **hardware what-if projection**: estimate how a
 profiled application would perform on a different CPU, GPU, interconnect, storage
@@ -20,12 +20,16 @@ will include runtime/scaling estimates, bottleneck analysis, assumptions and
 uncertainty ranges, and a projected timeline alongside the measured baseline.
 See the [projection plan](docs/hardware-projection.md).
 
-Planned [remote operation](docs/remote-operation.md) supports both an SSH-tunneled
-remote viewer and a local backend connected to target systems over SSH. The current
-snapshot viewer already supports manual SSH port forwarding; automated collection,
-session management, reconnectable transfer, and live queries will extend it.
+[Python and PyTorch profiling](docs/python-pytorch.md) is also planned: Python
+execution/stacks, PyTorch operators and autograd, data-loading/distributed activity,
+and CPU–GPU correlation alongside native MPI/OpenMP/I/O events.
 
-## Implemented: capture foundation and timeline reports
+[Remote operation](docs/remote-operation.md) uses direct collection on the remote
+system and an SSH tunnel to the existing snapshot viewer. This needs no additional
+rprof code. Opening existing remote capture files from a local GUI is a later,
+read-only feature.
+
+## Implemented: capture, MPI/I/O/OpenMP profiling, and timeline reports
 
 - Rust workspace: shared schema, streaming capture library, and CLI.
 - Linux process-group supervision, signal forwarding, escalation, and descendant reaping.
@@ -36,11 +40,17 @@ session management, reconnectable transfer, and live queries will extend it.
 - Shared report analysis, offline Canvas timeline, exact-value inspectors, and counter plots.
 - Chrome Trace/Perfetto JSON export and a loopback-only local browser viewer.
 - Synthetic multitrack fixtures, browser tests, and source/bundle consistency checks.
+- Optional C/Rust POSIX I/O preload collector with process/thread/file attribution.
+- Per-file byte counts, errors, latency summaries, and I/O call timeline spans.
+- Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
+- Optional MPI clock calibration with explicit uncertainty and drift reporting.
+- OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
 
-MPI, OpenMP, CUDA, I/O interception, and PMU collection are planned; they are not
-implemented yet. The process span covers the supervised workload,
-including launch, wait, and descendant cleanup. Running `mpirun` currently measures
-the launcher; automatic rank/thread discovery comes with the respective collectors.
+CUDA and PMU collection are planned. GCC/libgomp support is a planned GNU-runtime
+adapter; the current OpenMP collector requires OMPT.
+The process span covers the supervised workload,
+including launch, wait, and descendant cleanup. Wrapping only `mpirun` measures
+the launcher; use the per-rank launch pattern below for MPI call collection.
 
 ## Quick start
 
@@ -82,6 +92,55 @@ dependencies without requiring those collectors or hardware. Use the domain
 selector, name/category/rank filter, wheel zoom, drag pan, and clickable bars/points.
 See [reporting](docs/reporting.md) for controls, retention limits, clock handling,
 and reference-viewer compatibility.
+
+### Collect real POSIX I/O
+
+```sh
+make build PROFILE=release
+target/release/rprof record --collect io -o io.rprof.jsonl -- ./application
+target/release/rprof report io.rprof.jsonl --format html -o io.html
+```
+
+The optional `librprof_io.so` is found alongside the CLI, or supplied with
+`--io-library`. See [I/O profiling](docs/io-profiling.md) for supported calls,
+buffering/overhead, descriptor identity, and coverage boundaries.
+
+### Collect MPI calls
+
+Build the adapter with the application's MPI module and run one profiler per rank:
+
+```sh
+make mpi PROFILE=release MPICC=mpicc
+export RPROF_SESSION_ID=$(cat /proc/sys/kernel/random/uuid)
+mpirun -np 2 -x RPROF_SESSION_ID -x LD_LIBRARY_PATH \
+  target/release/rprof record --collect mpi --mpi-clock-sync \
+  --output-dir captures/mpi -- ./mpi-application
+target/release/rprof merge -o mpi.rprof.jsonl captures/mpi/*.rprof.jsonl
+target/release/rprof view mpi.rprof.jsonl --open
+```
+
+Use `--collect mpi,io` to combine collectors. MPI calls use their full names on
+rank/thread lanes, with separate nonblocking-request lifetimes. Compact rows grow
+only for overlaps; empty/single-lane tracks are 24px high. Full-name hover and
+filtering keep narrow calls inspectable. Collector-health samples appear in capture
+status instead of mostly empty chart rows.
+
+See [MPI profiling](docs/mpi-profiling.md) for coverage, all-rank calibration
+requirements, and tested HBv4 settings, and [glibc compatibility](docs/glibc-compatibility.md)
+for build/deployment choices.
+
+### Collect OpenMP activity
+
+```sh
+make ompt PROFILE=release
+target/release/rprof record --collect openmp -o omp.rprof.jsonl -- ./openmp-application
+target/release/rprof view omp.rprof.jsonl --open
+```
+
+Use the application's intended LLVM `libomp` or Intel `libiomp5` runtime;
+`--collect mpi,openmp,io` combines collectors. The tool records callback support and
+observed coverage, without substituting a runtime. See [OpenMP profiling](docs/openmp-profiling.md)
+and the [GCC/LLVM/Intel support plan](docs/openmp-runtimes.md).
 
 ### Multiple shards
 

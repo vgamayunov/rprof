@@ -53,7 +53,7 @@ explicit, summaries cover the full input snapshot, and multiple clock domains st
 separate. Synthetic multitrack fixtures, headless browser tests, and Perfetto import
 validation exercise the collection-to-report path. See [reporting](reporting.md).
 
-## 3. I/O profiling via preload
+## 3. I/O profiling via preload — implemented
 
 - Create an optional preload shared library with thin C wrappers, Rust buffering,
   and an injection path in `rprof record`; verify exported interposition symbols.
@@ -68,13 +68,25 @@ validation exercise the collection-to-report path. See [reporting](reporting.md)
 **Exit criterion:** fixture results match actual I/O and remain correct with
 multiple threads, descriptor reuse, failures, and nested library calls.
 
-## 4. MPI profiling
+Delivered: C ABI wrappers and an allocation-free Rust runtime; nonblocking local
+IPC with bounded external conversion; explicit native/writer loss accounting;
+CLI collector selection; process-image/thread/resource identity across normal
+fork/exec; actual I/O spans; and per-file text/HTML byte, latency, error, and rate
+summaries. Native and browser fixtures validate the full path. See
+[I/O profiling](io-profiling.md) for supported operations and measured overhead.
+
+## 4. MPI profiling — initial implementation complete
 
 - Pick one initial MPI implementation based on the development environment;
   compile a thin native adapter against its headers, isolate ABI differences, and
   add the second implementation to the support matrix.
 - Capture initialization/finalization, blocking point-to-point, waits/tests,
   nonblocking request lifetimes, and common collectives through PMPI.
+- Display individual calls by their full MPI names on rank/thread timeline lanes
+  (`MPI_Send`, `MPI_Recv`, `MPI_Isend`, `MPI_Wait`, `MPI_Waitall`, collectives, etc.).
+  Preserve start/duration, peer, communicator, bytes, and request details. Keep
+  call duration distinct from an asynchronous request's lifetime, with filtering,
+  hover/inspection, and correlation highlighting for both.
 - Add rank discovery, launcher environment propagation, per-rank output, and merge.
 - Introduce cross-host clock calibration and uncertainty reporting before treating
   distributed timestamps as directly comparable.
@@ -84,16 +96,51 @@ multiple threads, descriptor reuse, failures, and nested library calls.
 **Exit criterion:** a multi-rank fixture produces distinct rank/thread tracks,
 communication correlations, and trustworthy timing metadata.
 
-## 5. OpenMP profiling
+Delivered: target-header PMPI adapter and Rust transport; named API spans;
+rank/thread metadata; bounded request tracking with completion, cancellation,
+release, and ambiguity semantics; communicator metadata; optional clock calibration
+with uncertainty/drift; API summaries; and combined MPI/I/O capture. Two-node
+InfiniBand and MPI_THREAD_MULTIPLE fixtures passed on `tst4`/`hbv4`. Timeline rows
+are now compact and content-dependent. See [MPI profiling](mpi-profiling.md) and
+[glibc compatibility](glibc-compatibility.md).
+
+Remaining MPI coverage includes persistent requests, Fortran, sessions/RMA/MPI-IO,
+unlisted calls, complete dynamic-communicator identity, and cross-rank message
+matching. Current request correlations are rank-local and calibration is estimated.
+
+## 5. OpenMP profiling — OMPT implementation complete; GNU adapter planned
 
 - Integrate OMPT callbacks for threads, parallel regions, tasks, work sharing,
   and synchronization; document supported runtimes.
 - Add imbalance, barrier-wait, and task execution summaries.
 - Preserve work/task dependencies, concurrency, affinity, and available work-size
   annotations for CPU and thread-count scaling models.
+- Support all three runtime families: GCC `libgomp`, LLVM `libomp`, and Intel
+  `libiomp5`. Keep compiler/code-generation ABI and loaded runtime identity separate
+  in the support matrix; compiling with GCC and linking LLVM is not libgomp support.
+- Deliver OMPT collection first for LLVM/Intel runtimes, with per-callback registration
+  results and observed-event counts. Do not equate missing callbacks with zero work.
+- Add a separately tested GNU `GOMP_*` ABI adapter for GCC/libgomp versions without
+  OMPT. Version-gate that adapter and validate nested teams, tasks/dependencies,
+  synchronization, and hybrid MPI+OpenMP before claiming parity. Prefer standard
+  OMPT when a future libgomp version implements it.
+- Validate runtime/compiler combinations explicitly, including native GCC/libgomp,
+  Clang/libomp, and Intel compiler/libiomp5. Preserve the application's runtime;
+  backend selection must not silently swap runtimes or execute the workload twice.
 
 **Exit criterion:** nested parallelism and task fixtures have correct lifetimes
 and relationships, and combined MPI+OpenMP runs produce coherent tracks.
+
+See [OpenMP runtime support](openmp-runtimes.md) for the runtime-family plan and
+the distinction between OMPT registration and effective compiler/runtime coverage.
+
+Delivered: standard OMPT loading, callback capabilities/observations, parallel and
+worksharing scopes, synchronization/wait intervals, task lifetimes/execution and
+dependencies, sequence-gap handling, shared MPI/I/O/OpenMP thread identities, and
+text/HTML summaries. Clang-generated host and two-node hybrid fixtures passed with
+LLVM libomp 20.1.8 and Intel libiomp5 2025.3. GCC/libgomp 13.2 is explicitly reported
+as lacking OMPT; native GNU-runtime support remains a planned adapter. See
+[OpenMP profiling](openmp-profiling.md).
 
 ## 6. CUDA profiling
 
@@ -104,6 +151,8 @@ and relationships, and combined MPI+OpenMP runs produce coherent tracks.
 - Preserve launch geometry, transfer volumes, stream dependencies, GPU placement,
   and available kernel work/memory metrics for GPU projection. Make any additional
   profiling passes explicit when CUPTI activity traces alone lack those metrics.
+- Keep activity/correlation provenance suitable for later PyTorch integration,
+  including coexistence with PyTorch/Kineto's ownership of CUDA profiling APIs.
 
 **Exit criterion:** a multi-stream workload shows actual GPU overlap and its CPU
 launch relationships, with duration checks against a reference profiler.
@@ -150,33 +199,56 @@ Detailed design and incremental delivery are in
 phases 2–7; projection implementation can begin once the relevant collectors supply
 enough data, without waiting for every collector to be complete.
 
-## 9. Remote collection and viewing
+## 9. Remote usage and later remote-file viewing
 
-- Support remote query/view services through SSH-forwarded browser ports, and a
-  local backend that controls collection and accesses target data over SSH.
-- Reuse OpenSSH configuration/ProxyJump and a shared capture-source/query API;
-  negotiate capture, report, and remote protocol versions explicitly.
-- Deliver automated snapshot viewing first, then completed-capture fetch/cache,
-  persistent remote sessions, reconnect/resume, and bounded live/viewport queries.
-- Keep target-local capture buffering independent of network/viewer connectivity.
-  Preserve shard/clock identities and separate collector loss from transport backlog.
-- Start with explicit compute-node targets and existing allocations; add Slurm job
-  lifecycle and node discovery for `tst9`/`h100` and `tst4`/`hbv4` as integration matures.
-- Use HTTP inside encrypted SSH tunnels initially; add authenticated direct HTTPS
-  as an optional deployment mode when needed.
+- First version: launch `rprof record` directly on the remote system, run the
+  existing `rprof view --port` there, and connect a local browser through a manually
+  established SSH tunnel. This workflow requires no additional rprof code.
+- Use normal shell/scheduler workflows and SSH configuration for compute-node
+  access, allocations, and job launch. Verify tunneled viewing during remote
+  collector testing on `tst9`/`h100` and `tst4`/`hbv4`.
+- Later: let a local GUI open an existing remote capture through a read-only SSH
+  file source, initially by fetching/caching completed captures for local analysis.
+  Remote job launch/control is outside this feature's scope.
 
-**Exit criterion:** both modes can view equivalent captures and manage remote
-sessions with explicit ownership, bounded queries/transfers, and recoverable SSH
-disconnects, without coupling workload lifetime to the browser connection.
+**First-version exit criterion:** a remotely collected capture can be viewed through
+an SSH tunnel using existing commands, with results matching its offline report.
 
-See [remote operation](remote-operation.md) for architecture and rollout. Manual
-snapshot tunneling already works with phase 2's `view --port`; the initial remote
-automation can be implemented alongside early collector work rather than waiting
-for projection or all hardware collectors.
+See [remote operation](remote-operation.md). Remote-file GUI access is a follow-up,
+not a prerequisite for the first release or the next collector phase.
 
-## 10. Combined-workload validation and release
+## 10. Python and PyTorch profiling
+
+- Add optional CPython integration for Python stacks/functions, thread/interpreter
+  identity, and user ranges. Distinguish sampled stacks from instrumented intervals;
+  version-gate monitoring/profiling APIs and cover async/generator lifetimes.
+- Correlate Python activity with native MPI, OpenMP, I/O, PMU, and CUDA observations
+  using shared process/thread identity and explicit clock mappings.
+- Start PyTorch support with an importer for `torch.profiler`/Kineto traces, then
+  add opt-in collection/bootstrap integration and profiling schedules.
+- Show operators, module/user ranges, forward/backward/autograd activity, optimizer
+  steps, CPU–GPU launches, kernels/copies, and memory counters in the timeline.
+  Preserve shapes/dtypes/stacks only when requested and available.
+- Add DataLoader/multiprocessing attribution and distributed training support,
+  including DDP/FSDP and actual NCCL/Gloo/MPI backend identities.
+- Report operator self/inclusive CPU time, device activity, memory use, data-loading
+  stalls, communication overlap, and observed bottlenecks. Track eager versus
+  `torch.compile`/fused-kernel attribution and incomplete coverage explicitly.
+- Keep Rust as the core and Python/PyTorch dependencies optional. Coordinate CUDA
+  collector ownership rather than starting incompatible profiler sessions together.
+
+**Exit criterion:** Python and PyTorch CPU/GPU fixtures produce coherent timelines
+with native activity, preserved source correlations, explicit coverage/overhead,
+and results checked against PyTorch's profiler on supported version combinations.
+
+See [Python and PyTorch](python-pytorch.md). Trace import can start independently;
+integrated GPU collection builds on phase 6. These are planned capabilities.
+
+## 11. Combined-workload validation and release
 
 - Validate mixed MPI+OpenMP+CUDA+I/O workloads and distributed merging at scale.
+- Include Python/PyTorch training and inference, data-loader workers, and distributed
+  runs in the supported-runtime/version matrix.
 - Validate projection reports and reproducibility across hardware-profile/model
   versions, including sensitivity to missing data, event loss, and clock uncertainty.
 - Measure capture overhead, event loss, memory use, report size, and UI responsiveness.
@@ -187,9 +259,9 @@ for projection or all hardware collectors.
 
 ## Suggested next task
 
-Implement phase 3's POSIX I/O preload collector with thin C wrappers and Rust
-buffering, using the existing capture/report path to validate resource identity,
-operation durations, bytes, and thread attribution.
+Implement phase 6's CUDA/CUPTI collector on `tst9`/`h100`, preserving host/device
+correlation and clock metadata. Expand the OpenMP runtime matrix and GNU adapter
+coverage alongside the remaining collector work.
 
 The proposed order can be adjusted once the primary MPI implementation, OpenMP
 runtime, workload scale, and deployment constraints are known. Preferred test

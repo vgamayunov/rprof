@@ -29,6 +29,9 @@ Node. TypeScript source/build scripts and browser tests live under `ui/`.
 
 Controls:
 
+- **Theme:** the top-right Light mode/Dark mode button updates panels, tables,
+  timeline, and counter plots. The initial theme follows the system preference;
+  an explicit choice is saved per browser origin when storage is available.
 - **Clock domain:** select a host/boot clock domain; other domains are not overlaid.
 - **Filter:** search names, categories, and rank labels; for example `cuda rank:0`.
 - **Zoom:** wheel over the plot, use `+`/`−`, or click the zoom buttons.
@@ -43,6 +46,19 @@ Controls:
 CPU/process/rank, OpenMP thread, GPU device/stream, and I/O tracks are supported by
 the model. The current process collector supplies the real command lifetime;
 `fixtures/multitrack.jsonl` demonstrates the richer track types synthetically.
+
+With `--collect io`, real POSIX operations appear on thread/file lanes. The I/O
+panel shows per-file completed/requested bytes, errors, observed-window bandwidth,
+and per-operation average/max latency, with pagination and clock-domain selection.
+Counts reflect captured events; see [I/O profiling](io-profiling.md) for loss and
+coverage semantics. MPI calls use a distinct color and full-name hover/inspection;
+actual MPI events are supplied by `--collect mpi`; see [MPI profiling](mpi-profiling.md).
+
+`--collect openmp` adds real OMPT parallel/work/task/synchronization events. The
+OpenMP panel is domain-filtered and shows runtime capabilities, received callbacks,
+recorded work/wait spread, and selectable thread details. Native collectors share
+physical thread tracks; scheduled task intervals remain distinct from task lifetime
+and are not measurements of CPU utilization. See [OpenMP profiling](openmp-profiling.md).
 
 Incomplete activities have a distinct outline and stop at the last observed event.
 Their missing final duration is not presented as a completed measurement. Category
@@ -73,10 +89,16 @@ lanes share a track, with excess overlaps sharing the last lane. Filtering and
 zooming help inspect dense regions. Display sampling does not change capture data
 or full-capture summaries.
 
+Rows are compact by default: 26px shard headers, 24px rank/empty/single-lane tracks,
+38/52/66px tracks for two/three/four overlap lanes, and 48px counter rows. Collector
+health snapshots are displayed in capture status rather than one-point chart rows.
+
 ## Time and numeric precision
 
 Shards sharing hostname/boot identity are positioned using their monotonic origin
-offsets. Cross-host/boot domains remain unaligned. HTML timestamps and large
+offsets. Cross-host/boot domains remain unaligned unless explicit MPI calibration
+is present; calibrated domains are labeled as estimates with uncertainty and drift.
+HTML timestamps and large
 integer values are decimal strings, parsed with BigInt; pixel coordinates use
 view-relative differences. Integer counter plots subtract an exact integer
 baseline before numeric plotting, retaining adjacent values above `2^53`.
@@ -118,7 +140,8 @@ stops the viewer and removes its temporary artifact. Only the report routes are
 served; this is not a filesystem browser or a remote command API.
 
 This viewer is read-only and snapshot-based: refreshing the browser does not
-re-read the capture. Re-run `view` to obtain a newer snapshot. HTTPS, live updates,
-remote session control, and indexed viewport queries are future capabilities.
-The [remote-operation plan](remote-operation.md) includes a manual SSH-tunnel
-example for the current snapshot viewer and the proposed automated modes.
+re-read the capture. Re-run `view` to obtain a newer snapshot. Live updates and
+indexed viewport queries are future capabilities. For remote viewing, use the
+existing server through a manual SSH tunnel, as described in
+[remote operation](remote-operation.md). Local-GUI access to existing remote files
+is a later read-only feature.

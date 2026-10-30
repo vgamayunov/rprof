@@ -217,7 +217,8 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
                             }
                             events.timed(json!({"ph":"X", "pid":pid, "tid":tid, "name":span.name, "cat":category(&span.category),
                             "args":{"rprof_start_ns":start.to_string(), "rprof_duration_ns":span.duration_ns.to_string(),
-                                "correlation":span.correlation_id.map(|c|key(id,c)), "attributes":attrs, "incomplete":false}}), start, Some(span.duration_ns as u128))?;
+                                "correlation":span.correlation_id.map(|c|key(id,c)), "attributes":attrs,
+                                "incomplete":attrs.get("mpi.request_state").is_some_and(|v|v=="tracking_released") || attrs.get("mpi.abort_entry").is_some_and(|v|v=="true")}}), start, Some(span.duration_ns as u128))?;
                         }
                         Payload::Counter(sample) => {
                             let tid = *tracks
@@ -233,6 +234,7 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
                             track_id,
                             name,
                             correlation_id,
+                            start_ns,
                         } => {
                             ensure!(
                                 open.len() < MAX_OPEN_ACTIVITIES,
@@ -247,8 +249,10 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
                                     endpoint: Endpoint {
                                         pid: *pid,
                                         tid,
-                                        start: now,
-                                        end: now,
+                                        start: offset
+                                            + start_ns.unwrap_or(event.timestamp_ns) as u128,
+                                        end: offset
+                                            + start_ns.unwrap_or(event.timestamp_ns) as u128,
                                     },
                                     name,
                                     correlation: key(id, correlation_id),

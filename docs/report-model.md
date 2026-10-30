@@ -17,7 +17,9 @@ Report {
     dropped: string, omitted_events: string, warnings: string[],
     categories: [{ name: string, count: string, total_ns: string }]
   },
-  domains: [{ id: string, name: string, origin_ns: string, end_ns: string }],
+  domains: [{ id: string, name: string, origin_ns: string, end_ns: string,
+    calibration?: { method: string, uncertainty_ns: string, max_drift_ns: string, complete: boolean }
+  }],
   shards: [{
     id: string, domain: string, name: string, hostname: string,
     command: string[], collectors: string[], origin_ns: string,
@@ -40,7 +42,15 @@ Report {
     value_type: "integer"|"float", unit: string,
     attributes: { [key: string]: string }
   }],
-  dependencies: [{ from: string, to: string, relation: string }]
+  dependencies: [{ from: string, to: string, relation: string }],
+  mpi?: [{ shard: string, rank: number, name: string, calls: string, errors: string,
+    total_ns: string, max_ns: string, logical_bytes: string, calls_with_bytes: string }],
+  io?: [{
+    domain: string, host: string, file: string, operations: string, errors: string,
+    read_bytes: string, write_bytes: string, requested_read_bytes: string,
+    requested_write_bytes: string, total_ns: string, window_ns: string,
+    by_operation: [{ name: string, count: string, errors: string, total_ns: string, max_ns: string }]
+  }]
 }
 ```
 
@@ -51,7 +61,9 @@ its children. `origin_ns` on each shard is an offset from its domain's minimum
 monotonic origin. All span/counter timestamps are offsets from that domain origin;
 `end_ns` gives the observed domain extent. Domain `origin_ns` preserves the original
 monotonic value for provenance. Different domains must be selected separately and
-never displayed as a synchronized global timeline.
+never displayed as a synchronized global timeline without explicit calibration.
+An optional `calibration` describes MPI offset estimates; those domains combine
+calibrated hosts and expose uncertainty/drift. Raw capture timestamps are preserved.
 
 Open activities become explicitly incomplete spans ending at the shard's last
 observed time, unless a matching completed span was observed. Attribute values
@@ -69,3 +81,16 @@ are supported now; projected scenario artifacts will extend this contract later.
 The HTML shell contains an inert `<script type="application/json" id="rprof-data">`
 with safely escaped JSON, followed by a self-contained script bundle. The UI
 initializes from that element. It makes no network requests and uses no CDN.
+
+`io` is an additive field; older v1 report models omit it. Its summary covers all
+captured structured I/O spans independently of timeline retention. Fields are
+decimal strings; rates divide captured bytes by the observed file activity window,
+and operation latencies use inclusive call durations. They do not represent physical
+device throughput or estimates for dropped events.
+
+`openmp` is another optional v1 extension, defined by `OpenmpSummary` in
+`crates/rprof-report/src/model.rs`. It contains runtime/callback capability rows,
+region and thread-region summaries, and recorded task/execution totals. All IDs,
+counts, and durations are decimal strings; unknown observations and duration/spread
+values are null rather than zero. Runtime/callback registration is distinct from
+observed callbacks, and scheduled task intervals are not CPU utilization.

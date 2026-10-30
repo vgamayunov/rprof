@@ -197,6 +197,12 @@ impl Recorder {
         &self.loss
     }
 
+    /// Update a cumulative loss count maintained by a native collector. Keeping
+    /// this separate from writer queue loss avoids silently double-counting it.
+    pub fn set_ingress_loss(&mut self, total: u64) {
+        self.loss.ingress = self.loss.ingress.max(total);
+    }
+
     pub fn finish(mut self, mut end: End) -> Result<()> {
         ensure!(
             end.shard_id == self.shard_id,

@@ -39,9 +39,12 @@ the `rprof-core` crate root, while v2 types live in `rprof_core::stream`.
   They must be nondecreasing; nested/overlapping spans may have earlier starts.
 - Hostname plus Linux boot ID identifies a clock domain. For shards sharing a
   domain, `monotonic_origin_ns + timestamp_ns` gives the common monotonic timestamp
-  (use checked arithmetic or wide integers). Cross-host/boot domains stay unaligned.
-  Wall-clock start is descriptive only. Clock calibration/drift/uncertainty is MPI work.
+  (use checked arithmetic or wide integers). Raw cross-host/boot domains stay
+  separate. Explicit MPI calibration counter attributes can align derived reports
+  with uncertainty/drift estimates; wall-clock start remains descriptive only.
 - `ActivityStart` preserves open-operation evidence if the final span is lost.
+  Optional `start_ns` supplies the original operation start when ingestion occurs
+  later; older captures omit it and use the event observation time.
   A finished span with the same correlation ID closes that activity. The process
   activity begins after successful spawn; its final span also includes launch overhead.
 - `Dependency` connects shard-local correlation IDs. Forward references are allowed,
@@ -107,7 +110,8 @@ and marked truncated, even if its JSON text happens to parse. A malformed frame
 that *has* a newline is corruption and fails validation. Empty/truncated headers
 are not readable captures.
 
-Loss counters distinguish queue-full batches from oversized events. They are
+Loss counters distinguish queue-full batches, oversized events, and native ingress
+loss (`ingress`, an additive v2 field defaulting to zero in older captures). They are
 cumulative and checkpointed in chunks and the footer. In incomplete captures they
 are a **lower bound**; queued/staged events and the most recent loss updates may
 not have reached disk. A footer indicates finalized storage, not workload success:

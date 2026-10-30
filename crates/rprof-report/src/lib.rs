@@ -1,8 +1,12 @@
 //! Shared capture analysis, offline HTML, text summaries, and trace export.
 
 mod analyze;
+mod clock;
 mod html;
+mod io_summary;
 mod model;
+mod mpi_summary;
+mod openmp_summary;
 mod text;
 mod trace;
 

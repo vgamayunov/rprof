@@ -200,6 +200,7 @@ struct Pending {
     timestamp: u64,
     correlation: u64,
     name: String,
+    category: String,
     attributes: BTreeMap<String, String>,
 }
 
@@ -218,7 +219,15 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut used_bytes = 0;
     let mut omitted = 0u64;
     let mut metadata_bytes = 0;
+    let mut io = crate::io_summary::IoAnalysis::default();
+    let mut clocks = crate::clock::Clocks::default();
+    let mut mpi = crate::mpi_summary::MpiAnalysis::default();
+    let mut openmp = crate::openmp_summary::OpenmpAnalysis::default();
     let data = scan(path, None, |record| {
+        io.observe(&record);
+        clocks.observe(&record);
+        mpi.observe(&record);
+        openmp.observe(&record);
         if let Record::Chunk(chunk) = record {
             for event in chunk.events {
                 if let Payload::Span(span) = &event.payload {
@@ -292,7 +301,12 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                         start_ns: span.start_ns.to_string(),
                         duration_ns: span.duration_ns.to_string(),
                         correlation: span.correlation_id.map(|id| key(chunk.shard_id, id)),
-                        incomplete: false,
+                        incomplete: attrs
+                            .get("mpi.request_state")
+                            .is_some_and(|state| state == "tracking_released")
+                            || attrs
+                                .get("mpi.abort_entry")
+                                .is_some_and(|flag| flag == "true"),
                         attributes: attrs,
                     }),
                     Payload::Counter(sample) => {
@@ -311,15 +325,24 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                         track_id,
                         name,
                         correlation_id,
+                        start_ns,
                     } => {
                         pending.insert(
                             (chunk.shard_id, track_id, correlation_id),
                             Pending {
                                 shard: chunk.shard_id,
                                 track: track_id,
-                                timestamp: event.timestamp_ns,
+                                timestamp: start_ns.unwrap_or(event.timestamp_ns),
                                 correlation: correlation_id,
                                 name,
+                                category: if attrs.contains_key("openmp.role") {
+                                    "openmp"
+                                } else if attrs.contains_key("mpi.record_type") {
+                                    "mpi"
+                                } else {
+                                    "activity"
+                                }
+                                .into(),
                                 attributes: attrs,
                             },
                         );
@@ -349,7 +372,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             id: spans.len(),
             track: key(open.shard, open.track),
             name: open.name,
-            category: "activity".into(),
+            category: open.category,
             start_ns: open.timestamp.to_string(),
             duration_ns: observed.saturating_sub(open.timestamp).to_string(),
             correlation: Some(key(open.shard, open.correlation)),
@@ -357,33 +380,16 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             attributes: open.attributes,
         });
     }
-    let mut domain_origins = BTreeMap::<(String, String), u64>::new();
-    for shard in summary.shards.values() {
-        domain_origins
-            .entry((shard.shard.hostname.clone(), shard.shard.boot_id.clone()))
-            .and_modify(|n| *n = (*n).min(shard.shard.monotonic_origin_ns))
-            .or_insert(shard.shard.monotonic_origin_ns);
-    }
-    let mut domains = Vec::new();
-    let mut lookup = HashMap::new();
-    for ((hostname, boot_id), origin) in domain_origins {
-        let index = domains.len();
-        lookup.insert((hostname.clone(), boot_id.clone()), index);
-        domains.push(Domain {
-            id: index.to_string(),
-            name: format!("{hostname} / {boot_id}"),
-            origin_ns: origin.to_string(),
-            end_ns: "0".into(),
-        });
-    }
+    let clock_layout = clocks.finish(&summary);
+    let mut domains = clock_layout.domains;
+    let lookup = clock_layout.raw_domains;
     let mut shards = Vec::new();
     let mut offsets = HashMap::new();
     let mut totals = [0u128; 5];
     let mut synthetic = false;
     for (id, shard) in &summary.shards {
         let domain = lookup[&(shard.shard.hostname.clone(), shard.shard.boot_id.clone())];
-        let origin: u64 = domains[domain].origin_ns.parse()?;
-        let offset = shard.shard.monotonic_origin_ns - origin;
+        let offset = clock_layout.offsets[id];
         let duration = shard
             .end
             .as_ref()
@@ -442,7 +448,27 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         counter.timestamp_ns =
             (offsets[track_shards[counter.track.as_str()]] + local as u128).to_string();
     }
-    let mut warnings = Vec::new();
+    let mut warnings = clock_layout.warnings;
+    if mpi.omitted > 0 {
+        warnings.push(format!(
+            "{} MPI call summaries omitted by summary limits.",
+            mpi.omitted
+        ));
+    }
+    if mpi.released > 0 {
+        warnings.push(format!(
+            "{} MPI requests were released from tracking without confirming completion.",
+            mpi.released
+        ));
+    }
+    if mpi.limited {
+        warnings.push("MPI tracking limits were encountered; some request/communicator details are incomplete.".into());
+    }
+    let mpi = mpi.finish();
+    if io.omitted > 0 {
+        warnings.push(format!("{} I/O events omitted from per-file summaries after reaching the file/metadata limit; category totals still cover the full capture.", io.omitted));
+    }
+    let io = io.finish(&lookup);
     if !summary.is_complete() {
         warnings.push(
             "Partial/recovered capture: missing data and loss counts may be incomplete.".into(),
@@ -466,7 +492,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     }
     let unfinished = spans.iter().filter(|s| s.incomplete).count();
     if unfinished > 0 {
-        warnings.push(format!("{unfinished} retained activities lack a completion; their displayed extent stops at the last observed event."));
+        warnings.push(format!("{unfinished} retained activities have no confirmed completion; dashed extents are observation bounds."));
     }
     let correlations: HashSet<_> = spans
         .iter()
@@ -488,6 +514,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     } else {
         "Measured capture"
     };
+    let openmp = openmp.finish(&shards, &mut warnings);
     Ok(Report {
         source_bytes: data.source_bytes,
         version: 1,
@@ -533,5 +560,8 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         spans,
         counters,
         dependencies,
+        io,
+        mpi,
+        openmp,
     })
 }

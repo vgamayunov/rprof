@@ -7,7 +7,8 @@ export interface Report {
     dependencies: string; dropped: string; omitted_events: string; warnings: string[];
     categories: { name: string; count: string; total_ns: string }[];
   };
-  domains: { id: string; name: string; origin_ns: string; end_ns: string }[];
+  domains: { id: string; name: string; origin_ns: string; end_ns: string;
+    calibration?: { method: string; uncertainty_ns: string; max_drift_ns: string; complete: boolean } }[];
   shards: {
     id: string; domain: string; name: string; hostname: string; command: string[];
     collectors: string[]; origin_ns: string; end_ns: string; complete: boolean;
@@ -30,6 +31,51 @@ export interface Report {
     attributes: Record<string, string>;
   }[];
   dependencies: { from: string; to: string; relation: string }[];
+  // Absent in older v1 reports.
+  io?: IoSummary[];
+  mpi?: MpiCallSummary[];
+  openmp?: OpenmpSummary | null;
+}
+
+export interface MpiCallSummary {
+  shard: string; rank: number; name: string; calls: string; errors: string;
+  total_ns: string; max_ns: string; logical_bytes: string; calls_with_bytes: string;
+}
+
+export interface OpenmpSummary {
+  runtimes: OpenmpRuntime[]; regions: OpenmpRegion[]; threads: OpenmpThread[];
+  tasks_created: string; tasks_completed: string; execution_segments: string;
+}
+export interface OpenmpRuntime {
+  shard: string; domain: string; instance: string; pid: string; version: string; omp_version: string;
+  initialized: boolean; finalized: boolean; callbacks: OpenmpCallback[];
+  sequence_gaps: string; unmatched_endpoints: string; abandoned_intervals: string;
+}
+export interface OpenmpCallback { name: string; status: string; observed: string | null; observed_complete: boolean }
+export interface OpenmpRegion {
+  shard: string; domain: string; instance: string; pid: string; parallel_id: string;
+  requested_threads: string; observed_threads: string; duration_ns: string | null;
+  work_ns: string; wait_ns: string; work_min_ns: string | null; work_max_ns: string | null; work_spread_ns: string | null;
+}
+export interface OpenmpThread {
+  shard: string; domain: string; instance: string; pid: string; tid: string; parallel_id: string;
+  team_index: string | null; work_ns: string; wait_ns: string; sync_ns: string;
+  scheduled_ns: string; execution_segments: string;
+}
+
+// Parallel identifiers alone are not unique across runtime images or shards.
+export function regionThreads(report: Report, region: OpenmpRegion): OpenmpThread[] {
+  return (report.openmp?.threads ?? []).filter(thread => thread.domain === region.domain &&
+    thread.shard === region.shard && thread.instance === region.instance &&
+    thread.pid === region.pid && thread.parallel_id === region.parallel_id);
+}
+
+export interface IoSummary {
+  domain: string; host: string; file: string; operations: string; errors: string;
+  read_bytes: string; write_bytes: string;
+  requested_read_bytes: string; requested_write_bytes: string;
+  total_ns: string; window_ns: string;
+  by_operation: { name: string; count: string; errors: string; total_ns: string; max_ns: string }[];
 }
 
 export type Span = Report['spans'][number];
@@ -42,6 +88,91 @@ export interface IndexedSpan { span: Span; start: bigint; end: bigint; lane: num
 export interface IndexedCounter { counter: Counter; time: bigint }
 export interface SpanIndex { items: IndexedSpan[]; maxEnds: bigint[] }
 export interface TrackData { spans: SpanIndex; counters: Map<string, IndexedCounter[]> }
+
+export interface TimelineRow {
+  key: string; kind: 'shard' | 'rank' | 'track' | 'counter'; label: string; depth: number;
+  height: number; top: number; shard: Shard; track?: Track; series?: string; hasChildren: boolean;
+}
+
+// Canvas row geometry (CSS pixels). Span bars start 7px from the top, are 11px
+// high, and use a 14px lane pitch; the remaining space protects row boundaries.
+export const ROW_HEIGHT = { shard: 26, rank: 24, emptyTrack: 24, counter: 48 } as const;
+export const SPAN_TOP = 7;
+export const SPAN_PITCH = 14;
+export const COUNTER_PLOT_TOP = 8;
+export const COUNTER_PLOT_HEIGHT = 18;
+
+export function trackRowHeight(index: SpanIndex): number {
+  let maxLane = 0;
+  for (const item of index.items) maxLane = Math.max(maxLane, item.lane);
+  return ROW_HEIGHT.emptyTrack + SPAN_PITCH * maxLane;
+}
+
+// A single layout source for drawing, hit testing, and external consumers of
+// timeline geometry. Heights depend on indexed spans, never the zoom level.
+export function timelineRows(report: Report, data: Map<string, TrackData>, domainId: string | undefined,
+  query: string, collapsed: ReadonlySet<string> = new Set()): TimelineRow[] {
+  const rows: TimelineRow[] = [];
+  const byShard = new Map<string, Track[]>();
+  const byParent = new Map<string, Track[]>();
+  for (const track of report.tracks) {
+    const group = track.parent ? byParent : byShard;
+    const key = track.parent ?? track.shard;
+    if (!group.has(key)) group.set(key, []);
+    group.get(key)!.push(track);
+  }
+  const matchCache = new Map<string, boolean>();
+  const matchesTree = (track: Track, visited = new Set<string>()): boolean => {
+    if (matchCache.has(track.id)) return matchCache.get(track.id)!;
+    if (visited.has(track.id)) return false;
+    visited.add(track.id);
+    const trackData = data.get(track.id);
+    const match = !query || matchesFilter(track.name, track.kind, track.rank, query) ||
+      !!trackData?.spans.items.some(item => matchesFilter(`${track.name} ${item.span.name}`, item.span.category, track.rank, query)) ||
+      !!trackData && [...trackData.counters.keys()].some(name => matchesFilter(`${track.name} ${name}`, 'counter', track.rank, query)) ||
+      (byParent.get(track.id) ?? []).some(child => matchesTree(child, visited));
+    matchCache.set(track.id, match);
+    return match;
+  };
+  let top = 0;
+  const add = (row: Omit<TimelineRow, 'top'>): void => { rows.push({ ...row, top }); top += row.height; };
+  const addTrack = (track: Track, shard: Shard, depth: number, ancestors = new Set<string>()): void => {
+    if (ancestors.has(track.id) || !matchesTree(track)) return;
+    const children = byParent.get(track.id) ?? [];
+    const trackData = data.get(track.id);
+    const series = [...(trackData?.counters.keys() ?? [])].filter(name => !query || matchesFilter(`${track.name} ${name}`, 'counter', track.rank, query));
+    const key = `track:${track.id}`;
+    add({ key, kind: 'track', label: track.name, depth, height: trackData ? trackRowHeight(trackData.spans) : ROW_HEIGHT.emptyTrack,
+      shard, track, hasChildren: children.length > 0 || series.length > 0 });
+    if (collapsed.has(key)) return;
+    const next = new Set(ancestors); next.add(track.id);
+    for (const child of children) addTrack(child, shard, depth + 1, next);
+    for (const name of series) add({ key: `counter:${track.id}:${name}`, kind: 'counter', label: name,
+      depth: depth + 1, height: ROW_HEIGHT.counter, shard, track, series: name, hasChildren: false });
+  };
+  for (const shard of report.shards) {
+    if (shard.domain !== domainId) continue;
+    const own = byShard.get(shard.id) ?? [];
+    if (query && !matchesFilter(`${shard.name} ${shard.hostname}`, 'shard', null, query) && !own.some(track => matchesTree(track))) continue;
+    const key = `shard:${shard.id}`;
+    add({ key, kind: 'shard', label: `${shard.name}${shard.hostname && shard.hostname !== shard.name ? ` · ${shard.hostname}` : ''}`,
+      depth: 0, height: ROW_HEIGHT.shard, shard, hasChildren: own.length > 0 });
+    if (collapsed.has(key)) continue;
+    const ranked = new Map<number | null, Track[]>();
+    for (const track of own) {
+      if (!ranked.has(track.rank)) ranked.set(track.rank, []);
+      ranked.get(track.rank)!.push(track);
+    }
+    for (const [rank, group] of ranked) {
+      if (rank === null) { for (const track of group) addTrack(track, shard, 1); continue; }
+      if (!group.some(track => matchesTree(track))) continue;
+      const rankKey = `rank:${shard.id}:${rank}`;
+      add({ key: rankKey, kind: 'rank', label: `Rank ${rank}`, depth: 1, height: ROW_HEIGHT.rank, shard, hasChildren: true });
+      if (!collapsed.has(rankKey)) for (const track of group) addTrack(track, shard, 2);
+    }
+  }
+  return rows;
+}
 
 export function lowerBound<T>(items: readonly T[], predicate: (item: T) => boolean): number {
   let low = 0;
@@ -93,6 +224,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
     spans.get(span.track)!.push(span);
   }
   for (const counter of report.counters) {
+    if (isCollectorHealth(counter.name)) continue;
     if (!counters.has(counter.track)) counters.set(counter.track, new Map());
     const groups = counters.get(counter.track)!;
     const series = `${counter.name} [${counter.unit}; ${counter.value_type}]`;
@@ -106,6 +238,11 @@ export function indexReport(report: Report): Map<string, TrackData> {
     result.set(track.id, { spans: indexSpans(spans.get(track.id) ?? []), counters: groups });
   }
   return result;
+}
+
+export function isCollectorHealth(name: string): boolean {
+  return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
+    name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.');
 }
 
 export function matchesFilter(name: string, category: string, rank: number | null, query: string): boolean {
@@ -141,4 +278,20 @@ export function formatNs(ns: bigint): string {
     }
   }
   return `${ns} ns`;
+}
+
+// Bytes divided by the observed window (not a device throughput measurement).
+// Integer arithmetic keeps even values above 2^53 exact.
+export function observedRate(bytes: string, windowNs: string): string {
+  const window = BigInt(windowNs);
+  if (window === 0n) return '—';
+  const milliBytesPerSecond = BigInt(bytes) * 1_000_000_000_000n / window;
+  return `${milliBytesPerSecond / 1000n}.${(milliBytesPerSecond % 1000n).toString().padStart(3, '0')} B/s`;
+}
+
+export function averageNs(totalNs: string, count: string): string {
+  const operations = BigInt(count);
+  if (operations === 0n) return '—';
+  const milliNs = BigInt(totalNs) * 1000n / operations;
+  return `${milliNs / 1000n}.${(milliNs % 1000n).toString().padStart(3, '0')} ns`;
 }

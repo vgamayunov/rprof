@@ -22,7 +22,10 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: make preload
       - run: cargo test --workspace
+        env:
+          RPROF_TEST_IO_LIBRARY: ${{ github.workspace }}/target/debug/librprof_io.so
       - run: npm ci
         working-directory: ui
       - run: npm run check-generated
@@ -35,3 +38,26 @@ jobs:
         working-directory: ui
       - run: npm run test:browser
         working-directory: ui
+
+  mpi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y openmpi-bin libopenmpi-dev
+      - run: bash scripts/test-mpi-local.sh
+
+  openmp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y clang libomp-dev
+      - run: bash scripts/test-openmp.sh

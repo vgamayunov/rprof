@@ -238,7 +238,9 @@ pub fn summarize(input: impl BufRead) -> Result<Summary> {
 
 fn validate_loss(old: &Loss, new: &Loss) -> Result<()> {
     ensure!(
-        new.queue_full >= old.queue_full && new.oversized >= old.oversized,
+        new.queue_full >= old.queue_full
+            && new.oversized >= old.oversized
+            && new.ingress >= old.ingress,
         "loss counters decreased"
     );
     Ok(())
@@ -307,7 +309,13 @@ fn validate_event(
             }
             summary.counters += 1;
         }
-        Payload::ActivityStart { track_id, .. } => {
+        Payload::ActivityStart {
+            track_id, start_ns, ..
+        } => {
+            ensure!(
+                start_ns.is_none_or(|start| start <= event.timestamp_ns),
+                "activity starts after observation"
+            );
             ensure!(
                 state.tracks.contains(track_id),
                 "activity references unknown track"

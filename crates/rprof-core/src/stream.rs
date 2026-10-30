@@ -95,6 +95,9 @@ pub enum Payload {
         track_id: u64,
         name: String,
         correlation_id: u64,
+        /// Optional operation start, distinct from the event's ingestion time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_ns: Option<u64>,
     },
     /// Local correlation IDs identify logical operations, possibly across tracks.
     /// Forward references are allowed; dropped operations can leave dangling links.
@@ -120,11 +123,16 @@ pub enum Attribute {
 pub struct Loss {
     pub queue_full: u64,
     pub oversized: u64,
+    /// Events lost before entering the capture writer (e.g. native IPC saturation).
+    #[serde(default)]
+    pub ingress: u64,
 }
 
 impl Loss {
     pub fn total(&self) -> u64 {
-        self.queue_full.saturating_add(self.oversized)
+        self.queue_full
+            .saturating_add(self.oversized)
+            .saturating_add(self.ingress)
     }
 }
 

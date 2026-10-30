@@ -1,5 +1,10 @@
 # Offline timeline viewer
 
+The shared viewer supports dark/light themes, including Canvas colors. The toggle
+uses the system preference initially and remembers explicit choices when browser
+storage is available. Export reports again after rebuilding to include UI updates;
+existing standalone HTML files contain their original embedded viewer bundle.
+
 `index.html` is the Rust report template. It contains exactly one each of `{{STYLE}}`, `{{DATA}}`, and `{{SCRIPT}}`; Rust replaces these with the checked-in `dist/viewer.css`, safely escaped JSON, and `dist/viewer.js`. Do not open the template directly to test a capture: it needs an embedded report payload. No browser network access is required.
 
 ```sh

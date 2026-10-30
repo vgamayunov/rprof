@@ -1,0 +1,13 @@
+[package]
+name = "rprof-preload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+libc.workspace = true
+rprof-io-protocol.workspace = true

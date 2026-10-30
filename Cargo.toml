@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-cli"]
+members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-io-protocol", "crates/rprof-preload", "crates/rprof-mpi-protocol", "crates/rprof-mpi", "crates/rprof-ompt-protocol", "crates/rprof-ompt", "crates/rprof-cli"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +16,9 @@ serde_json = { version = "1", features = ["raw_value"] }
 rprof-core = { path = "crates/rprof-core" }
 rprof-capture = { path = "crates/rprof-capture" }
 rprof-report = { path = "crates/rprof-report" }
+rprof-io-protocol = { path = "crates/rprof-io-protocol" }
+rprof-mpi-protocol = { path = "crates/rprof-mpi-protocol" }
+rprof-ompt-protocol = { path = "crates/rprof-ompt-protocol" }
 libc = "0.2"
 signal-hook = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }

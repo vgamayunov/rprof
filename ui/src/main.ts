@@ -1,14 +1,20 @@
-import { formatNs, indexReport, integerPlotValues, lowerBound, matchesFilter, timeToX, visibleSpans, xToTime } from './model.js';
-import type { Counter, Domain, IndexedCounter, IndexedSpan, Report, Shard, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
+import type { Theme } from './theme.js';
 
-type Row = { key: string; kind: 'shard' | 'rank' | 'track' | 'counter'; label: string; depth: number;
-  height: number; top: number; shard: Shard; track?: Track; series?: string; hasChildren: boolean };
+const startingTheme = initialTheme();
+document.documentElement.dataset.theme = startingTheme;
+
 type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter };
 type Hit = { x: number; y: number; width: number; height: number; selection: Selection };
 
 const LABEL_WIDTH = 260;
 const MAX_DRAWN_SPANS = 5000;
+const IO_PAGE_SIZE = 100;
 const COLORS = ['#6bcdb0', '#65a8ec', '#e5b46d', '#b29be6', '#e17d91', '#86c6d9', '#cbc988'];
+const MPI_COLOR = '#ff9970';
+const OPENMP_COLOR = '#d5a2ff';
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -27,13 +33,16 @@ function badge(parent: Element, label: string, tone = ''): void {
   parent.append(node('span', `badge ${tone}`, label));
 }
 
-function colorFor(value: string): string {
+function colorFor(value: string, colors: readonly string[] = COLORS): string {
+  if (value.toLowerCase() === 'mpi') return MPI_COLOR;
+  if (value.toLowerCase() === 'openmp') return OPENMP_COLOR;
   let hash = 0;
   for (let i = 0; i < value.length; i++) hash = (Math.imul(hash, 31) + value.charCodeAt(i)) | 0;
-  return COLORS[(hash >>> 0) % COLORS.length]!;
+  return colors[(hash >>> 0) % colors.length]!;
 }
 
 function clamp(value: number, min: number, max: number): number { return Math.min(max, Math.max(min, value)); }
+function optionalNs(value: string | null): string { return value === null ? '—' : `${value} ns`; }
 
 class Viewer {
   private readonly report: Report;
@@ -47,9 +56,10 @@ class Viewer {
   private readonly ruler: HTMLCanvasElement;
   private readonly detail: HTMLElement;
   private readonly rangeLabel: HTMLElement;
+  private readonly tooltip: HTMLElement;
   private readonly collapsed = new Set<string>();
   private readonly hits: Hit[] = [];
-  private rows: Row[] = [];
+  private rows: TimelineRow[] = [];
   private domain: Domain | undefined;
   private start = 0n;
   private nsPerPx = 1;
@@ -57,16 +67,38 @@ class Viewer {
   private related = new Set<string>();
   private drag: { x: number; y: number; start: bigint; moved: boolean } | undefined;
   private frame = 0;
+  private ioPage = 0;
+  private operationPage = 0;
+  private selectedIo: IoSummary | undefined;
+  private regionPage = 0;
+  private threadPage = 0;
+  private selectedRegion: OpenmpRegion | undefined;
+  private runtimePage = 0;
+  private callbackPage = 0;
+  private selectedRuntime: OpenmpRuntime | undefined;
+  private theme: Theme = startingTheme;
+  private colors = canvasThemes[startingTheme];
 
   constructor(report: Report, root: HTMLElement) {
     this.report = report;
     this.data = indexReport(report);
     this.root = root;
     // Only application-owned static markup is used here. All report strings enter via textContent or Canvas.
-    root.innerHTML = `<header class="topbar"><div class="brand"><div class="mark">r/</div><div><strong>rprof</strong><small>OFFLINE TIMELINE</small></div></div><div class="header-meta" id="header-meta"></div></header>
+    root.innerHTML = `<header class="topbar"><div class="brand"><div class="mark">r/</div><div><strong>rprof</strong><small>OFFLINE TIMELINE</small></div></div><div class="header-actions"><div class="header-meta" id="header-meta"></div><button id="theme-toggle" type="button"></button></div></header>
       <section class="overview"><div class="overview-copy"><div class="eyebrow">CAPTURE OVERVIEW</div><h1 id="session-title">Session</h1><p id="overview-subtitle"></p></div><div class="stat-grid" id="stat-grid"></div></section>
       <div class="workspace"><section class="timeline-section"><div class="toolbar"><div class="toolbar-top"><div class="toolbar-heading"><h2>Timeline</h2><span id="domain-note">CLOCK DOMAINS ARE UNALIGNED</span></div><div class="zoom-controls"><button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button><button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button><button id="fit-view" type="button">Fit all</button></div></div><div class="toolbar-fields"><label class="field">Clock domain <select id="domain-select" aria-label="Clock domain"></select></label><label class="field search">Filter <input id="filter-input" type="search" placeholder="Name, category, rank…" aria-label="Filter tracks and events"></label><span id="range-label" class="range-label"></span></div></div><div class="ruler-wrap"><div class="track-header">TRACKS <span>▾ collapse</span></div><canvas id="time-ruler" aria-label="Timeline time axis"></canvas></div><div class="plot-scroll" id="timeline-scroll" tabindex="0" aria-label="Timeline tracks; scroll vertically, wheel over plot to zoom, drag to pan"><canvas id="timeline-canvas" aria-label="Interactive timeline spans and counters"></canvas><div id="timeline-spacer"></div></div><div class="timeline-footer"><span><i class="legend-swatch span-key"></i> span <i class="legend-swatch counter-key"></i> counter <i class="legend-swatch incomplete-key"></i> incomplete</span><span>Wheel: zoom · Drag: pan · Shift + wheel: scroll</span></div></section><aside class="sidebar"><section class="side-card" id="detail-panel"><div class="side-title">INSPECTOR</div><div id="detail-content" class="detail-content"></div></section><section class="side-card"><div class="side-title">CATEGORY SUMMARY <span>INCLUSIVE TIME</span></div><div class="category-wrap"><table id="category-table"><thead><tr><th>Category</th><th>Spans</th><th>Time</th></tr></thead><tbody></tbody></table></div><p class="footnote">Inclusive durations may overlap and double-count nested work. Counts cover the full capture, not just retained events.</p></section><section class="side-card"><div class="side-title">CAPTURE STATUS</div><div id="capture-status"></div></section></aside></div>`;
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
+    // Static structure only: measured file names and values are always inserted as text nodes.
+    root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
+    if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p>Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only</p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><details id="openmp-runtimes"><summary>Runtime and callback registration details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
+    const legend = root.querySelector('.timeline-footer span')!;
+    legend.append(node('i', 'legend-swatch mpi-key'), document.createTextNode(' MPI'));
+    if (report.openmp) legend.append(node('i', 'legend-swatch openmp-key'), document.createTextNode(' OpenMP'));
+    this.tooltip = node('div', 'timeline-tooltip');
+    this.tooltip.id = 'timeline-tooltip';
+    this.tooltip.setAttribute('role', 'tooltip');
+    this.tooltip.hidden = true;
+    root.append(this.tooltip);
     this.filter = this.get('filter-input') as HTMLInputElement;
     this.scroll = this.get('timeline-scroll');
     this.spacer = this.get('timeline-spacer');
@@ -75,6 +107,11 @@ class Viewer {
     this.detail = this.get('detail-content');
     this.rangeLabel = this.get('range-label');
     this.setupOverview();
+    this.get('theme-toggle').addEventListener('click', () => {
+      this.setTheme(this.theme === 'dark' ? 'light' : 'dark');
+      rememberTheme(this.theme);
+    });
+    this.setTheme(this.theme);
     this.get('domain-note').textContent = report.domains.length > 1 ? 'CLOCK DOMAINS ARE UNALIGNED' : 'SAME-DOMAIN MONOTONIC TIME';
     for (const domain of report.domains) {
       const option = node('option', '', `${domain.name} · ${domain.id}${report.domains.length > 1 ? ' (unaligned)' : ''}`);
@@ -87,7 +124,7 @@ class Viewer {
     this.get('zoom-in').addEventListener('click', () => this.zoom(0.5));
     this.get('zoom-out').addEventListener('click', () => this.zoom(2));
     this.get('fit-view').addEventListener('click', () => this.fit());
-    this.scroll.addEventListener('scroll', () => this.schedule());
+    this.scroll.addEventListener('scroll', () => { this.hideTooltip(); this.schedule(); });
     this.scroll.addEventListener('keydown', event => {
       if (event.key === '+' || event.key === '=') { this.zoom(0.5); event.preventDefault(); }
       else if (event.key === '-') { this.zoom(2); event.preventDefault(); }
@@ -112,6 +149,7 @@ class Viewer {
       this.drag = { x: event.clientX, y: event.clientY, start: this.start, moved: false };
     });
     this.canvas.addEventListener('pointermove', event => {
+      this.hover(event);
       if (!this.drag) return;
       const dx = event.clientX - this.drag.x;
       if (Math.abs(dx) + Math.abs(event.clientY - this.drag.y) > 4) this.drag.moved = true;
@@ -127,12 +165,24 @@ class Viewer {
       if (!moved) this.onClick(event.offsetX, event.offsetY);
     });
     this.canvas.addEventListener('pointercancel', () => { this.drag = undefined; });
+    this.canvas.addEventListener('pointerleave', () => this.hideTooltip());
     new ResizeObserver(() => { this.buildRows(); this.schedule(); }).observe(this.scroll);
+    window.addEventListener('resize', () => { this.buildRows(); this.schedule(); });
     this.setDomain(report.domains[0]);
     this.showDetails();
   }
 
   private get(id: string): HTMLElement { return this.root.querySelector<HTMLElement>(`#${id}`)!; }
+  private setTheme(theme: Theme): void {
+    this.theme = theme;
+    this.colors = canvasThemes[theme];
+    document.documentElement.dataset.theme = theme;
+    const target = theme === 'dark' ? 'light' : 'dark';
+    const button = this.get('theme-toggle');
+    button.textContent = target === 'light' ? 'Light mode' : 'Dark mode';
+    button.setAttribute('aria-label', `Switch to ${target} theme`);
+    this.schedule();
+  }
   private plotWidth(): number { return Math.max(1, this.scroll.clientWidth - LABEL_WIDTH); }
   private extent(): bigint { return this.domain ? BigInt(this.domain.end_ns) : 0n; }
   private visibleDuration(): bigint { return BigInt(Math.max(1, Math.round(this.plotWidth() * this.nsPerPx))); }
@@ -174,6 +224,24 @@ class Viewer {
     put(dl, 'div', 'Recovered inputs', summary.recovered_inputs);
     put(dl, 'div', 'Collector loss', summary.dropped);
     put(dl, 'div', 'Retention omitted', summary.omitted_events);
+    const tracks = new Map(this.report.tracks.map(track => [track.id, track]));
+    const health = new Map<string, { label: string; values: Map<string, string> }>();
+    for (const counter of this.report.counters.filter(counter => isCollectorHealth(counter.name))) {
+      const collector = counter.name.split('.')[0]!;
+      const track = tracks.get(counter.track);
+      const key = `${collector}:${track?.shard ?? counter.track}`;
+      if (!health.has(key)) health.set(key, { label: `${collector.toUpperCase()} · ${track?.rank == null ? (track?.shard.slice(0, 8) ?? 'capture') : `rank ${track.rank}`}`, values: new Map() });
+      health.get(key)!.values.set(counter.name.slice(collector.length + 1), counter.value);
+    }
+    for (const group of health.values()) {
+      const value = group.values;
+      const parts: string[] = [];
+      if (value.has('attempted_events')) parts.push(`${value.get('received_events') ?? '—'}/${value.get('attempted_events')} received`);
+      if (value.has('ingress_dropped_events')) parts.push(`${value.get('ingress_dropped_events')} dropped`);
+      if (value.has('initialized_images')) parts.push(`${value.get('initialized_images')} initialized images`);
+      if (value.has('clock.uncertainty_ns')) parts.push(`clock ±${value.get('clock.uncertainty_ns')} ns`);
+      if (parts.length) put(dl, 'div', group.label, parts.join(' · '));
+    }
     status.append(dl);
     if (summary.warnings.length) {
       const warnings = node('div', 'warnings');
@@ -185,13 +253,212 @@ class Viewer {
 
   private setDomain(domain: Domain | undefined): void {
     this.domain = domain;
+    this.get('domain-note').textContent = domain?.calibration ? 'ESTIMATED MPI CLOCK ALIGNMENT' : this.report.domains.length > 1 ? 'CLOCK DOMAINS ARE UNALIGNED' : 'SAME-DOMAIN MONOTONIC TIME';
+    this.hideTooltip();
+    this.ioPage = 0;
+    this.selectedIo = undefined;
+    this.renderIo();
+    this.regionPage = 0;
+    this.threadPage = 0;
+    this.selectedRegion = undefined;
+    this.runtimePage = 0;
+    this.callbackPage = 0;
+    this.selectedRuntime = undefined;
+    if (this.report.openmp) this.renderOpenmp();
     this.selection = undefined;
     this.related.clear();
     this.showDetails();
     if (domain) this.domainSelect.value = domain.id;
-    this.fit();
     this.buildRows();
+    this.fit();
     this.schedule();
+  }
+
+  private renderIo(): void {
+    const files = (this.report.io ?? []).filter(file => file.domain === this.domain?.id);
+    const tbody = this.get('io-table').querySelector('tbody')!;
+    tbody.replaceChildren();
+    this.get('io-count').textContent = `${files.length} files`;
+    for (const file of files.slice(this.ioPage * IO_PAGE_SIZE, (this.ioPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      const button = node('button', 'io-file', `${file.host} · ${file.file}`);
+      button.type = 'button';
+      button.addEventListener('click', () => { this.selectedIo = file; this.operationPage = 0; this.renderIoDetail(); });
+      const identity = node('td'); identity.append(button);
+      row.append(identity, node('td', '', file.operations), node('td', '', file.errors),
+        node('td', '', `${file.read_bytes} / ${file.requested_read_bytes} B`),
+        node('td', '', `${file.write_bytes} / ${file.requested_write_bytes} B`),
+        node('td', '', observedRate(file.read_bytes, file.window_ns)),
+        node('td', '', observedRate(file.write_bytes, file.window_ns)));
+      tbody.append(row);
+    }
+    if (!files.length) {
+      const row = node('tr'); const cell = node('td', 'empty-table', 'No per-file I/O recorded in this clock domain');
+      cell.colSpan = 7; row.append(cell); tbody.append(row);
+    }
+    this.renderPager(this.get('io-pager'), files.length, this.ioPage, page => { this.ioPage = page; this.renderIo(); });
+    this.renderIoDetail();
+  }
+
+  private renderPager(parent: HTMLElement, total: number, page: number, change: (page: number) => void): void {
+    parent.replaceChildren();
+    if (total <= IO_PAGE_SIZE) return;
+    const previous = node('button', '', 'Previous'); previous.type = 'button'; previous.disabled = page === 0;
+    previous.addEventListener('click', () => change(page - 1));
+    const next = node('button', '', 'Next'); next.type = 'button'; next.disabled = (page + 1) * IO_PAGE_SIZE >= total;
+    next.addEventListener('click', () => change(page + 1));
+    parent.append(previous, node('span', '', `Rows ${page * IO_PAGE_SIZE + 1}–${Math.min(total, (page + 1) * IO_PAGE_SIZE)} of ${total}`), next);
+  }
+
+  private renderIoDetail(): void {
+    const detail = this.get('io-detail');
+    detail.replaceChildren();
+    const file = this.selectedIo;
+    if (!file) return;
+    detail.append(node('h3', '', `${file.host} · ${file.file}`),
+      node('p', 'io-note', `Observed window: ${file.window_ns} ns · Total operation latency: ${file.total_ns} ns`));
+    const wrap = node('div', 'io-wrap');
+    const table = node('table'); table.id = 'io-operations';
+    const head = node('thead'); const heading = node('tr');
+    for (const label of ['Operation', 'Count', 'Average latency', 'Max latency', 'Errors']) heading.append(node('th', '', label));
+    head.append(heading); table.append(head);
+    const body = node('tbody');
+    for (const operation of file.by_operation.slice(this.operationPage * IO_PAGE_SIZE, (this.operationPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      row.append(node('td', '', operation.name), node('td', '', operation.count),
+        node('td', '', averageNs(operation.total_ns, operation.count)),
+        node('td', '', `${operation.max_ns} ns`), node('td', '', operation.errors));
+      body.append(row);
+    }
+    if (!file.by_operation.length) {
+      const row = node('tr'); const cell = node('td', 'empty-table', 'No operation breakdown recorded');
+      cell.colSpan = 5; row.append(cell); body.append(row);
+    }
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'io-operation-pager'; detail.append(pager);
+    this.renderPager(pager, file.by_operation.length, this.operationPage, page => { this.operationPage = page; this.renderIoDetail(); });
+  }
+
+  private renderOpenmp(): void {
+    const summary = this.report.openmp;
+    if (!summary) return;
+    const regions = summary.regions.filter(region => region.domain === this.domain?.id);
+    const runtimes = summary.runtimes.filter(runtime => runtime.domain === this.domain?.id);
+    this.get('openmp-count').textContent = `${regions.length} regions`;
+    this.get('openmp-tasks').textContent = `Capture-wide task totals: ${summary.tasks_created} created · ${summary.tasks_completed} completed · ${summary.execution_segments} execution segments (not filtered by domain)`;
+    const body = this.get('openmp-regions').querySelector('tbody')!;
+    body.replaceChildren();
+    for (const region of regions.slice(this.regionPage * IO_PAGE_SIZE, (this.regionPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      const identity = node('td');
+      const button = node('button', 'io-file', `Region ${region.parallel_id} · PID ${region.pid} · instance ${region.instance} · shard ${region.shard}`);
+      button.type = 'button';
+      button.addEventListener('click', () => { this.selectedRegion = region; this.threadPage = 0; this.renderOpenmpDetail(); });
+      identity.append(button);
+      row.append(identity, node('td', '', `${region.requested_threads} / ${region.observed_threads}`),
+        node('td', '', optionalNs(region.duration_ns)), node('td', '', `${region.work_ns} ns`),
+        node('td', '', `${region.wait_ns} ns`),
+        node('td', '', `${optionalNs(region.work_min_ns)} / ${optionalNs(region.work_max_ns)} / ${optionalNs(region.work_spread_ns)}`));
+      body.append(row);
+    }
+    if (!regions.length) {
+      const row = node('tr'); const cell = node('td', 'empty-table', 'No OpenMP regions recorded in this clock domain');
+      cell.colSpan = 6; row.append(cell); body.append(row);
+    }
+    this.renderPager(this.get('openmp-region-pager'), regions.length, this.regionPage, page => { this.regionPage = page; this.renderOpenmp(); });
+    this.renderOpenmpDetail();
+    this.get('openmp-runtime-count').textContent = `· ${runtimes.length} runtimes in this domain`;
+    const runtimeList = this.get('openmp-runtime-list'); runtimeList.replaceChildren();
+    for (const runtime of runtimes.slice(this.runtimePage * IO_PAGE_SIZE, (this.runtimePage + 1) * IO_PAGE_SIZE)) {
+      const line = node('div', 'openmp-runtime-row');
+      const select = node('button', 'io-file', `PID ${runtime.pid} · ${runtime.instance} · shard ${runtime.shard}`);
+      select.type = 'button';
+      select.addEventListener('click', () => { this.selectedRuntime = runtime; this.callbackPage = 0; this.renderOpenmpCallbacks(); });
+      line.append(select, node('span', '', `Runtime ${runtime.version} · OpenMP ${runtime.omp_version} · initialized: ${runtime.initialized} · finalized: ${runtime.finalized} · sequence gaps: ${runtime.sequence_gaps} · unmatched endpoints: ${runtime.unmatched_endpoints} · abandoned intervals: ${runtime.abandoned_intervals}`));
+      runtimeList.append(line);
+    }
+    if (!runtimes.length) runtimeList.append(node('p', 'io-note', 'No OpenMP runtime recorded in this clock domain; instrumentation may be unsupported or not initialized.'));
+    this.renderPager(this.get('openmp-runtime-pager'), runtimes.length, this.runtimePage, page => { this.runtimePage = page; this.renderOpenmp(); });
+    this.renderOpenmpCallbacks();
+  }
+
+  private renderOpenmpDetail(): void {
+    const detail = this.get('openmp-detail'); detail.replaceChildren();
+    const region = this.selectedRegion;
+    if (!region) return;
+    const threads = regionThreads(this.report, region);
+    detail.append(node('h3', '', `Region ${region.parallel_id} · PID ${region.pid}`),
+      node('p', 'io-note', 'Recorded inclusive intervals; scheduled time includes logical task context (including waits), not CPU utilization or CPU cycles. Unknown durations are shown as —.'));
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'openmp-threads';
+    const head = node('thead'); const heading = node('tr');
+    for (const label of ['Thread ID', 'Team index', 'Work', 'Wait', 'Sync', 'Scheduled interval', 'Execution segments']) heading.append(node('th', '', label));
+    head.append(heading); table.append(head);
+    const body = node('tbody');
+    for (const thread of threads.slice(this.threadPage * IO_PAGE_SIZE, (this.threadPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      row.append(node('td', '', thread.tid), node('td', '', thread.team_index ?? '—'), node('td', '', `${thread.work_ns} ns`),
+        node('td', '', `${thread.wait_ns} ns`), node('td', '', `${thread.sync_ns} ns`),
+        node('td', '', `${thread.scheduled_ns} ns`), node('td', '', thread.execution_segments));
+      body.append(row);
+    }
+    if (!threads.length) {
+      const row = node('tr'); const cell = node('td', 'empty-table', 'No per-thread intervals recorded for this region');
+      cell.colSpan = 7; row.append(cell); body.append(row);
+    }
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'openmp-thread-pager'; detail.append(pager);
+    this.renderPager(pager, threads.length, this.threadPage, page => { this.threadPage = page; this.renderOpenmpDetail(); });
+  }
+
+  private renderOpenmpCallbacks(): void {
+    const detail = this.get('openmp-callback-detail'); detail.replaceChildren();
+    const runtime = this.selectedRuntime;
+    if (!runtime) return;
+    detail.append(node('h3', '', `Callbacks · PID ${runtime.pid} · ${runtime.instance}`),
+      node('p', 'io-note', 'Registration status is not evidence that a callback was received. Unknown observed counts are not zero.'));
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'openmp-callbacks';
+    const head = node('thead'); const heading = node('tr');
+    for (const label of ['Callback', 'Registration status', 'Received callbacks', 'Observation complete']) heading.append(node('th', '', label));
+    head.append(heading); table.append(head);
+    const body = node('tbody');
+    for (const callback of runtime.callbacks.slice(this.callbackPage * IO_PAGE_SIZE, (this.callbackPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', callback.name), node('td', '', callback.status),
+        node('td', '', callback.observed ?? 'Unknown'), node('td', '', callback.observed_complete ? 'Yes' : 'No'));
+      body.append(row);
+    }
+    if (!runtime.callbacks.length) {
+      const row = node('tr'); const cell = node('td', 'empty-table', 'No callback registration data recorded');
+      cell.colSpan = 4; row.append(cell); body.append(row);
+    }
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'openmp-callback-pager'; detail.append(pager);
+    this.renderPager(pager, runtime.callbacks.length, this.callbackPage, page => { this.callbackPage = page; this.renderOpenmpCallbacks(); });
+  }
+
+  private hitAt(x: number, y: number): Hit | undefined {
+    for (let i = this.hits.length - 1; i >= 0; i--) {
+      const hit = this.hits[i]!;
+      if (x >= hit.x && x <= hit.x + hit.width && y >= hit.y && y <= hit.y + hit.height) return hit;
+    }
+    return undefined;
+  }
+
+  private hideTooltip(): void {
+    this.tooltip.hidden = true;
+    this.canvas.removeAttribute('title');
+  }
+
+  private hover(event: PointerEvent): void {
+    if (this.drag) { this.hideTooltip(); return; }
+    const bounds = this.canvas.getBoundingClientRect();
+    const hit = this.hitAt(event.clientX - bounds.left, event.clientY - bounds.top);
+    if (!hit) { this.hideTooltip(); return; }
+    const label = hit.selection.kind === 'span' ? hit.selection.item.span.name : hit.selection.item.counter.name;
+    this.tooltip.textContent = label;
+    this.canvas.title = label;
+    this.tooltip.hidden = false;
+    this.tooltip.style.left = `${Math.max(8, Math.min(event.clientX + 12, window.innerWidth - this.tooltip.offsetWidth - 8))}px`;
+    this.tooltip.style.top = `${Math.max(8, Math.min(event.clientY + 16, window.innerHeight - this.tooltip.offsetHeight - 8))}px`;
   }
 
   private fit(): void {
@@ -211,70 +478,12 @@ class Viewer {
   }
 
   private buildRows(): void {
-    const rows: Row[] = [];
-    const query = this.filter.value;
-    const tracks = this.report.tracks;
-    const byShard = new Map<string, Track[]>();
-    const byParent = new Map<string, Track[]>();
-    for (const track of tracks) {
-      const group = track.parent ? byParent : byShard;
-      const key = track.parent ?? track.shard;
-      if (!group.has(key)) group.set(key, []);
-      group.get(key)!.push(track);
-    }
-    const matchCache = new Map<string, boolean>();
-    const matchesTree = (track: Track, visited = new Set<string>()): boolean => {
-      if (matchCache.has(track.id)) return matchCache.get(track.id)!;
-      if (visited.has(track.id)) return false;
-      visited.add(track.id);
-      const data = this.data.get(track.id);
-      const match = !query || matchesFilter(track.name, track.kind, track.rank, query) ||
-        !!data?.spans.items.some(item => matchesFilter(`${track.name} ${item.span.name}`, item.span.category, track.rank, query)) ||
-        !!data && [...data.counters.keys()].some(name => matchesFilter(`${track.name} ${name}`, 'counter', track.rank, query)) ||
-        (byParent.get(track.id) ?? []).some(child => matchesTree(child, visited));
-      matchCache.set(track.id, match);
-      return match;
-    };
-    let top = 0;
-    const add = (row: Omit<Row, 'top'>): void => { rows.push({ ...row, top }); top += row.height; };
-    const addTrack = (track: Track, shard: Shard, depth: number, ancestors = new Set<string>()): void => {
-      if (ancestors.has(track.id) || !matchesTree(track)) return;
-      const children = byParent.get(track.id) ?? [];
-      const data = this.data.get(track.id);
-      const series = [...(data?.counters.keys() ?? [])].filter(name => !query || matchesFilter(`${track.name} ${name}`, 'counter', track.rank, query));
-      const key = `track:${track.id}`;
-      add({ key, kind: 'track', label: track.name, depth, height: 66, shard, track,
-        hasChildren: children.length > 0 || series.length > 0 });
-      if (this.collapsed.has(key)) return;
-      const next = new Set(ancestors); next.add(track.id);
-      for (const child of children) addTrack(child, shard, depth + 1, next);
-      for (const name of series) add({ key: `counter:${track.id}:${name}`, kind: 'counter', label: name,
-        depth: depth + 1, height: 56, shard, track, series: name, hasChildren: false });
-    };
-    for (const shard of this.report.shards) {
-      if (shard.domain !== this.domain?.id) continue;
-      const own = byShard.get(shard.id) ?? [];
-      if (query && !matchesFilter(`${shard.name} ${shard.hostname}`, 'shard', null, query) && !own.some(track => matchesTree(track))) continue;
-      const key = `shard:${shard.id}`;
-      add({ key, kind: 'shard', label: `${shard.name}${shard.hostname && shard.hostname !== shard.name ? ` · ${shard.hostname}` : ''}`,
-        depth: 0, height: 39, shard, hasChildren: own.length > 0 });
-      if (this.collapsed.has(key)) continue;
-      const ranked = new Map<number | null, Track[]>();
-      for (const track of own) {
-        if (!ranked.has(track.rank)) ranked.set(track.rank, []);
-        ranked.get(track.rank)!.push(track);
-      }
-      for (const [rank, group] of ranked) {
-        if (rank === null) { for (const track of group) addTrack(track, shard, 1); continue; }
-        if (!group.some(track => matchesTree(track))) continue;
-        const rankKey = `rank:${shard.id}:${rank}`;
-        add({ key: rankKey, kind: 'rank', label: `Rank ${rank}`, depth: 1, height: 31, shard, hasChildren: true });
-        if (!this.collapsed.has(rankKey)) for (const track of group) addTrack(track, shard, 2);
-      }
-    }
-    this.rows = rows;
-    this.spacer.style.height = `${Math.max(0, top - this.scroll.clientHeight)}px`;
-    this.scroll.scrollTop = Math.min(this.scroll.scrollTop, Math.max(0, top - this.scroll.clientHeight));
+    this.rows = timelineRows(this.report, this.data, this.domain?.id, this.filter.value, this.collapsed);
+    const top = this.rows.at(-1)?.top ?? 0;
+    const height = this.rows.at(-1)?.height ?? 0;
+    this.scroll.style.height = `${Math.min(Math.max(260, Math.min(640, window.innerHeight * 0.64)), Math.max(260, top + height))}px`;
+    this.spacer.style.height = `${Math.max(0, top + height - this.scroll.clientHeight)}px`;
+    this.scroll.scrollTop = Math.min(this.scroll.scrollTop, Math.max(0, top + height - this.scroll.clientHeight));
   }
 
   private resize(canvas: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D {
@@ -296,12 +505,13 @@ class Viewer {
   }
 
   private draw(): void {
+    this.hideTooltip();
     const width = this.scroll.clientWidth;
     const height = this.scroll.clientHeight;
     if (!width || !height) return;
     const ctx = this.resize(this.canvas, width, height);
     this.hits.length = 0;
-    ctx.fillStyle = '#111d2a'; ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = this.colors.background; ctx.fillRect(0, 0, width, height);
     this.drawRuler(width);
     const from = lowerBound(this.rows, row => row.top + row.height > this.scroll.scrollTop);
     const viewEnd = this.start + this.visibleDuration();
@@ -310,43 +520,43 @@ class Viewer {
       const row = this.rows[i]!;
       const y = row.top - this.scroll.scrollTop;
       if (y >= height) break;
-      ctx.fillStyle = row.kind === 'shard' ? '#1e3344' : row.kind === 'rank' ? '#1b2e3e' : i % 2 ? '#162432' : '#192838';
+      ctx.fillStyle = row.kind === 'shard' ? this.colors.shard : row.kind === 'rank' ? this.colors.rank : i % 2 ? this.colors.odd : this.colors.even;
       ctx.fillRect(0, y, width, row.height);
-      ctx.strokeStyle = '#2c3c4b'; ctx.beginPath(); ctx.moveTo(0, y + row.height - .5); ctx.lineTo(width, y + row.height - .5); ctx.stroke();
+      ctx.strokeStyle = this.colors.border; ctx.beginPath(); ctx.moveTo(0, y + row.height - .5); ctx.lineTo(width, y + row.height - .5); ctx.stroke();
       ctx.save(); ctx.beginPath(); ctx.rect(LABEL_WIDTH + 1, y, width - LABEL_WIDTH - 1, row.height); ctx.clip();
       if (row.kind === 'track') this.drawSpans(ctx, row, y, viewEnd, anchors);
       if (row.kind === 'counter') this.drawCounter(ctx, row, y, viewEnd);
       ctx.restore();
-      ctx.fillStyle = row.kind === 'shard' ? '#e5f2f5' : '#b4c6d2';
+      ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
       ctx.font = row.kind === 'shard' || row.kind === 'rank' ? '600 12px system-ui' : '12px system-ui';
       const indent = Math.min(125, 15 + row.depth * 17);
-      if (row.hasChildren) { ctx.fillStyle = '#79a7b6'; ctx.fillText(this.collapsed.has(row.key) ? '▸' : '▾', indent, y + row.height / 2 + 4); }
-      ctx.fillStyle = row.kind === 'shard' ? '#e5f2f5' : '#b4c6d2';
+      if (row.hasChildren) { ctx.fillStyle = this.colors.muted; ctx.fillText(this.collapsed.has(row.key) ? '▸' : '▾', indent, y + row.height / 2 + 4); }
+      ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
       const labelX = indent + (row.hasChildren ? 16 : 4);
       const maxWidth = LABEL_WIDTH - labelX - 10;
       ctx.fillText(row.label, labelX, y + row.height / 2 + 4, maxWidth);
-      if (row.kind === 'track' && row.track) {
-        ctx.font = '10px system-ui'; ctx.fillStyle = '#6e95a5';
+      if (row.kind === 'track' && row.track && row.height >= 52) {
+        ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
         ctx.fillText(`${row.track.kind.replace('_', ' ')}${row.track.rank === null ? '' : ` · rank ${row.track.rank}`}`, labelX, y + row.height / 2 + 19, maxWidth);
       }
       if (row.kind === 'shard' && !row.shard.complete) {
-        ctx.font = '10px system-ui'; ctx.fillStyle = '#f2a895'; ctx.fillText('PARTIAL', LABEL_WIDTH - 55, y + row.height / 2 + 4);
+        ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.partial; ctx.fillText('PARTIAL', LABEL_WIDTH - 55, y + row.height / 2 + 4);
       }
     }
     this.drawLinks(ctx, anchors);
-    ctx.fillStyle = '#203849'; ctx.fillRect(LABEL_WIDTH - 1, 0, 1, height);
+    ctx.fillStyle = this.colors.border; ctx.fillRect(LABEL_WIDTH - 1, 0, 1, height);
     if (!this.rows.length) {
-      ctx.fillStyle = '#9eb6c4'; ctx.font = '14px system-ui';
+      ctx.fillStyle = this.colors.muted; ctx.font = '14px system-ui';
       ctx.fillText(this.domain ? 'No tracks match this view. Try clearing the filter.' : 'No clock domains recorded. This capture has no timeline events.', 25, 50);
     }
-    this.rangeLabel.textContent = this.domain ? `${formatNs(this.start)} – ${formatNs(this.start + this.visibleDuration())} · domain-relative${this.report.domains.length > 1 ? ' · unaligned' : ''}` : 'No clock domain';
+    this.rangeLabel.textContent = this.domain ? `${formatNs(this.start)} – ${formatNs(this.start + this.visibleDuration())} · domain-relative${this.domain.calibration ? ` · estimated ±${this.domain.calibration.uncertainty_ns} ns` : this.report.domains.length > 1 ? ' · unaligned' : ''}` : 'No clock domain';
   }
 
   private drawRuler(width: number): void {
     const ctx = this.resize(this.ruler, Math.max(1, width - LABEL_WIDTH), 35);
     const plotWidth = width - LABEL_WIDTH;
-    ctx.fillStyle = '#1c3040'; ctx.fillRect(0, 0, plotWidth, 35);
-    ctx.font = '11px ui-monospace, monospace'; ctx.fillStyle = '#9dbbc7'; ctx.strokeStyle = '#426072';
+    ctx.fillStyle = this.colors.ruler; ctx.fillRect(0, 0, plotWidth, 35);
+    ctx.font = '11px ui-monospace, monospace'; ctx.fillStyle = this.colors.muted; ctx.strokeStyle = this.colors.tick;
     const duration = this.nsPerPx * 115;
     const exponent = 10 ** Math.floor(Math.log10(Math.max(1, duration)));
     const step = BigInt(Math.max(1, Math.round(([1, 2, 5, 10].find(n => n * exponent >= duration) ?? 10) * exponent)));
@@ -365,7 +575,7 @@ class Viewer {
     return correlation === selected || this.related.has(correlation);
   }
 
-  private drawSpans(ctx: CanvasRenderingContext2D, row: Row, y: number, end: bigint,
+  private drawSpans(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint,
     anchors: Map<string, { x: number; y: number }>): void {
     const track = row.track!;
     const data = this.data.get(track.id);
@@ -381,24 +591,21 @@ class Viewer {
       const left = Math.max(LABEL_WIDTH + 1, x);
       const right = Math.min(this.scroll.clientWidth, Math.max(x + 2, endX));
       if (right <= left) continue;
-      const spanY = y + 7 + item.lane * 14;
+      const spanY = y + SPAN_TOP + item.lane * SPAN_PITCH;
       const selected = this.selection?.kind === 'span' && this.selection.item.span.id === span.id;
       ctx.fillStyle = colorFor(span.category);
       ctx.globalAlpha = this.selection && !selected && !this.highlighted(span.correlation) ? .47 : .95;
       ctx.fillRect(left, spanY, right - left, 11);
       ctx.globalAlpha = 1;
-      if (span.incomplete) { ctx.strokeStyle = '#ffe3a2'; ctx.setLineDash([2, 2]); ctx.strokeRect(left, spanY, right - left, 11); ctx.setLineDash([]); }
-      if (selected || this.highlighted(span.correlation)) { ctx.strokeStyle = '#fff4bd'; ctx.lineWidth = 2; ctx.strokeRect(left - 1, spanY - 1, right - left + 2, 13); ctx.lineWidth = 1; }
+      if (span.incomplete) { ctx.strokeStyle = this.colors.incomplete; ctx.setLineDash([2, 2]); ctx.strokeRect(left, spanY, right - left, 11); ctx.setLineDash([]); }
+      if (selected || this.highlighted(span.correlation)) { ctx.strokeStyle = this.colors.selected; ctx.lineWidth = 2; ctx.strokeRect(left - 1, spanY - 1, right - left + 2, 13); ctx.lineWidth = 1; }
       if (right - left > 46) { ctx.fillStyle = '#10212d'; ctx.font = '10px system-ui'; ctx.fillText(span.name, left + 4, spanY + 9, right - left - 7); }
       this.hits.push({ x: left, y: spanY, width: Math.max(3, right - left), height: 12, selection: { kind: 'span', item } });
       if (span.correlation && !anchors.has(span.correlation)) anchors.set(span.correlation, { x: clamp((left + right) / 2, LABEL_WIDTH, this.scroll.clientWidth), y: spanY + 5 });
     }
-    if (data.spans.items.length > MAX_DRAWN_SPANS && spans.length >= MAX_DRAWN_SPANS) {
-      ctx.fillStyle = '#f9c981'; ctx.font = '10px system-ui'; ctx.fillText('Dense view · zoom for individual events', LABEL_WIDTH + 10, y + row.height - 2);
-    }
   }
 
-  private drawCounter(ctx: CanvasRenderingContext2D, row: Row, y: number, end: bigint): void {
+  private drawCounter(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
     const samples = this.data.get(row.track!.id)?.counters.get(row.series!) ?? [];
     const first = lowerBound(samples, sample => sample.time >= this.start);
     const last = lowerBound(samples, sample => sample.time > end);
@@ -414,22 +621,22 @@ class Viewer {
     const min = Math.min(...finite);
     const max = Math.max(...finite);
     const range = max - min || 1;
-    const color = colorFor(row.series!);
+    const color = colorFor(row.series!, this.colors.counters);
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
     let started = false;
     for (let i = 0; i < points.length; i++) {
       const value = values[i]!;
       if (!Number.isFinite(value)) { started = false; continue; }
       const x = LABEL_WIDTH + timeToX(points[i]!.time, this.start, this.nsPerPx);
-      const py = y + 41 - (value - min) / range * 30;
+      const py = y + COUNTER_PLOT_TOP + COUNTER_PLOT_HEIGHT * (1 - (value - min) / range);
       if (!started) { ctx.moveTo(x, py); started = true; } else ctx.lineTo(x, py);
       const selected = this.selection?.kind === 'counter' && this.selection.item === points[i];
-      ctx.fillStyle = selected ? '#fff4bd' : color;
+      ctx.fillStyle = selected ? this.colors.selected : color;
       ctx.fillRect(x - (selected ? 3 : 2), py - (selected ? 3 : 2), selected ? 6 : 4, selected ? 6 : 4);
       this.hits.push({ x: x - 5, y: py - 7, width: 10, height: 14, selection: { kind: 'counter', item: points[i]! } });
     }
     ctx.stroke(); ctx.lineWidth = 1;
-    ctx.fillStyle = '#84a7b5'; ctx.font = '10px system-ui';
+    ctx.fillStyle = this.colors.muted; ctx.font = '10px system-ui';
     ctx.fillText(`${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
   }
 
@@ -441,7 +648,7 @@ class Viewer {
       if (edge.from !== selected && edge.to !== selected) continue;
       const a = anchors.get(edge.from), b = anchors.get(edge.to);
       if (!a || !b || drawn++ >= 40) continue;
-      ctx.save(); ctx.strokeStyle = '#ffe5a7'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+      ctx.save(); ctx.strokeStyle = this.colors.link; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.bezierCurveTo((a.x + b.x) / 2, a.y, (a.x + b.x) / 2, b.y, b.x, b.y); ctx.stroke(); ctx.restore();
     }
   }
@@ -456,11 +663,8 @@ class Viewer {
       else if (row?.track) this.showTrack(row.track);
       return;
     }
-    let hit: Hit | undefined;
-    for (let i = this.hits.length - 1; i >= 0; i--) {
-      const item = this.hits[i]!;
-      if (x >= item.x && x <= item.x + item.width && y >= item.y && y <= item.y + item.height) { hit = item; break; }
-    }
+    const hit = this.hitAt(x, y);
+    this.hideTooltip();
     this.selection = hit?.selection;
     this.updateRelated();
     this.showDetails(); this.schedule();

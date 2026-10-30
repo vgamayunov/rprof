@@ -17,6 +17,113 @@ pub struct Report {
     pub spans: Vec<ReportSpan>,
     pub counters: Vec<ReportCounter>,
     pub dependencies: Vec<Dependency>,
+    #[serde(default)]
+    pub io: Vec<IoSummary>,
+    #[serde(default)]
+    pub mpi: Vec<MpiCallSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openmp: Option<OpenmpSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenmpSummary {
+    pub runtimes: Vec<OpenmpRuntime>,
+    pub regions: Vec<OpenmpRegion>,
+    pub threads: Vec<OpenmpThread>,
+    pub tasks_created: String,
+    pub tasks_completed: String,
+    pub execution_segments: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenmpRuntime {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub pid: String,
+    pub version: String,
+    pub omp_version: String,
+    pub initialized: bool,
+    pub finalized: bool,
+    pub callbacks: Vec<OpenmpCallback>,
+    pub sequence_gaps: String,
+    pub unmatched_endpoints: String,
+    pub abandoned_intervals: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenmpCallback {
+    pub name: String,
+    pub status: String,
+    pub observed: Option<String>,
+    pub observed_complete: bool,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenmpRegion {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub pid: String,
+    pub parallel_id: String,
+    pub requested_threads: String,
+    pub observed_threads: String,
+    pub duration_ns: Option<String>,
+    pub work_ns: String,
+    pub wait_ns: String,
+    pub work_min_ns: Option<String>,
+    pub work_max_ns: Option<String>,
+    pub work_spread_ns: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenmpThread {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub pid: String,
+    pub tid: String,
+    pub parallel_id: String,
+    pub team_index: Option<String>,
+    pub work_ns: String,
+    pub wait_ns: String,
+    pub sync_ns: String,
+    pub scheduled_ns: String,
+    pub execution_segments: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MpiCallSummary {
+    pub shard: String,
+    pub rank: i32,
+    pub name: String,
+    pub calls: String,
+    pub errors: String,
+    pub total_ns: String,
+    pub max_ns: String,
+    pub logical_bytes: String,
+    pub calls_with_bytes: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoSummary {
+    pub domain: String,
+    pub host: String,
+    pub file: String,
+    pub operations: String,
+    pub errors: String,
+    pub read_bytes: String,
+    pub write_bytes: String,
+    pub requested_read_bytes: String,
+    pub requested_write_bytes: String,
+    pub total_ns: String,
+    pub window_ns: String,
+    pub by_operation: Vec<IoOperation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoOperation {
+    pub name: String,
+    pub count: String,
+    pub errors: String,
+    pub total_ns: String,
+    pub max_ns: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +163,16 @@ pub struct Domain {
     pub name: String,
     pub origin_ns: String,
     pub end_ns: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<ClockCalibration>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClockCalibration {
+    pub method: String,
+    pub uncertainty_ns: String,
+    pub max_drift_ns: String,
+    pub complete: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
