@@ -80,6 +80,21 @@ Browser tests include a real preload capture, per-file summaries, and named MPI
 call filtering/hover/inspection. See [I/O profiling](io-profiling.md) for the support
 matrix and cached-I/O overhead probe.
 
+## CUDA checks
+
+SDK-free CUDA tests are part of `cargo test --workspace`: invalid timing, API/GPU
+identity, ambiguous synchronization attribution, bounded correlation caches,
+exact byte counts, separate source losses, partial multi-image finalization, and
+noninitializing/conflicting injection paths.
+
+On an allocated CUDA 13 GPU host, run
+`CUDA_VISIBLE_DEVICES=0 PROFILE=release bash scripts/test-cuda.sh`. This builds the
+target adapter and fixtures and enables the ignored GPU integration tests. See
+[CUDA profiling](cuda-profiling.md#recorded-h100-validation) for the H100 one/two-device
+results, CUDA-event and Nsight Systems reference timing, and subscriber/exit controls.
+The exported H100 trace also imported into Perfetto with six `timed_add` slices,
+35,737,523 ns total kernel duration, 92 flows, and no nonzero import errors.
+
 ## Timeline/report checks
 
 Rust tests cover shared summaries, domain offsets/identities, large integers,

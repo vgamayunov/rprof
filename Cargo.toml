@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-io-protocol", "crates/rprof-preload", "crates/rprof-mpi-protocol", "crates/rprof-mpi", "crates/rprof-ompt-protocol", "crates/rprof-ompt", "crates/rprof-cli"]
+members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-io-protocol", "crates/rprof-preload", "crates/rprof-mpi-protocol", "crates/rprof-mpi", "crates/rprof-ompt-protocol", "crates/rprof-ompt", "crates/rprof-cuda-protocol", "crates/rprof-cuda", "crates/rprof-cli"]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +19,7 @@ rprof-report = { path = "crates/rprof-report" }
 rprof-io-protocol = { path = "crates/rprof-io-protocol" }
 rprof-mpi-protocol = { path = "crates/rprof-mpi-protocol" }
 rprof-ompt-protocol = { path = "crates/rprof-ompt-protocol" }
+rprof-cuda-protocol = { path = "crates/rprof-cuda-protocol" }
 libc = "0.2"
 signal-hook = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }

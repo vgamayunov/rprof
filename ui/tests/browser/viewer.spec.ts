@@ -34,12 +34,22 @@ function injected(name: string, change: (report: any) => void): string {
 }
 
 test.beforeAll(() => {
-  execFileSync('cargo', ['build', '-p', 'rprof-cli'], { cwd: root });
+  if (!process.env.RPROF_UI_SKIP_CARGO_BUILD) execFileSync('cargo', ['build', '-p', 'rprof-cli'], { cwd: root });
   directory = mkdtempSync(join(tmpdir(), 'rprof-browser-'));
   html = render(fixture, 'multitrack');
+  // For injected-model UI iteration when a concurrent native build is unavailable:
+  // the existing binary supplies the report JSON; use the just-built UI assets.
+  if (process.env.RPROF_UI_SKIP_CARGO_BUILD) {
+    const output = join(directory, 'multitrack.html');
+    const source = readFileSync(output, 'utf8');
+    writeFileSync(output, source.replace(/<style>[\s\S]*?<\/style>/,
+      `<style>${readFileSync(join(root, 'ui/dist/viewer.css'), 'utf8')}</style>`)
+      .replace(/<script>"use strict";[\s\S]*?<\/script>/,
+        `<script>${readFileSync(join(root, 'ui/dist/viewer.js'), 'utf8')}</script>`));
+  }
 });
 
-test.afterAll(() => rmSync(directory, { recursive: true, force: true }));
+test.afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
 async function loaded(page: Page, url = html): Promise<void> {
   await page.goto(url);
@@ -319,10 +329,150 @@ test('I/O panel paginates exact values, shows per-operation latency, escapes hos
 });
 
 test('older reports without an io field show an empty I/O panel', async ({ page }) => {
-  await loaded(page, injected('old-model', report => { delete report.io; delete report.openmp; }));
+  await loaded(page, injected('old-model', report => { delete report.io; delete report.openmp; delete report.cuda; }));
   await expect(page.locator('#io-count')).toHaveText('0 files');
   await expect(page.locator('#io-table')).toContainText('No per-file I/O recorded');
   await expect(page.locator('#openmp-panel')).toHaveCount(0);
+  await expect(page.locator('#cuda-panel')).toHaveCount(0);
+});
+
+test('CUDA panel filters domains, pages all arrays, shows exact values and partial source health safely in light mode', async ({ page }) => {
+  const huge = '9007199254740993';
+  const hostile = '<img src=x onerror="globalThis.rprofInjected=true">';
+  const url = injected('cuda-injected', report => {
+    const device = (domain: string, id: string) => ({ shard: 'shard-0', domain, instance: 'image-0', pid: '45',
+      device: id, name: hostile, identity: 'GPU identity', visible: true, memory_bytes: huge,
+      compute_major: '9', compute_minor: '0', multiprocessors: '132', kernels: huge, copies: '2', memsets: '1',
+      kernel_ns: huge, copy_ns: '12', copy_bytes: huge, memset_bytes: '8', window_ns: '20' });
+    const activity = (domain: string, deviceId: string, stream: string) => ({ shard: 'shard-0', domain,
+      instance: 'image-0', device: deviceId, context: 'ctx', stream, kind: 'kernel', name: `kernel-${stream}`,
+      count: huge, total_ns: huge, max_ns: '2', bytes: huge });
+    const api = (domain: string, name: string) => ({ shard: 'shard-0', domain, instance: 'image-0',
+      api_domain: name === 'cudaLaunch' ? 'runtime' : 'driver', name, calls: huge, errors: '2', total_ns: huge, max_ns: '5' });
+    const source = (domain: string, shard: string) => ({ shard, domain, initialized_images: '1', finalized: false,
+      attempted: huge, received: '3', ingress_dropped: '4', cupti_dropped: '5', source_errors: '6',
+      invalid_timing: '7', unattributed: '8', unresolved_correlations: '9', ambiguous_correlations: '10' });
+    const runtime = (domain: string, instance: string) => ({ shard: 'shard-0', domain, instance, pid: '45',
+      cupti_version: '123', cuda_version: '12080', initialized: false, clock_method: 'CLOCK_MONOTONIC',
+      clock_uncertainty: null, capabilities: [{ name: hostile, supported: false, optional: true, result: 'unsupported', detail: 'not available' },
+        ...Array.from({ length: 100 }, (_, i) => ({ name: `cap-${i}`, supported: true, optional: false, result: 'ok', detail: 'supported' }))],
+      errors: [hostile, ...Array.from({ length: 100 }, (_, i) => `error-${i}`)] });
+    report.cuda = {
+      devices: [device('0', '0'), ...Array.from({ length: 100 }, (_, i) => device('0', `device-${i}`)), device('1', 'foreign')],
+      activities: [activity('0', '0', '0'), ...Array.from({ length: 100 }, (_, i) => activity('0', '0', `${i + 1}`)),
+        activity('1', '0', 'foreign'), { ...activity('0', '0', 'wrong-image'), instance: 'other-image' }],
+      apis: [api('0', 'cudaLaunch'), ...Array.from({ length: 100 }, (_, i) => api('0', `cuCall-${i}`)), api('1', 'foreign-api')],
+      runtimes: [runtime('0', 'image-0'), ...Array.from({ length: 100 }, (_, i) => runtime('0', `image-${i + 1}`)), runtime('1', 'foreign-runtime')],
+      sources: [source('0', 'first'), ...Array.from({ length: 100 }, (_, i) => source('0', `source-${i}`)), source('1', 'foreign-source')],
+    };
+    const track = report.tracks.find((entry: any) => entry.rank === 0 && entry.parent === null);
+    report.counters.push(...['cuda.meta.device.name', 'cuda.cupti_dropped_records', 'cuda.invalid_timing_records', 'cuda.source_errors'].map(name =>
+      ({ track: track.id, name, timestamp_ns: '1', value: huge, value_type: 'integer', unit: 'count', attributes: {} })));
+    report.spans.push({ id: 19999, track: track.id, name: 'CUDA host launch', category: 'cuda',
+      start_ns: '9000000', duration_ns: '1000000', correlation: 'cuda-corr', incomplete: false, attributes: { 'cuda.api_domain': 'runtime' } });
+  });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await loaded(page, url);
+  await expect(page.locator('#cuda-panel')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(page.locator('.cuda-key')).toHaveCSS('background-color', 'rgb(233, 194, 100)');
+  await expect(page.locator('#cuda-count')).toHaveText('101 devices');
+  await expect(page.locator('#cuda-devices tbody tr')).toHaveCount(100);
+  await expect(page.locator('#cuda-devices')).toContainText(`${huge} B`);
+  await expect(page.locator('#cuda-devices')).toContainText(`${huge} / 12 ns`);
+  await expect(page.locator('#cuda-devices')).not.toContainText('foreign');
+  await expect(page.locator('#capture-status')).toContainText('GPU activity may be missing');
+  await expect(page.locator('#capture-status')).toContainText('510 CUPTI drops');
+  await expect(page.locator('#capture-status')).toContainText(`306/${BigInt(huge) * 102n} native received`);
+  await expect(page.locator('#cuda-health')).toContainText('incomplete collection');
+  await page.locator('#cuda-devices .io-file').first().click();
+  await expect(page.locator('#cuda-activities tbody tr')).toHaveCount(100);
+  await expect(page.locator('#cuda-activities')).toContainText(huge);
+  await expect(page.locator('#cuda-activities')).not.toContainText('wrong-image');
+  await page.locator('#cuda-activity-pager button').last().click();
+  await expect(page.locator('#cuda-activity-pager')).toContainText('101–101 of 101');
+  await page.locator('#cuda-device-pager button').last().click();
+  await expect(page.locator('#cuda-device-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#cuda-apis tbody tr')).toHaveCount(100);
+  await expect(page.locator('#cuda-apis')).toContainText('runtime');
+  await expect(page.locator('#cuda-apis')).toContainText('driver');
+  await page.locator('#cuda-api-pager button').last().click();
+  await expect(page.locator('#cuda-api-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#cuda-diagnostics')).not.toHaveAttribute('open', '');
+  await page.locator('#cuda-diagnostics summary').click();
+  await expect(page.locator('#cuda-runtime-list .openmp-runtime-row')).toHaveCount(100);
+  await expect(page.locator('#cuda-runtime-list')).toContainText('uncertainty: Unknown');
+  await page.locator('#cuda-runtime-list .io-file').first().click();
+  await expect(page.locator('#cuda-capabilities tbody tr')).toHaveCount(100);
+  await expect(page.locator('#cuda-capabilities')).toContainText('unsupported');
+  await expect(page.locator('.cuda-errors p')).toHaveCount(100);
+  await page.locator('#cuda-capability-pager button').last().click();
+  await expect(page.locator('#cuda-capability-pager')).toContainText('101–101 of 101');
+  await page.locator('#cuda-error-pager button').last().click();
+  await expect(page.locator('#cuda-error-pager')).toContainText('101–101 of 101');
+  await page.locator('#cuda-runtime-pager button').last().click();
+  await expect(page.locator('#cuda-runtime-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#cuda-sources tbody tr')).toHaveCount(100);
+  await expect(page.locator('#cuda-sources tbody')).toContainText(`${huge}`);
+  await expect(page.locator('#cuda-sources tbody')).toContainText('No · GPU activity may be missing');
+  await page.locator('#cuda-source-pager button').last().click();
+  await expect(page.locator('#cuda-source-pager')).toContainText('101–101 of 101');
+  await page.locator('#filter-input').fill('CUDA host launch');
+  await clickEvent(page, 'CUDA host launch');
+  await expect(page.locator('#detail-content')).toContainText('cuda.api_domain');
+  await page.locator('#domain-select').selectOption('1');
+  await expect(page.locator('#cuda-count')).toHaveText('1 devices');
+  await expect(page.locator('#cuda-apis')).toContainText('foreign-api');
+  await expect(page.locator('#cuda-device-detail')).toBeEmpty();
+  await expect(page.locator('#cuda-runtime-detail')).toBeEmpty();
+  await expect(page.locator('#cuda-sources tbody tr')).toHaveCount(1);
+  expect(await page.evaluate(() => 'rprofInjected' in globalThis)).toBe(false);
+  expect(await page.locator('img').count()).toBe(0);
+});
+
+test('metadata-only invisible CUDA devices do not imply GPU work, and diagnostics never become plots', async ({ page }) => {
+  await loaded(page, injected('cuda-metadata', report => {
+    report.cuda = { runtimes: [], activities: [], apis: [], sources: [], devices: [{ shard: 's', domain: '0',
+      instance: 'image', pid: '3', device: '0', name: 'unused', identity: 'id', visible: false,
+      memory_bytes: null, compute_major: null, compute_minor: null, multiprocessors: null, kernels: '0', copies: '0',
+      memsets: '0', kernel_ns: '0', copy_ns: '0', copy_bytes: '0', memset_bytes: '0', window_ns: '0' }] };
+    const track = report.tracks[0];
+    report.counters.push(...['cuda.meta.device', 'cuda.attempted_events', 'cuda.finalized', 'cuda.unresolved_correlations'].map(name =>
+      ({ track: track.id, name, timestamp_ns: '1', value: '1', value_type: 'integer', unit: 'count', attributes: {} })));
+  }));
+  await expect(page.locator('#cuda-count')).toContainText('1 invisible unused omitted');
+  await expect(page.locator('#cuda-devices')).toContainText('No visible CUDA devices');
+  await expect(page.locator('#cuda-health')).toContainText('metadata alone does not establish measured GPU work');
+  const plotted = await page.locator('#rprof-data').evaluate(element => {
+    const report = JSON.parse(element.textContent!);
+    return report.counters.filter((counter: any) => counter.name.startsWith('cuda.')).length;
+  });
+  expect(plotted).toBe(4);
+  await page.locator('#filter-input').fill('cuda.meta');
+  await expect(page.locator('#timeline-tooltip')).toBeHidden();
+  await expect(page.locator('#timeline-canvas')).toBeVisible();
+});
+
+test('CUDA GPU stream spans and host API spans retain timeline filtering, inspector and correlation', async ({ page }) => {
+  await loaded(page, injected('cuda-timeline', report => {
+    const process = report.tracks.find((track: any) => track.rank === 0 && track.parent === null);
+    report.tracks.push({ id: 'gpu', shard: process.shard, parent: null, name: 'GPU 0', kind: 'gpu_device', rank: null, details: {} },
+      { id: 'stream', shard: process.shard, parent: 'gpu', name: 'stream 7', kind: 'gpu_stream', rank: null, details: { context: '2' } });
+    report.spans.push({ id: 30001, track: process.id, name: 'cudaLaunchKernel', category: 'cuda',
+      start_ns: '5000000', duration_ns: '2000000', correlation: 'host-api', incomplete: false, attributes: { 'cuda.api_domain': 'runtime' } },
+      { id: 30002, track: 'stream', name: 'GPU kernel', category: 'cuda', start_ns: '9000000',
+        duration_ns: '2000000', correlation: 'gpu-work', incomplete: false, attributes: { 'cuda.stream': '7' } });
+    report.dependencies.push({ from: 'host-api', to: 'gpu-work', relation: 'launches' });
+    report.cuda = { runtimes: [], devices: [], activities: [], apis: [], sources: [] };
+  }));
+  await page.locator('#filter-input').fill('GPU kernel cuda');
+  await clickEvent(page, 'GPU kernel');
+  await expect(page.locator('#detail-content')).toContainText('gpu-work');
+  await expect(page.locator('#detail-content')).toContainText('host-api → gpu-work');
+  await expect(page.locator('#detail-content')).toContainText('cuda.stream');
+  await page.locator('#filter-input').fill('cudaLaunchKernel');
+  await clickEvent(page, 'cudaLaunchKernel');
+  await expect(page.locator('#detail-content')).toContainText('gpu-work');
+  await expect(page.locator('#detail-content')).toContainText('cuda.api_domain');
 });
 
 test('OpenMP panel filters by domain, preserves exact numbers and unknowns, and pages every detail table', async ({ page }) => {

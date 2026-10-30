@@ -103,6 +103,68 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
             )?;
         }
     }
+    if let Some(cuda) = &report.cuda {
+        writeln!(
+            out,
+            "\nCUDA devices (GPU intervals are distinct from host API duration):"
+        )?;
+        for device in &cuda.devices {
+            writeln!(
+                out,
+                "  GPU {} / {}{}: {} kernels, {} copies, {} memsets; kernel sum {} ns; copied {} B",
+                device.device,
+                device.name,
+                if device.kernels == "0" && device.copies == "0" && device.memsets == "0" {
+                    " (metadata only)"
+                } else {
+                    ""
+                },
+                device.kernels,
+                device.copies,
+                device.memsets,
+                device.kernel_ns,
+                device.copy_bytes
+            )?;
+        }
+        for runtime in &cuda.runtimes {
+            writeln!(
+                out,
+                "  CUPTI {} / CUDA SDK {}: {}; GPU clock interpolation uncertainty unavailable",
+                runtime.cupti_version, runtime.cuda_version, runtime.clock_method
+            )?;
+        }
+        writeln!(out, "CUDA host APIs (runtime/driver intervals can nest):")?;
+        for api in &cuda.apis {
+            writeln!(
+                out,
+                "  {:<7} {:<40} {:>8} calls  total {} ns  max {} ns  errors {}",
+                api.api_domain, api.name, api.calls, api.total_ns, api.max_ns, api.errors
+            )?;
+        }
+        writeln!(out, "CUDA collection health:")?;
+        for source in &cuda.sources {
+            writeln!(
+                out,
+                "  {}: {} initialized images; finalized={}; native attempted={} received={} ingress drops={}; CUPTI drops={} source errors={}",
+                source.shard,
+                source.initialized_images,
+                source.finalized,
+                source.attempted,
+                source.received,
+                source.ingress_dropped,
+                source.cupti_dropped,
+                source.source_errors
+            )?;
+            writeln!(
+                out,
+                "    unusable timing={} unattributed={} unresolved correlations={} ambiguous correlations={}",
+                source.invalid_timing,
+                source.unattributed,
+                source.unresolved_correlations,
+                source.ambiguous_correlations
+            )?;
+        }
+    }
     if let Some(omp) = &report.openmp {
         writeln!(
             out,

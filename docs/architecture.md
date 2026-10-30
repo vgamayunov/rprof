@@ -64,7 +64,8 @@ deterministic merge, shared report analysis, offline HTML timeline, local viewer
 and Chrome Trace export are implemented, along with POSIX I/O interposition and
 per-file analysis. Initial PMPI call/request profiling and estimated MPI clock
 alignment are also implemented. OMPT host collection and cross-runtime capability
-reporting are implemented for LLVM/Intel; CUDA/PMU, the GNU-runtime adapter, and
+reporting are implemented for LLVM/Intel. CUDA 13 CUPTI collection is implemented;
+PMU, the GNU-runtime adapter, and
 the projection engine remain proposed components.
 
 ## Workspace boundaries
@@ -82,7 +83,8 @@ the projection engine remain proposed components.
 | `crates/rprof-ompt` (exists) | OMPT callbacks and Rust transport; runtime-negotiated capabilities |
 | `crates/rprof-ompt-protocol` (exists) | Pointer-free host callback observations and per-thread sequences |
 | Python/PyTorch adapters (planned) | CPython monitoring/sampling, optional Python bootstrap, PyTorch/Kineto import and correlation |
-| `rprof-cuda` (planned) | CUPTI activity/callback integration and device clock mapping |
+| `crates/rprof-cuda` (exists) | Target-SDK C++ CUPTI injection adapter and Rust native transport |
+| `crates/rprof-cuda-protocol` (exists) | Pointer-free CUDA activities, API callbacks, capabilities and diagnostics |
 | `rprof-perf` (planned) | Linux PMU counting and sampling |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
@@ -174,6 +176,13 @@ Native collectors share a process-image hash and physical thread registry, with
 collector-specific correlation namespaces. This permits MPI, I/O, and OpenMP events
 to appear on the same thread while keeping exec/process instances distinct. See
 [OpenMP profiling](openmp-profiling.md) and [runtime support](openmp-runtimes.md).
+
+CUDA API callbacks use the same physical thread registry. GPU work uses separate
+device/context/stream tracks and explicit correlation edges. CUPTI normalizes GPU
+timestamps with a registered host `CLOCK_MONOTONIC` callback; interpolation
+uncertainty remains unknown. The optional target-built adapter uses CUDA injection,
+a fixed host buffer pool, and independent source/ingress/final-flush diagnostics.
+See [CUDA profiling](cuda-profiling.md) and the [CUDA report model](cuda-report-model.md).
 
 ## Remote operation
 

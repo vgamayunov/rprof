@@ -29,7 +29,7 @@ system and an SSH tunnel to the existing snapshot viewer. This needs no addition
 rprof code. Opening existing remote capture files from a local GUI is a later,
 read-only feature.
 
-## Implemented: capture, MPI/I/O/OpenMP profiling, and timeline reports
+## Implemented: capture, MPI/I/O/OpenMP/CUDA profiling, and timeline reports
 
 - Rust workspace: shared schema, streaming capture library, and CLI.
 - Linux process-group supervision, signal forwarding, escalation, and descendant reaping.
@@ -45,8 +45,10 @@ read-only feature.
 - Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
 - Optional MPI clock calibration with explicit uncertainty and drift reporting.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
+- Optional CUDA 13 CUPTI injection adapter with GPU kernels/copies/memsets, CPU API calls,
+  stream tracks, launch correlations, device metadata, and source-health reporting.
 
-CUDA and PMU collection are planned. GCC/libgomp support is a planned GNU-runtime
+PMU collection is planned. GCC/libgomp support is a planned GNU-runtime
 adapter; the current OpenMP collector requires OMPT.
 The process span covers the supervised workload,
 including launch, wait, and descendant cleanup. Wrapping only `mpirun` measures
@@ -141,6 +143,22 @@ Use the application's intended LLVM `libomp` or Intel `libiomp5` runtime;
 `--collect mpi,openmp,io` combines collectors. The tool records callback support and
 observed coverage, without substituting a runtime. See [OpenMP profiling](docs/openmp-profiling.md)
 and the [GCC/LLVM/Intel support plan](docs/openmp-runtimes.md).
+
+### Collect CUDA activity
+
+Build the optional adapter against the target CUDA 13 toolkit:
+
+```sh
+make build cuda PROFILE=release CUDA_HOME=/usr/local/cuda
+CUDA_VISIBLE_DEVICES=0 target/release/rprof record --collect cuda \
+  -o gpu.rprof.jsonl -- ./cuda-application
+target/release/rprof report gpu.rprof.jsonl --format html -o gpu.html
+```
+
+The adapter uses CUDA injection and CUPTI's concurrent activity collection. GPU
+execution and CPU API durations remain distinct; device/context/stream identities
+and CPU–GPU correlations are preserved. See [CUDA profiling](docs/cuda-profiling.md)
+for SDK compatibility, clock normalization, buffer losses, and validation.
 
 ### Multiple shards
 

@@ -323,6 +323,7 @@ fn consume(
         received,
         dropped,
         initialized: stats.initialized.load(Ordering::Acquire),
+        ..Default::default()
     })
 }
 

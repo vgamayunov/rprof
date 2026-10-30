@@ -2,6 +2,7 @@
 compile_error!("rprof process supervision currently requires Linux");
 
 mod capture_sink;
+mod cuda_collector;
 mod mpi_collector;
 mod native_collector;
 mod openmp_collector;
@@ -72,7 +73,7 @@ pub(crate) struct RecordArgs {
     /// Path to librprof_io.so (default: alongside the rprof executable).
     #[arg(long)]
     io_library: Option<PathBuf>,
-    /// Bounded raw-event queue per native collector (I/O or MPI).
+    /// Bounded raw-event queue per native collector (I/O, MPI, OpenMP, or CUDA).
     #[arg(long = "native-buffer-events", alias = "io-buffer-events", default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1..=262144))]
     io_buffer_events: u32,
     /// Target-built PMPI library (default: librprof_mpi.so alongside rprof).
@@ -84,6 +85,9 @@ pub(crate) struct RecordArgs {
     /// OMPT tool library (default: librprof_ompt.so alongside rprof).
     #[arg(long)]
     openmp_library: Option<PathBuf>,
+    /// Target-built CUPTI injection library (default: librprof_cuda.so alongside rprof).
+    #[arg(long)]
+    cuda_library: Option<PathBuf>,
     /// Grace before SIGKILL after interruption or leader exit with live descendants.
     #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(0..=60000))]
     grace_ms: u64,
@@ -99,6 +103,7 @@ pub(crate) enum CollectorKind {
     Mpi,
     #[value(alias = "omp")]
     Openmp,
+    Cuda,
 }
 
 fn main() -> ExitCode {

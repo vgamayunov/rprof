@@ -23,6 +23,105 @@ pub struct Report {
     pub mpi: Vec<MpiCallSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openmp: Option<OpenmpSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cuda: Option<CudaSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaSummary {
+    pub runtimes: Vec<CudaRuntime>,
+    pub devices: Vec<CudaDevice>,
+    pub activities: Vec<CudaActivity>,
+    pub apis: Vec<CudaApi>,
+    pub sources: Vec<CudaSource>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaRuntime {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub pid: String,
+    pub cupti_version: String,
+    pub cuda_version: String,
+    pub initialized: bool,
+    pub clock_method: String,
+    pub clock_uncertainty: Option<String>,
+    pub capabilities: Vec<CudaCapability>,
+    pub errors: Vec<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaCapability {
+    pub name: String,
+    pub supported: bool,
+    pub optional: bool,
+    pub result: String,
+    pub detail: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaDevice {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub pid: String,
+    pub device: String,
+    pub name: String,
+    pub identity: String,
+    pub visible: Option<bool>,
+    pub memory_bytes: Option<String>,
+    pub compute_major: Option<String>,
+    pub compute_minor: Option<String>,
+    pub multiprocessors: Option<String>,
+    pub kernels: String,
+    pub copies: String,
+    pub memsets: String,
+    pub kernel_ns: String,
+    pub copy_ns: String,
+    pub copy_bytes: String,
+    pub memset_bytes: String,
+    pub window_ns: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaActivity {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub device: String,
+    pub context: String,
+    pub stream: String,
+    pub kind: String,
+    pub name: String,
+    pub count: String,
+    pub total_ns: String,
+    pub max_ns: String,
+    pub bytes: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CudaApi {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub api_domain: String,
+    pub name: String,
+    pub calls: String,
+    pub errors: String,
+    pub total_ns: String,
+    pub max_ns: String,
+}
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct CudaSource {
+    pub shard: String,
+    pub domain: String,
+    pub initialized_images: String,
+    pub finalized: bool,
+    pub attempted: String,
+    pub received: String,
+    pub ingress_dropped: String,
+    pub cupti_dropped: String,
+    pub source_errors: String,
+    pub invalid_timing: String,
+    pub unattributed: String,
+    pub unresolved_correlations: String,
+    pub ambiguous_correlations: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

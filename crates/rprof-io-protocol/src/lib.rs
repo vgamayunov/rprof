@@ -104,6 +104,10 @@ pub struct Stats {
     pub attempted: AtomicU64,
     pub sent: AtomicU64,
     pub dropped: AtomicU64,
+    /// Optional source-side diagnostics (e.g. CUPTI drops), after the stable prefix.
+    pub source_dropped: AtomicU64,
+    pub source_errors: AtomicU64,
+    pub finalized: AtomicU64,
 }
 
 impl Default for Stats {
@@ -114,6 +118,9 @@ impl Default for Stats {
             attempted: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            source_dropped: AtomicU64::new(0),
+            source_errors: AtomicU64::new(0),
+            finalized: AtomicU64::new(0),
         }
     }
 }

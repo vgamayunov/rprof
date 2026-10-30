@@ -63,6 +63,7 @@ enum Kind {
     Io,
     Mpi,
     Openmp,
+    Cuda,
 }
 impl Kind {
     fn prefix(self) -> &'static str {
@@ -70,6 +71,7 @@ impl Kind {
             Self::Io => "RPROF_IO",
             Self::Mpi => "RPROF_MPI",
             Self::Openmp => "RPROF_OMP",
+            Self::Cuda => "RPROF_CUDA",
         }
     }
     fn library(self) -> &'static str {
@@ -77,6 +79,7 @@ impl Kind {
             Self::Io => "librprof_io.so",
             Self::Mpi => "librprof_mpi.so",
             Self::Openmp => "librprof_ompt.so",
+            Self::Cuda => "librprof_cuda.so",
         }
     }
     fn name(self) -> &'static str {
@@ -84,6 +87,7 @@ impl Kind {
             Self::Io => "io",
             Self::Mpi => "mpi",
             Self::Openmp => "openmp",
+            Self::Cuda => "cuda",
         }
     }
 }
@@ -108,6 +112,9 @@ impl Prepared {
     pub fn openmp(library: Option<&Path>, buffer_events: usize) -> Result<Self> {
         Self::configured(library, buffer_events, Kind::Openmp)
     }
+    pub fn cuda(library: Option<&Path>, buffer_events: usize) -> Result<Self> {
+        Self::configured(library, buffer_events, Kind::Cuda)
+    }
     fn configured(library: Option<&Path>, buffer_events: usize, kind: Kind) -> Result<Self> {
         let library = match library {
             Some(path) => path.to_path_buf(),
@@ -118,7 +125,7 @@ impl Prepared {
         };
         let library = library.canonicalize().with_context(|| {
             format!(
-                "finding {}; build the collector with `make preload`, `make mpi`, or `make ompt`, or set its --*-library path",
+                "finding {}; build the collector with `make preload`, `make mpi`, `make ompt`, or `make cuda`, or set its --*-library path",
                 library.display()
             )
         })?;
@@ -234,6 +241,7 @@ impl Prepared {
                 let receive = match self.kind {
                     Kind::Mpi => crate::mpi_collector::receive,
                     Kind::Openmp => crate::openmp_collector::receive,
+                    Kind::Cuda => crate::cuda_collector::receive,
                     Kind::Io => receive,
                 };
                 let result = receive(
@@ -261,11 +269,15 @@ pub struct Running {
     wake: File,
     worker: Option<JoinHandle<Result<Outcome>>>,
 }
+#[derive(Default)]
 pub struct Outcome {
     pub attempted: u64,
     pub received: u64,
     pub dropped: u64,
     pub initialized: u64,
+    pub source_dropped: u64,
+    pub source_errors: u64,
+    pub finalized: u64,
 }
 impl Running {
     fn stop(&self) {
@@ -525,5 +537,6 @@ fn consume(
         received,
         dropped,
         initialized: stats.initialized.load(Ordering::Acquire),
+        ..Default::default()
     })
 }

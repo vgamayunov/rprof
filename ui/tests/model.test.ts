@@ -1,11 +1,30 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { averageNs, formatNs, indexReport, indexSpans, integerPlotValues, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
-import type { OpenmpRegion, Report, Span } from '../src/model.ts';
+import { averageNs, deviceActivities, formatNs, indexReport, indexSpans, integerPlotValues, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
+import type { CudaDevice, OpenmpRegion, Report, Span } from '../src/model.ts';
 
 const span = (id: number, start_ns: string, duration_ns: string): Span => ({
   id, track: 't', name: `span ${id}`, category: 'compute', start_ns, duration_ns,
   correlation: null, incomplete: false, attributes: {},
+});
+
+test('CUDA metadata and diagnostic counters are not timeline samples', () => {
+  for (const name of ['cuda.meta.device.name', 'cuda.cupti_dropped_records', 'cuda.invalid_timing_records',
+    'cuda.attempted_events', 'cuda.received_events', 'cuda.ingress_dropped_events', 'cuda.source_errors',
+    'cuda.finalized', 'cuda.initialized_images', 'cuda.unattributed_records', 'cuda.unresolved_correlations',
+    'cuda.ambiguous_correlations']) assert.equal(isCollectorHealth(name), true, name);
+  assert.equal(isCollectorHealth('cuda.real_metric'), false);
+  const report = { tracks: [{ id: 't' }], spans: [], counters: [{ track: 't', name: 'cuda.meta.device.name',
+    value: '1', timestamp_ns: '0', value_type: 'integer', unit: 'count', attributes: {} }] } as unknown as Report;
+  assert.equal(indexReport(report).get('t')?.counters.size, 0);
+});
+
+test('CUDA device activity matches full image/shard/domain identity', () => {
+  const device = { shard: 's', domain: '0', instance: 'image', device: '0' };
+  const activity = { ...device, context: 'c', stream: '1' };
+  const report = { cuda: { activities: [activity, { ...activity, domain: '1' },
+    { ...activity, shard: 'other' }, { ...activity, instance: 'other' }, { ...activity, device: '1' }] } } as unknown as Report;
+  assert.deepEqual(deviceActivities(report, device as CudaDevice), [activity]);
 });
 
 test('time geometry subtracts exact BigInt origins before converting to pixels', () => {

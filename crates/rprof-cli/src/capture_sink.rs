@@ -65,24 +65,8 @@ impl CaptureSink {
         if let Some(track) = self.threads.get(&(pid, instance, tid)) {
             return Ok(*track);
         }
-        let (process, rank) = if let Some(value) = self.processes.get(&(pid, instance)) {
-            *value
-        } else {
-            ensure!(
-                self.processes.len() < 4096,
-                "native process-image limit exceeded"
-            );
-            let rank = rank.or(self.rank);
-            let track = self.track_ranked(
-                at,
-                0,
-                format!("process {pid} / image {instance:016x}"),
-                TrackKind::Process { pid },
-                rank,
-            )?;
-            self.processes.insert((pid, instance), (track, rank));
-            (track, rank)
-        };
+        let process = self.native_process(at, pid, instance, rank)?;
+        let rank = self.processes[&(pid, instance)].1;
         let track = self.track_ranked(
             at,
             process,
@@ -91,6 +75,31 @@ impl CaptureSink {
             rank,
         )?;
         self.threads.insert((pid, instance, tid), track);
+        Ok(track)
+    }
+    pub fn native_process(
+        &mut self,
+        at: u64,
+        pid: u32,
+        instance: u64,
+        rank: Option<u32>,
+    ) -> Result<u64> {
+        if let Some((track, _)) = self.processes.get(&(pid, instance)) {
+            return Ok(*track);
+        }
+        ensure!(
+            self.processes.len() < 4096,
+            "native process-image limit exceeded"
+        );
+        let rank = rank.or(self.rank);
+        let track = self.track_ranked(
+            at,
+            0,
+            format!("process {pid} / image {instance:016x}"),
+            TrackKind::Process { pid },
+            rank,
+        )?;
+        self.processes.insert((pid, instance), (track, rank));
         Ok(track)
     }
     pub fn retire_native_thread(&mut self, pid: u32, instance: u64, tid: u32) {

@@ -157,6 +157,16 @@ as lacking OMPT; native GNU-runtime support remains a planned adapter. See
 **Exit criterion:** a multi-stream workload shows actual GPU overlap and its CPU
 launch relationships, with duration checks against a reference profiler.
 
+**Implemented:** target-built CUDA 13/CUPTI injection adapter, concurrent kernel,
+copy/memset and synchronization activities, runtime/driver API spans, explicit
+CPU–GPU correlations, normalized monotonic timestamps, device/context/stream
+identities, and CUDA text/HTML reports. Validated on one and two H100 GPUs with
+exact counts/bytes, overlapping streams, zero recorded drops, CUDA-event timing,
+and a separate Nsight Systems 2026.1.3 reference run (kernel-duration sum within
+0.76%). Conflict ownership and missing-final-flush controls passed. Broader SDK,
+peer-copy, CUDA Graph, and mixed-runtime matrices remain follow-ups; activity
+traces do not yet provide hardware performance metrics. See [CUDA profiling](cuda-profiling.md).
+
 ## 7. PMU counters
 
 - Implement Linux `perf_event_open` counting for cycles, instructions, cache misses,
@@ -259,8 +269,8 @@ integrated GPU collection builds on phase 6. These are planned capabilities.
 
 ## Suggested next task
 
-Implement phase 6's CUDA/CUPTI collector on `tst9`/`h100`, preserving host/device
-correlation and clock metadata. Expand the OpenMP runtime matrix and GNU adapter
+Implement phase 7's Linux PMU counters with raw/multiplexed count provenance and
+`perf stat` comparisons. Expand the OpenMP runtime matrix and GNU adapter
 coverage alongside the remaining collector work.
 
 The proposed order can be adjusted once the primary MPI implementation, OpenMP

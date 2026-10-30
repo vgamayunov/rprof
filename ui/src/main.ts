@@ -1,5 +1,5 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 
@@ -15,6 +15,7 @@ const IO_PAGE_SIZE = 100;
 const COLORS = ['#6bcdb0', '#65a8ec', '#e5b46d', '#b29be6', '#e17d91', '#86c6d9', '#cbc988'];
 const MPI_COLOR = '#ff9970';
 const OPENMP_COLOR = '#d5a2ff';
+const CUDA_COLOR = '#e9c264';
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -36,6 +37,7 @@ function badge(parent: Element, label: string, tone = ''): void {
 function colorFor(value: string, colors: readonly string[] = COLORS): string {
   if (value.toLowerCase() === 'mpi') return MPI_COLOR;
   if (value.toLowerCase() === 'openmp') return OPENMP_COLOR;
+  if (value.toLowerCase() === 'cuda') return CUDA_COLOR;
   let hash = 0;
   for (let i = 0; i < value.length; i++) hash = (Math.imul(hash, 31) + value.charCodeAt(i)) | 0;
   return colors[(hash >>> 0) % colors.length]!;
@@ -76,6 +78,15 @@ class Viewer {
   private runtimePage = 0;
   private callbackPage = 0;
   private selectedRuntime: OpenmpRuntime | undefined;
+  private cudaDevicePage = 0;
+  private cudaActivityPage = 0;
+  private selectedCudaDevice: CudaDevice | undefined;
+  private cudaApiPage = 0;
+  private cudaRuntimePage = 0;
+  private cudaCapabilityPage = 0;
+  private cudaErrorPage = 0;
+  private cudaSourcePage = 0;
+  private selectedCudaRuntime: CudaRuntime | undefined;
   private theme: Theme = startingTheme;
   private colors = canvasThemes[startingTheme];
 
@@ -91,9 +102,11 @@ class Viewer {
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p>Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only</p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><details id="openmp-runtimes"><summary>Runtime and callback registration details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
+    if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
     const legend = root.querySelector('.timeline-footer span')!;
     legend.append(node('i', 'legend-swatch mpi-key'), document.createTextNode(' MPI'));
     if (report.openmp) legend.append(node('i', 'legend-swatch openmp-key'), document.createTextNode(' OpenMP'));
+    if (report.cuda) legend.append(node('i', 'legend-swatch cuda-key'), document.createTextNode(' CUDA'));
     this.tooltip = node('div', 'timeline-tooltip');
     this.tooltip.id = 'timeline-tooltip';
     this.tooltip.setAttribute('role', 'tooltip');
@@ -242,6 +255,18 @@ class Viewer {
       if (value.has('clock.uncertainty_ns')) parts.push(`clock ±${value.get('clock.uncertainty_ns')} ns`);
       if (parts.length) put(dl, 'div', group.label, parts.join(' · '));
     }
+    const cudaSources = this.report.cuda?.sources ?? [];
+    if (cudaSources.length) {
+      const sum = (field: 'received' | 'attempted' | 'ingress_dropped' | 'cupti_dropped' | 'source_errors' | 'invalid_timing' | 'unattributed' | 'unresolved_correlations' | 'ambiguous_correlations') =>
+        cudaSources.reduce((total, source) => total + BigInt(source[field]), 0n).toString();
+      const parts = [`${sum('received')}/${sum('attempted')} native received`, `${sum('ingress_dropped')} native ingress drops`,
+        `${sum('cupti_dropped')} CUPTI drops`, `${sum('source_errors')} source errors`,
+        `${sum('invalid_timing')} invalid timing`, `${sum('unattributed')} unattributed`,
+        `${sum('unresolved_correlations')} unresolved / ${sum('ambiguous_correlations')} ambiguous correlations`];
+      const unfinished = cudaSources.filter(source => !source.finalized).length;
+      if (unfinished) parts.push(`${unfinished} not finalized · GPU activity may be missing`);
+      put(dl, 'div', `CUDA · ${cudaSources.length} sources (capture-wide)`, parts.join(' · '));
+    }
     status.append(dl);
     if (summary.warnings.length) {
       const warnings = node('div', 'warnings');
@@ -265,6 +290,10 @@ class Viewer {
     this.callbackPage = 0;
     this.selectedRuntime = undefined;
     if (this.report.openmp) this.renderOpenmp();
+    this.cudaDevicePage = this.cudaActivityPage = this.cudaApiPage = this.cudaRuntimePage = this.cudaCapabilityPage = this.cudaErrorPage = this.cudaSourcePage = 0;
+    this.selectedCudaDevice = undefined;
+    this.selectedCudaRuntime = undefined;
+    if (this.report.cuda) this.renderCuda();
     this.selection = undefined;
     this.related.clear();
     this.showDetails();
@@ -433,6 +462,131 @@ class Viewer {
     table.append(body); wrap.append(table); detail.append(wrap);
     const pager = node('div', 'io-pager'); pager.id = 'openmp-callback-pager'; detail.append(pager);
     this.renderPager(pager, runtime.callbacks.length, this.callbackPage, page => { this.callbackPage = page; this.renderOpenmpCallbacks(); });
+  }
+
+  private renderCuda(): void {
+    const cuda = this.report.cuda;
+    if (!cuda) return;
+    const domain = this.domain?.id;
+    const activeDevices = new Set(cuda.activities.filter(activity => BigInt(activity.count) > 0n)
+      .map(activity => JSON.stringify([activity.domain, activity.shard, activity.instance, activity.device])));
+    const hasWork = (device: CudaDevice) => [device.kernels, device.copies, device.memsets].some(value => BigInt(value) > 0n) ||
+      activeDevices.has(JSON.stringify([device.domain, device.shard, device.instance, device.device]));
+    const devices = cuda.devices.filter(device => device.domain === domain && (device.visible !== false || hasWork(device)));
+    const hidden = cuda.devices.filter(device => device.domain === domain && device.visible === false && !hasWork(device)).length;
+    const apis = cuda.apis.filter(api => api.domain === domain);
+    const runtimes = cuda.runtimes.filter(runtime => runtime.domain === domain);
+    const sources = cuda.sources.filter(source => source.domain === domain);
+    this.get('cuda-count').textContent = `${devices.length} devices${hidden ? ` · ${hidden} invisible unused omitted` : ''}`;
+    const problems = sources.filter(source => !source.finalized || [source.ingress_dropped, source.cupti_dropped,
+      source.source_errors, source.invalid_timing, source.unattributed, source.unresolved_correlations,
+      source.ambiguous_correlations].some(value => BigInt(value) > 0n));
+    this.get('cuda-health').textContent = !sources.length ? 'No CUDA source diagnostics recorded in this clock domain; device metadata alone does not establish measured GPU work.' :
+      `${sources.length} source(s) · ${problems.length ? `${problems.length} with incomplete collection or diagnostics; see source health below.` : 'finalized without reported loss or timing issues.'}`;
+    const body = this.get('cuda-devices').querySelector('tbody')!; body.replaceChildren();
+    for (const device of devices.slice(this.cudaDevicePage * IO_PAGE_SIZE, (this.cudaDevicePage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); const identity = node('td');
+      const select = node('button', 'io-file', `${device.name} · GPU ${device.device} · PID ${device.pid} · ${device.instance} · ${device.shard}`);
+      select.type = 'button';
+      select.addEventListener('click', () => { this.selectedCudaDevice = device; this.cudaActivityPage = 0; this.renderCudaActivities(); });
+      identity.append(select, node('div', 'io-note', device.identity));
+      const measured = hasWork(device);
+      row.append(identity, node('td', '', `${device.visible === null ? 'Unknown' : device.visible ? 'Visible' : 'Invisible'} · ${measured ? 'timed activity' : 'metadata only / no timed work'}`),
+        node('td', '', `${device.memory_bytes === null ? 'Unknown' : `${device.memory_bytes} B`} / ${device.compute_major === null || device.compute_minor === null ? 'Unknown' : `${device.compute_major}.${device.compute_minor}`} · ${device.multiprocessors ?? 'Unknown'} SMs`),
+        node('td', '', `${device.kernels} / ${device.copies} / ${device.memsets}`),
+        node('td', '', `${device.kernel_ns} / ${device.copy_ns} ns`),
+        node('td', '', `${device.copy_bytes} / ${device.memset_bytes} B`), node('td', '', `${device.window_ns} ns`));
+      body.append(row);
+    }
+    if (!devices.length) this.emptyCudaRow(body, 7, 'No visible CUDA devices recorded in this clock domain (or only invisible unused metadata).');
+    this.renderPager(this.get('cuda-device-pager'), devices.length, this.cudaDevicePage, page => { this.cudaDevicePage = page; this.renderCuda(); });
+    this.renderCudaActivities();
+    this.get('cuda-api-count').textContent = `· ${apis.length} API rows`;
+    const apiBody = this.get('cuda-apis').querySelector('tbody')!; apiBody.replaceChildren();
+    for (const api of apis.slice(this.cudaApiPage * IO_PAGE_SIZE, (this.cudaApiPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', `${api.name} · ${api.instance} · ${api.shard}`),
+        node('td', '', api.api_domain), node('td', '', api.calls), node('td', '', api.errors),
+        node('td', '', `${api.total_ns} ns`), node('td', '', `${api.max_ns} ns`)); apiBody.append(row);
+    }
+    if (!apis.length) this.emptyCudaRow(apiBody, 6, 'No CUDA host API calls recorded in this clock domain.');
+    this.renderPager(this.get('cuda-api-pager'), apis.length, this.cudaApiPage, page => { this.cudaApiPage = page; this.renderCuda(); });
+    const list = this.get('cuda-runtime-list'); list.replaceChildren();
+    for (const runtime of runtimes.slice(this.cudaRuntimePage * IO_PAGE_SIZE, (this.cudaRuntimePage + 1) * IO_PAGE_SIZE)) {
+      const line = node('div', 'openmp-runtime-row');
+      const select = node('button', 'io-file', `PID ${runtime.pid} · ${runtime.instance} · ${runtime.shard}`);
+      select.type = 'button'; select.addEventListener('click', () => {
+        this.selectedCudaRuntime = runtime; this.cudaCapabilityPage = this.cudaErrorPage = 0; this.renderCudaRuntimeDetail();
+      });
+      line.append(select, node('span', '', `initialized: ${runtime.initialized} · CUPTI ${runtime.cupti_version} · CUDA ${runtime.cuda_version} · clock: ${runtime.clock_method} · uncertainty: ${runtime.clock_uncertainty === null ? 'Unknown' : `${runtime.clock_uncertainty} ns`}`));
+      list.append(line);
+    }
+    if (!runtimes.length) list.append(node('p', 'io-note', 'No CUDA runtime recorded in this clock domain.'));
+    this.renderPager(this.get('cuda-runtime-pager'), runtimes.length, this.cudaRuntimePage, page => { this.cudaRuntimePage = page; this.renderCuda(); });
+    this.renderCudaRuntimeDetail();
+    const sourceBody = this.get('cuda-sources').querySelector('tbody')!; sourceBody.replaceChildren();
+    for (const source of sources.slice(this.cudaSourcePage * IO_PAGE_SIZE, (this.cudaSourcePage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', source.shard),
+        node('td', '', `${source.initialized_images} / ${source.finalized ? 'Yes' : 'No · GPU activity may be missing'}`),
+        node('td', '', `${source.received} / ${source.attempted}`), node('td', '', source.ingress_dropped),
+        node('td', '', source.cupti_dropped), node('td', '', source.source_errors),
+        node('td', '', source.invalid_timing), node('td', '', source.unattributed),
+        node('td', '', `${source.unresolved_correlations} / ${source.ambiguous_correlations}`)); sourceBody.append(row);
+    }
+    if (!sources.length) this.emptyCudaRow(sourceBody, 9, 'No CUDA source diagnostics recorded in this clock domain.');
+    this.renderPager(this.get('cuda-source-pager'), sources.length, this.cudaSourcePage, page => { this.cudaSourcePage = page; this.renderCuda(); });
+  }
+
+  private emptyCudaRow(body: Element, columns: number, message: string): void {
+    const row = node('tr'); const cell = node('td', 'empty-table', message); cell.colSpan = columns;
+    row.append(cell); body.append(row);
+  }
+
+  private renderCudaActivities(): void {
+    const detail = this.get('cuda-device-detail'); detail.replaceChildren();
+    const device = this.selectedCudaDevice;
+    if (!device) return;
+    const activities = deviceActivities(this.report, device);
+    detail.append(node('h3', '', `${device.name} · GPU ${device.device} · ${device.instance}`),
+      node('p', 'io-note', 'Per-context/stream activity: inclusive durations overlap across streams. Counts and bytes are exact decimal values; no GPU utilization is inferred.'));
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'cuda-activities';
+    const head = node('thead'); const heading = node('tr');
+    for (const label of ['Context / stream', 'Kind / name', 'Count', 'Inclusive time', 'Max time', 'Bytes']) heading.append(node('th', '', label));
+    head.append(heading); table.append(head); const body = node('tbody');
+    for (const activity of activities.slice(this.cudaActivityPage * IO_PAGE_SIZE, (this.cudaActivityPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', `${activity.context} / ${activity.stream}`),
+        node('td', '', `${activity.kind} · ${activity.name}`), node('td', '', activity.count),
+        node('td', '', `${activity.total_ns} ns`), node('td', '', `${activity.max_ns} ns`), node('td', '', `${activity.bytes} B`)); body.append(row);
+    }
+    if (!activities.length) this.emptyCudaRow(body, 6, 'No timed activity rows for this device; metadata alone is not measured GPU work.');
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'cuda-activity-pager'; detail.append(pager);
+    this.renderPager(pager, activities.length, this.cudaActivityPage, page => { this.cudaActivityPage = page; this.renderCudaActivities(); });
+  }
+
+  private renderCudaRuntimeDetail(): void {
+    const detail = this.get('cuda-runtime-detail'); detail.replaceChildren();
+    const runtime = this.selectedCudaRuntime;
+    if (!runtime) return;
+    detail.append(node('h3', '', `Capabilities · PID ${runtime.pid} · ${runtime.instance}`));
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'cuda-capabilities';
+    const head = node('thead'); const heading = node('tr');
+    for (const label of ['Capability', 'Supported', 'Optional', 'Result', 'Detail']) heading.append(node('th', '', label));
+    head.append(heading); table.append(head); const body = node('tbody');
+    for (const capability of runtime.capabilities.slice(this.cudaCapabilityPage * IO_PAGE_SIZE, (this.cudaCapabilityPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); row.append(node('td', '', capability.name), node('td', '', capability.supported ? 'Yes' : 'No'),
+        node('td', '', capability.optional ? 'Yes' : 'No'), node('td', '', capability.result), node('td', '', capability.detail)); body.append(row);
+    }
+    if (!runtime.capabilities.length) this.emptyCudaRow(body, 5, 'No capability information recorded.');
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'cuda-capability-pager'; detail.append(pager);
+    this.renderPager(pager, runtime.capabilities.length, this.cudaCapabilityPage, page => { this.cudaCapabilityPage = page; this.renderCudaRuntimeDetail(); });
+    detail.append(node('h3', '', `Runtime errors · ${runtime.errors.length}`));
+    const errors = node('div', 'cuda-errors');
+    for (const error of runtime.errors.slice(this.cudaErrorPage * IO_PAGE_SIZE, (this.cudaErrorPage + 1) * IO_PAGE_SIZE)) errors.append(node('p', 'io-note', error));
+    if (!runtime.errors.length) errors.append(node('p', 'io-note', 'No runtime errors reported.'));
+    detail.append(errors);
+    const errorPager = node('div', 'io-pager'); errorPager.id = 'cuda-error-pager'; detail.append(errorPager);
+    this.renderPager(errorPager, runtime.errors.length, this.cudaErrorPage, page => { this.cudaErrorPage = page; this.renderCudaRuntimeDetail(); });
   }
 
   private hitAt(x: number, y: number): Hit | undefined {

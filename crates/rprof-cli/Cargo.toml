@@ -19,6 +19,7 @@ rprof-report.workspace = true
 rprof-io-protocol.workspace = true
 rprof-mpi-protocol.workspace = true
 rprof-ompt-protocol.workspace = true
+rprof-cuda-protocol.workspace = true
 libc.workspace = true
 signal-hook.workspace = true
 uuid.workspace = true

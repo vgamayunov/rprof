@@ -35,6 +35,46 @@ export interface Report {
   io?: IoSummary[];
   mpi?: MpiCallSummary[];
   openmp?: OpenmpSummary | null;
+  cuda?: CudaSummary | null;
+}
+
+export interface CudaSummary {
+  runtimes: CudaRuntime[]; devices: CudaDevice[]; activities: CudaActivity[];
+  apis: CudaApi[]; sources: CudaSource[];
+}
+export interface CudaRuntime {
+  shard: string; domain: string; instance: string; pid: string;
+  cupti_version: string; cuda_version: string; initialized: boolean;
+  clock_method: string; clock_uncertainty: string | null;
+  capabilities: CudaCapability[]; errors: string[];
+}
+export interface CudaCapability { name: string; supported: boolean; optional: boolean; result: string; detail: string }
+export interface CudaDevice {
+  shard: string; domain: string; instance: string; pid: string; device: string;
+  name: string; identity: string; visible: boolean | null; memory_bytes: string | null;
+  compute_major: string | null; compute_minor: string | null; multiprocessors: string | null;
+  kernels: string; copies: string; memsets: string; kernel_ns: string; copy_ns: string;
+  copy_bytes: string; memset_bytes: string; window_ns: string;
+}
+export interface CudaActivity {
+  shard: string; domain: string; instance: string; device: string; context: string; stream: string;
+  kind: string; name: string; count: string; total_ns: string; max_ns: string; bytes: string;
+}
+export interface CudaApi {
+  shard: string; domain: string; instance: string; api_domain: string; name: string;
+  calls: string; errors: string; total_ns: string; max_ns: string;
+}
+export interface CudaSource {
+  shard: string; domain: string; initialized_images: string; finalized: boolean;
+  attempted: string; received: string; ingress_dropped: string; cupti_dropped: string;
+  source_errors: string; invalid_timing: string; unattributed: string;
+  unresolved_correlations: string; ambiguous_correlations: string;
+}
+
+// Match the complete device identity, not just the ordinal (which repeats per image/shard).
+export function deviceActivities(report: Report, device: CudaDevice): CudaActivity[] {
+  return (report.cuda?.activities ?? []).filter(activity => activity.domain === device.domain &&
+    activity.shard === device.shard && activity.instance === device.instance && activity.device === device.device);
 }
 
 export interface MpiCallSummary {
@@ -242,7 +282,8 @@ export function indexReport(report: Report): Map<string, TrackData> {
 
 export function isCollectorHealth(name: string): boolean {
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
-    name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.');
+    name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') ||
+    /^cuda\.(attempted_events|received_events|ingress_dropped_events|cupti_dropped_records|source_errors|finalized|initialized_images|invalid_timing_records|unattributed_records|unresolved_correlations|ambiguous_correlations)$/.test(name);
 }
 
 export function matchesFilter(name: string, category: string, rank: number | null, query: string): boolean {

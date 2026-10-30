@@ -20,6 +20,17 @@
 .openmp-section summary span{color:#91adba;font-weight:400}
 .openmp-runtime-row{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid #324a58;padding:6px 0;font-size:11px;color:#b4c6d2;overflow-wrap:anywhere}
 .openmp-runtime-row .io-file{flex:0 0 auto}
+.cuda-key{background:#e9c264}
+.cuda-section .io-wrap table{min-width:1050px}
+.cuda-section #cuda-activities,.cuda-section #cuda-capabilities{min-width:650px}
+.cuda-section h3{font-size:14px;overflow-wrap:anywhere;margin:16px 0 8px}
+.cuda-section h3 span{color:#91adba;font-size:11px;font-weight:400}
+.cuda-section #cuda-device-detail,.cuda-section #cuda-runtime-detail{border-top:1px solid #324a58;margin-top:14px}
+.cuda-section #cuda-device-detail:empty,.cuda-section #cuda-runtime-detail:empty{display:none}
+.cuda-section details{margin-top:16px;border-top:1px solid #324a58;padding-top:12px}
+.cuda-section summary{cursor:pointer;color:#a6e2cb;font-size:12px;font-weight:600}
+.cuda-errors{max-height:300px;overflow:auto;overflow-wrap:anywhere}
+.cuda-errors p{margin:5px 0}
 
 /* Theme overrides keep the shared report/viewer layout unchanged. */
 :root{color-scheme:dark}
@@ -56,11 +67,13 @@
 :root[data-theme="light"] .io-pager,
 :root[data-theme="light"] .openmp-section summary span,
 :root[data-theme="light"] .openmp-runtime-row{color:#526b79}
+:root[data-theme="light"] .cuda-section h3 span{color:#526b79}
 :root[data-theme="light"] .eyebrow,
 :root[data-theme="light"] .side-title,
 :root[data-theme="light"] .io-heading span,
 :root[data-theme="light"] .io-file,
 :root[data-theme="light"] .openmp-section summary{color:#176b61}
+:root[data-theme="light"] .cuda-section summary{color:#176b61}
 :root[data-theme="light"] .toolbar-heading span{color:#805600}
 :root[data-theme="light"] .field select,
 :root[data-theme="light"] .field input,
@@ -84,6 +97,9 @@
 :root[data-theme="light"] #openmp-callback-detail,
 :root[data-theme="light"] .openmp-section details,
 :root[data-theme="light"] .openmp-runtime-row{border-color:#d6e0e8}
+:root[data-theme="light"] .cuda-section details,
+:root[data-theme="light"] .cuda-section #cuda-device-detail,
+:root[data-theme="light"] .cuda-section #cuda-runtime-detail{border-color:#d6e0e8}
 :root[data-theme="light"] .plot-scroll,
 :root[data-theme="light"] .detail-content{scrollbar-color:#9bb0be #f8fafc}
 :root[data-theme="light"] .badge{background:#edf3f7;color:#405f70;border-color:#b9cdd9}

@@ -50,6 +50,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let io_enabled = args.collectors.contains(&CollectorKind::Io);
     let mpi_enabled = args.collectors.contains(&CollectorKind::Mpi);
     let openmp_enabled = args.collectors.contains(&CollectorKind::Openmp);
+    let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
+    ensure!(
+        cuda_enabled || args.cuda_library.is_none(),
+        "--cuda-library requires --collect cuda"
+    );
     ensure!(
         openmp_enabled || args.openmp_library.is_none(),
         "--openmp-library requires --collect openmp"
@@ -90,6 +95,20 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         ensure!(
             std::env::var_os("OMP_TOOL_LIBRARIES").is_none_or(|value| value.is_empty()),
             "OMP_TOOL_LIBRARIES is already set; unset it before selecting rprof's OMPT collector (only one OMPT tool can own callbacks)"
+        );
+    }
+    let mut cuda_prepared = if cuda_enabled {
+        Some(native_collector::Prepared::cuda(
+            args.cuda_library.as_deref(),
+            args.io_buffer_events as usize,
+        )?)
+    } else {
+        None
+    };
+    if cuda_enabled {
+        ensure!(
+            std::env::var_os("CUDA_INJECTION64_PATH").is_none_or(|value| value.is_empty()),
+            "CUDA_INJECTION64_PATH is already set; select one CUDA injection tool before enabling rprof"
         );
     }
     let session_id = match args.session {
@@ -136,6 +155,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             io_enabled.then_some("io"),
             mpi_enabled.then_some("mpi"),
             openmp_enabled.then_some("openmp"),
+            cuda_enabled.then_some("cuda"),
         ]
         .into_iter()
         .flatten()
@@ -156,6 +176,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut io_running = None;
     let mut mpi_running = None;
     let mut openmp_running = None;
+    let mut cuda_running = None;
     let mut environment = vec![
         (
             OsString::from("RPROF_SESSION_ID"),
@@ -198,6 +219,13 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         environment.push((
             "OMP_TOOL_LIBRARIES".into(),
             openmp.library().as_os_str().to_owned(),
+        ));
+    }
+    if let Some(cuda) = &cuda_prepared {
+        environment.extend(cuda.environment());
+        environment.push((
+            "CUDA_INJECTION64_PATH".into(),
+            cuda.library().as_os_str().to_owned(),
         ));
     }
     let launch_start = elapsed()?;
@@ -246,6 +274,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     if let Some(prepared) = openmp_prepared.take() {
                         openmp_running = Some(prepared.start(Arc::clone(&sink), origin)?);
                     }
+                    if let Some(prepared) = cuda_prepared.take() {
+                        cuda_running = Some(prepared.start(Arc::clone(&sink), origin)?);
+                    }
                 }
                 supervisor::Event::Heartbeat { .. } => {
                     out.emit(Event::new(now, Payload::Heartbeat))?;
@@ -258,6 +289,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     }
                     if let Some(openmp) = &openmp_running {
                         openmp.check()?;
+                    }
+                    if let Some(cuda) = &cuda_running {
+                        cuda.check()?;
                     }
                 }
             }
@@ -273,6 +307,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         .map(native_collector::Running::finish)
         .transpose();
     let openmp_result = openmp_running
+        .map(native_collector::Running::finish)
+        .transpose();
+    let cuda_result = cuda_running
         .map(native_collector::Running::finish)
         .transpose();
     let result = result.and_then(|outcome| {
@@ -309,6 +346,18 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                 out.reliable(event)?;
                 anyhow::bail!("No OMPT initialization observed: the runtime may lack OMPT (including current GCC libgomp), or the workload did not initialize OpenMP. See docs/openmp-profiling.md");
             }
+        }
+        if let Some(cuda)=cuda_result?{
+            eprintln!("CUDA: {} native records attempted, {} received, {} ingress drops; {} CUPTI drops; finalized={}",cuda.attempted,cuda.received,cuda.dropped,cuda.source_dropped,cuda.finalized>=cuda.initialized.max(1));
+            let mut out=sink.lock().map_err(|_|anyhow::anyhow!("capture writer lock poisoned"))?;
+            let at=elapsed()?;
+            for (name,value) in [("cuda.attempted_events",cuda.attempted),("cuda.received_events",cuda.received),("cuda.ingress_dropped_events",cuda.dropped),("cuda.cupti_dropped_records",cuda.source_dropped),("cuda.source_errors",cuda.source_errors),("cuda.finalized",cuda.finalized),("cuda.initialized_images",cuda.initialized)]{
+                let mut event=Event::new(at,Payload::Counter(CounterSample{track_id:0,timestamp_ns:at,name:name.into(),value:CounterValue::Integer(value),unit:"count".into()}));
+                event.attributes.insert("cuda.role".into(),Attribute::Text("diagnostic".into()));
+                out.reliable(event)?;
+            }
+            ensure!(cuda.initialized>0,"No CUDA/CUPTI initialization observed; check CUDA activity, the target-built injection library, and CUPTI availability");
+            ensure!(cuda.source_errors==0,"CUPTI reported {} collector errors; inspect CUDA diagnostics in the saved capture",cuda.source_errors);
         }
         Ok(outcome)
     });

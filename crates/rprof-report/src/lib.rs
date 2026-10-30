@@ -2,6 +2,7 @@
 
 mod analyze;
 mod clock;
+mod cuda_summary;
 mod html;
 mod io_summary;
 mod model;

@@ -355,6 +355,7 @@ dependencies = [
  "libc",
  "rprof-capture",
  "rprof-core",
+ "rprof-cuda-protocol",
  "rprof-io-protocol",
  "rprof-mpi-protocol",
  "rprof-ompt-protocol",
@@ -373,6 +374,19 @@ dependencies = [
  "serde",
  "uuid",
 ]
+
+[[package]]
+name = "rprof-cuda"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rprof-cuda-protocol",
+ "rprof-io-protocol",
+]
+
+[[package]]
+name = "rprof-cuda-protocol"
+version = "0.1.0"
 
 [[package]]
 name = "rprof-io-protocol"
