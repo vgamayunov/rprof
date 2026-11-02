@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 rprof-perf.workspace = true
 anyhow.workspace = true
 serde.workspace = true

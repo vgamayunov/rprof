@@ -54,7 +54,7 @@ rprof record -- workload / launcher
           └─ HTML report / browser timeline
 
 versioned captures + source/target hardware profiles + workload scaling model
-          ↓ projection engine (planned)
+          ↓ projection engine (explicit phase models)
        scenario estimates + projected timeline + assumptions/uncertainty
           ↓ report engine / HTML comparison UI
 ```
@@ -65,8 +65,9 @@ and Chrome Trace export are implemented, along with POSIX I/O interposition and
 per-file analysis. Initial PMPI call/request profiling and estimated MPI clock
 alignment are also implemented. OMPT host collection and cross-runtime capability
 reporting are implemented for LLVM/Intel. CUDA 13 CUPTI and Linux perf counting are
-implemented, including hardware PMU validation on HBv4; the GNU-runtime adapter and
-the projection engine remain proposed components.
+implemented, including hardware PMU validation on HBv4. Initial evidence-aware
+projection models and the WASM scenario editor are implemented; the GNU-runtime
+adapter and broader projection models remain planned.
 
 ## Workspace boundaries
 
@@ -87,7 +88,7 @@ the projection engine remain proposed components.
 | `crates/rprof-cuda-protocol` (exists) | Pointer-free CUDA activities, API callbacks, capabilities and diagnostics |
 | `crates/rprof-perf` (exists) | Pre-exec Linux perf counters, descriptor handoff, exact readings; sampling remains planned |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
-| `rprof-project` (planned) | Hardware profiles, workload models, dependency-aware projection and scenario comparison |
+| `crates/rprof-project` (exists) | Pure Rust hardware/workload models, bounded phase scheduling, scenario estimates and WASM ABI |
 | `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |
 
 Keep MPI and CUDA dependencies optional so the base CLI builds without vendor

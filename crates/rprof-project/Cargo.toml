@@ -1,0 +1,21 @@
+[package]
+name = "rprof-project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rprof-capture.workspace = true
+rprof-core.workspace = true
+uuid.workspace = true
+libc.workspace = true

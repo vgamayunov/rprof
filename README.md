@@ -13,12 +13,13 @@ Chrome Trace/Perfetto export support command-line and batch workflows. Related
 shards share a time axis within their monotonic clock domain; separate hosts/boots
 remain visibly unaligned unless explicit MPI clock calibration is recorded.
 
-Another planned capability is **hardware what-if projection**: estimate how a
+**Hardware what-if projection** estimates how a
 profiled application would perform on a different CPU, GPU, interconnect, storage
 system, or node count, including hardware unavailable for direct testing. Outputs
-will include runtime/scaling estimates, bottleneck analysis, assumptions and
-uncertainty ranges, and a projected timeline alongside the measured baseline.
-See the [projection plan](docs/hardware-projection.md).
+include runtime/scaling scenarios, modeled bottleneck/critical-path changes,
+explicit assumptions, evaluated parameter ranges, and projected phase timelines.
+Initial models use user-authored/calibrated hardware profiles and an explicit
+phase graph. See [projection models and validation](docs/projection-model.md).
 
 [Python and PyTorch profiling](docs/python-pytorch.md) is also planned: Python
 execution/stacks, PyTorch operators and autograd, data-loading/distributed activity,
@@ -49,6 +50,8 @@ read-only feature.
   stream tracks, launch correlations, device metadata, and source-health reporting.
 - Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
   capability diagnostics, and PMU text/HTML summaries.
+- Versioned hardware/workload projection profiles, dependency/resource schedules,
+  explicit strong/weak node sweeps, and an offline editor running the Rust engine in WASM.
 
 Hardware counters and multiplexing have been checked against `perf stat` on HBv4;
 software events and unsupported-event behavior were also validated on the H100 VM.
@@ -175,6 +178,21 @@ Choose events with `--pmu-events`, scope with `--pmu-scope workload-tree|root-th
 and read frequency with `--pmu-interval-ms`. Unavailable events remain explicit;
 counts are never replaced with fabricated zeros. See [PMU profiling](docs/pmu-profiling.md)
 for scaling semantics, permissions, source hardware metadata, and validation status.
+
+### Hardware what-if scenarios
+
+```sh
+target/release/rprof project baseline.rprof.jsonl --inspect -o evidence.json
+target/release/rprof project baseline.rprof.jsonl \
+  --source-hardware source.json --target-hardware target.json \
+  --workload-model workload.json --format html -o projection.html
+```
+
+Author the model from stable evidence IDs and explicit workload assumptions.
+`fixtures/projection/` provides a complete synthetic example. Unsupported and
+infeasible scenarios have no numeric speedup; parameter-case ranges are not
+confidence intervals. See [projection model](docs/projection-model.md) for scope,
+replay, validation, and editor controls.
 
 ### Multiple shards
 

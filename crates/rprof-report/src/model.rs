@@ -350,6 +350,10 @@ pub struct ReportTrack {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReportSpan {
     pub id: usize,
+    /// Stable source observation key; unlike the retained-array index, this does
+    /// not change when report retention limits change.
+    #[serde(default)]
+    pub source_id: String,
     pub track: String,
     pub name: String,
     pub category: String,

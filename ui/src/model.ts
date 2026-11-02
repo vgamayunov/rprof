@@ -21,7 +21,7 @@ export interface Report {
     rank: number | null; details: Record<string, string>;
   }[];
   spans: {
-    id: number; track: string; name: string; category: string;
+    id: number; source_id?: string; track: string; name: string; category: string;
     start_ns: string; duration_ns: string; correlation: string | null;
     incomplete: boolean; attributes: Record<string, string>;
   }[];

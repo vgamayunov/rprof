@@ -1,7 +1,9 @@
 import { build } from 'esbuild';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { checkProjectionWasm } from './check-projection-wasm.mjs';
 
 const check = process.argv.includes('--check');
+if (check) await checkProjectionWasm();
 const outputs = [
   { entryPoints: ['src/main.ts'], outfile: 'dist/viewer.js', bundle: true, minify: true, format: 'iife', target: 'es2022', legalComments: 'none' },
   { entryPoints: ['src/viewer.css'], outfile: 'dist/viewer.css', bundle: true, minify: true, legalComments: 'none' },

@@ -117,6 +117,40 @@ fn bounded_retention_keeps_full_summary_and_closes_omitted_completions() {
 }
 
 #[test]
+fn source_observation_ids_survive_retention_and_incomplete_span_renumbering() {
+    let all = analyze(&fixture(), Limits::default()).unwrap();
+    let by_source: std::collections::BTreeMap<_, _> = all
+        .spans
+        .iter()
+        .map(|s| (s.source_id.as_str(), s))
+        .collect();
+    assert_eq!(by_source.len(), all.spans.len());
+    let mut renumbered = false;
+    for max_events in 1..64 {
+        let limited = analyze(
+            &fixture(),
+            Limits {
+                max_events,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for span in limited.spans {
+            let original = by_source[span.source_id.as_str()];
+            assert_eq!(
+                (&span.name, &span.start_ns, &span.duration_ns),
+                (&original.name, &original.start_ns, &original.duration_ns)
+            );
+            renumbered |= span.id != original.id;
+        }
+    }
+    assert!(
+        renumbered,
+        "fixture should exercise retained-array IDs changing while source identities remain stable"
+    );
+}
+
+#[test]
 fn html_data_is_inert_and_roundtrips_hostile_labels() {
     let mut report = analyze(&fixture(), Limits::default()).unwrap();
     let hostile = "</script><script>globalThis.rprofInjected=true</script>&<img src=x onerror=alert(1)>\u{2028}\u{2029}";

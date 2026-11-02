@@ -65,6 +65,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -360,8 +366,11 @@ dependencies = [
  "rprof-mpi-protocol",
  "rprof-ompt-protocol",
  "rprof-perf",
+ "rprof-project",
  "rprof-report",
+ "serde",
  "serde_json",
+ "sha2",
  "signal-hook",
  "tempfile",
  "tiny_http",
@@ -439,10 +448,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rprof-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rprof-capture",
+ "rprof-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "uuid",
+]
+
+[[package]]
 name = "rprof-report"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "rprof-capture",
  "rprof-core",
  "rprof-perf",

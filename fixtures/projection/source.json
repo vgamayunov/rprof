@@ -1,0 +1,15 @@
+{
+  "version": 1, "id": "source", "name": "Analytic source", "nodes": 1,
+  "placement": {"ranks_per_node": 1, "threads_per_rank": 1, "gpus_per_rank": 1},
+  "provenance": {"kind": "assumed", "source": "analytic fixture", "date": "2026-10-30", "conditions": "Synthetic rates for analytical tests; not a hardware specification"},
+  "resources": {
+    "cpu": {"kind": "cpu", "description": "One host preparation lane", "slots_per_node": 1, "capacity_bytes_per_node": "65536", "features": ["integer"], "metrics": {}},
+    "gpu": {"kind": "gpu", "description": "Two concurrent service slots on one synthetic GPU", "slots_per_node": 2, "capacity_bytes_per_node": "8192", "features": ["fp32"], "metrics": {
+      "compute": {"unit": "work_per_second", "low": 1000000000, "central": 1000000000, "high": 1000000000, "provenance": {"kind": "assumed", "source": "analytic fixture", "date": "2026-10-30", "conditions": "Effective throughput for this workload's work unit"}},
+      "memory": {"unit": "bytes_per_second", "low": 2000000000, "central": 2000000000, "high": 2000000000, "provenance": {"kind": "assumed", "source": "analytic fixture", "date": "2026-10-30", "conditions": "Effective physical byte throughput for declared traffic"}}
+    }},
+    "storage": {"kind": "storage", "description": "Serialized checkpoint service", "slots_per_node": 1, "capacity_bytes_per_node": null, "features": [], "metrics": {
+      "bandwidth": {"unit": "bytes_per_second", "low": 4000000000, "central": 4000000000, "high": 4000000000, "provenance": {"kind": "assumed", "source": "analytic fixture", "date": "2026-10-30", "conditions": "Effective API-service bandwidth, fixed write size"}}
+    }}
+  }
+}

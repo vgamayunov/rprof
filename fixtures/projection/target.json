@@ -1,0 +1,15 @@
+{
+  "version": 1, "id": "faster", "name": "Faster compute and checkpoint", "nodes": 1,
+  "placement": {"ranks_per_node": 1, "threads_per_rank": 1, "gpus_per_rank": 1},
+  "provenance": {"kind": "assumed", "source": "analytic target", "date": "2026-10-30", "conditions": "Hypothetical target with unchanged memory bandwidth"},
+  "resources": {
+    "cpu": {"kind": "cpu", "description": "Same host preparation lane", "slots_per_node": 1, "capacity_bytes_per_node": "65536", "features": ["integer"], "metrics": {}},
+    "gpu": {"kind": "gpu", "description": "Two concurrent service slots", "slots_per_node": 2, "capacity_bytes_per_node": "8192", "features": ["fp32"], "metrics": {
+      "compute": {"unit": "work_per_second", "low": 2000000000, "central": 2000000000, "high": 2000000000, "provenance": {"kind": "assumed", "source": "analytic target", "date": "2026-10-30", "conditions": "Twice the source's effective work throughput"}},
+      "memory": {"unit": "bytes_per_second", "low": 2000000000, "central": 2000000000, "high": 2000000000, "provenance": {"kind": "assumed", "source": "analytic target", "date": "2026-10-30", "conditions": "Same memory bandwidth"}}
+    }},
+    "storage": {"kind": "storage", "description": "Serialized checkpoint service", "slots_per_node": 1, "capacity_bytes_per_node": null, "features": [], "metrics": {
+      "bandwidth": {"unit": "bytes_per_second", "low": 8000000000, "central": 8000000000, "high": 8000000000, "provenance": {"kind": "assumed", "source": "analytic target", "date": "2026-10-30", "conditions": "Twice the effective checkpoint throughput"}}
+    }}
+  }
+}

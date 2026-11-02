@@ -1,4 +1,38 @@
-# Hardware what-if projection — planned
+# Hardware what-if projection
+
+## Implemented v1
+
+`rprof project` produces reproducible JSON, text, and self-contained HTML
+scenarios from a capture plus versioned hardware/workload profiles. The offline
+editor executes the same Rust engine through WebAssembly, with native/WASM parity
+tests. Models cover workload-specific throughput ratios, normalized
+latency–bandwidth costs, and normalized compute/memory (roofline) costs.
+
+An explicit phase DAG and effective resource slots determine the target schedule.
+Execution-lane order, source readiness lags, and trailing time are preserved.
+Strong/weak node sweeps use declared representative-partition assumptions;
+capacity/feature failures and missing evidence never become numeric speedups.
+
+```sh
+cargo build -p rprof-cli
+target/debug/rprof project fixtures/projection/baseline.jsonl \
+  --source-hardware fixtures/projection/source.json \
+  --target-hardware fixtures/projection/target.json \
+  --workload-model fixtures/projection/workload.json \
+  --nodes 1,2,4 --scaling strong --format html -o projection.html
+```
+
+This example is explicitly synthetic: the one-node target changes the critical
+path and projects 120 ns from a 160 ns source, rather than adding overlapping
+kernel times. Open HTML directly to edit models, recalculate offline, and export
+a replayable request. For real data, begin with
+`rprof project capture.jsonl --inspect -o evidence.json` and author the phase model
+using stable source-observation IDs.
+
+See [projection model and CLI](projection-model.md) for the schema, algorithms,
+limits, and validation. The design below also records longer-term goals:
+automatic workload decomposition, arbitrary topology remapping, full discrete-event
+simulation, and broader empirical calibration remain future work.
 
 ## Goal
 
@@ -97,7 +131,7 @@ and ranges and identify the additional measurements that would narrow them.
 
 ## CLI and reports
 
-Proposed command shape; this command and profile file schema are not implemented:
+Implemented command shape (version-1 profiles are described in [projection model](projection-model.md)):
 
 ```sh
 rprof project baseline.rprof.jsonl \
@@ -108,8 +142,8 @@ rprof project baseline.rprof.jsonl \
   --output projection.json
 ```
 
-Add parameter sweeps and an HTML scenario editor using the same Rust model engine
-and hardware-profile definitions. Text/HTML output should include:
+Node-count sweeps and an HTML scenario editor use the same Rust model engine and
+hardware-profile definitions. The reporting goals include:
 
 - Baseline and projected runtime/throughput, speedup, and component contributions.
 - Critical-path and bottleneck changes, utilization, and newly exposed waits.
@@ -142,6 +176,17 @@ component speedups must not simply be multiplied.
    that are available, compare with measurements, and publish error by model/workload
    class. Keep calibration and validation sets separate and predeclare acceptance
    tolerances before evaluating held-out data.
+
+The initial implementation covers steps 1–4 for explicit, bounded phase graphs
+and representative-partition scaling. Step 5 has an independent single-process
+LCG throughput-ratio validation between the local Intel host and HBv4: 373.065 ms
+predicted versus 325.317 ms observed, **14.68% error against a predeclared 15% limit**.
+The same executable ran on both hosts; 120-million-iteration calibration runs and
+300-million-iteration held-out runs were kept separate. This is a narrow pass for
+that workload, not validation of arbitrary CPU/GPU/network/storage performance.
+Other component and scaling models currently have analytical validation. The
+measured target was outside the evaluated calibration-derived range, demonstrating
+that these cases do not bound all modeling error.
 
 Use analytic fixtures for compute/memory limits, message latency/bandwidth, shared
 storage saturation, serial fractions, dependency overlap, and capacity failure.

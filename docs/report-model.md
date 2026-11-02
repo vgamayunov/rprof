@@ -33,7 +33,7 @@ Report {
     rank: number|null, details: { [key: string]: string }
   }],
   spans: [{
-    id: number, track: string, name: string, category: string,
+    id: number, source_id?: string, track: string, name: string, category: string,
     start_ns: string, duration_ns: string, correlation: string|null,
     incomplete: boolean, attributes: { [key: string]: string }
   }],
@@ -65,6 +65,11 @@ never displayed as a synchronized global timeline without explicit calibration.
 An optional `calibration` describes MPI offset estimates; those domains combine
 calibrated hosts and expose uncertainty/drift. Raw capture timestamps are preserved.
 
+Span `source_id` is an additive stable observation key:
+`span:SHARD:CHUNK:EVENT`, or `open:SHARD:CHUNK:EVENT` for an unfinished activity's
+source entry. Unlike `id`, it is independent of timeline retention and incomplete
+span array ordering. Projection models bind to this key and the raw capture hash.
+
 Open activities become explicitly incomplete spans ending at the shard's last
 observed time, unless a matching completed span was observed. Attribute values
 are display strings preserving exact integers. Counter charts may approximate
@@ -76,7 +81,9 @@ Summary category durations sum inclusive spans and can double-count nested or
 overlapping work; they are not total elapsed time. Summary counts describe the
 entire validated capture. Retained event arrays are a bounded subset and omitted
 event counts are separate from collector loss. Measured and synthetic provenance
-are supported now; projected scenario artifacts will extend this contract later.
+are supported. Projected scenarios use a separate `kind: "rprof-projection"`
+artifact and viewer, documented in [projection model](projection-model.md), so
+model estimates are not confused with native measured spans.
 
 The HTML shell contains an inert `<script type="application/json" id="rprof-data">`
 with safely escaped JSON, followed by a self-contained script bundle. The UI

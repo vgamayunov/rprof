@@ -204,7 +204,7 @@ follow-ups. See [PMU profiling](pmu-profiling.md).
   dependency-aware rescheduling with overlap, contention, and critical-path analysis.
 - Add strong/weak-scaling models and node-count sweeps, including decomposition,
   communication changes, collective algorithms, placement, and capacity checks.
-- Provide a planned `rprof project` CLI and HTML scenario editor/comparison view.
+- Provide a `rprof project` CLI and HTML scenario editor/comparison view.
   Report projected runtime/speedup, bottlenecks, scaling efficiency, sensitivity,
   assumption ranges, and baseline/projected timelines.
 - Validate models by predicting held-out measurements on available machines and
@@ -220,6 +220,16 @@ Detailed design and incremental delivery are in
 [hardware projection](hardware-projection.md). Define evidence requirements during
 phases 2–7; projection implementation can begin once the relevant collectors supply
 enough data, without waiting for every collector to be complete.
+
+**Initial supported models implemented:** versioned provenance-bearing profiles,
+capture-bound phase models, throughput/latency–bandwidth/roofline sensitivity,
+deterministic resource scheduling and critical paths, explicit representative
+strong/weak node sweeps, capacity/features, JSON/text/HTML, and an offline scenario
+editor using the same Rust engine in WASM. Analytic cases cover overlap and
+bottleneck changes; a separate-calibration cross-host LCG held-out prediction
+passed at 14.68% error against a predeclared 15% limit. This is workload-specific;
+independent GPU/network/storage/multinode validation and automatic decomposition
+remain follow-ups. See [projection model](projection-model.md).
 
 ## 9. Remote usage and later remote-file viewing
 
@@ -281,7 +291,9 @@ integrated GPU collection builds on phase 6. These are planned capabilities.
 
 ## Suggested next task
 
-Begin phase 8's evidence-aware hardware projection. Expand the OpenMP runtime matrix and GNU adapter
+Continue phase 9's read-only remote-file viewing, while preserving manual remote
+collection and SSH-tunneled viewing. Expand projection calibration/validation
+matrices and the OpenMP runtime matrix and GNU adapter
 coverage alongside the remaining collector work.
 
 The proposed order can be adjusted once the primary MPI implementation, OpenMP

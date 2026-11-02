@@ -2,6 +2,8 @@ import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, for
 import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, PmuHost, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
+import { ProjectionViewer } from './projection.js';
+import type { Projection } from './projection.js';
 
 const startingTheme = initialTheme();
 document.documentElement.dataset.theme = startingTheme;
@@ -953,6 +955,7 @@ class Viewer {
       put(dl, 'div', 'End', `${end} ns`);
       put(dl, 'div', 'Track', span.track);
       put(dl, 'div', 'Correlation', span.correlation ?? '—');
+      if (span.source_id) put(dl, 'div', 'Source observation', span.source_id);
       const links = this.report.dependencies.filter(edge => edge.from === span.correlation || edge.to === span.correlation);
       for (const edge of links) put(dl, 'div', `Dependency · ${edge.relation}`, `${edge.from} → ${edge.to}`);
       if (span.correlation && !links.length) put(dl, 'div', 'Dependency', 'No linked endpoint retained');
@@ -975,9 +978,10 @@ const payload = document.getElementById('rprof-data');
 if (root) {
   try {
     if (!payload?.textContent) throw new Error('No report data found.');
-    const report: Report = JSON.parse(payload.textContent);
-    if (report.version !== 1) throw new Error(`Unsupported report version: ${String(report.version)}`);
-    new Viewer(report, root);
+    const data: Report | Projection = JSON.parse(payload.textContent);
+    if (data.version !== 1) throw new Error(`Unsupported report version: ${String(data.version)}`);
+    if ('kind' in data && data.kind === 'rprof-projection') new ProjectionViewer(data, root);
+    else new Viewer(data as Report, root);
   } catch (error) {
     root.replaceChildren(node('main', 'load-error', `Unable to open report: ${error instanceof Error ? error.message : 'invalid data'}`));
   }

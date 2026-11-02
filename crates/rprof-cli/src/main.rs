@@ -7,6 +7,7 @@ mod mpi_collector;
 mod native_collector;
 mod openmp_collector;
 mod pmu_collector;
+mod project;
 mod record;
 mod report;
 mod supervisor;
@@ -35,6 +36,8 @@ enum Action {
     Record(RecordArgs),
     /// Generate a text summary, offline HTML timeline, or Chrome Trace/Perfetto JSON.
     Report(report::ReportArgs),
+    /// Project a captured workload onto declared hardware profiles and assumptions.
+    Project(project::ProjectArgs),
     /// Serve an offline report snapshot on a loopback-only local browser endpoint.
     View(view::ViewArgs),
     /// Merge same-session capture shards deterministically, preserving clock domains.
@@ -149,6 +152,10 @@ fn run(cli: Cli) -> Result<u8> {
         Action::Record(args) => record::record(args),
         Action::Report(args) => {
             report::report(args)?;
+            Ok(0)
+        }
+        Action::Project(args) => {
+            project::run(args)?;
             Ok(0)
         }
         Action::View(args) => {

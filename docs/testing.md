@@ -108,6 +108,22 @@ coverage in both tools, rather than assuming a large event set was multiplexed.
 Run `python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'` for reference
 CSV/capture parsing tests (also run in CI).
 
+## Projection checks
+
+`cargo test --workspace` includes analytical projection cases, source observation
+identity under retention, CLI no-clobber/replay, and evidence guards. Browser tests
+compare native and WASM results, edit rates and node sweeps, and exercise stale
+engines, invalid inputs, infeasibility, safe strings, pagination, and themes.
+`npm --prefix ui run check-generated` also verifies projection WASM/source hashes;
+rebuild with `bash scripts/build-projection-wasm.sh` after engine changes.
+
+The measured cross-host fixture separates 120-million-iteration calibration from
+300-million-iteration held-out observations with a predeclared 15% tolerance.
+The Intel/WSL-to-HBv4 prediction passed at 14.68%; the observation was outside the
+parameter-case range, which is not an error bound. See
+[projection validation](projection-model.md#independent-measurement-validation)
+for exact results and the remaining component/model validation matrix.
+
 ## Timeline/report checks
 
 Rust tests cover shared summaries, domain offsets/identities, large integers,

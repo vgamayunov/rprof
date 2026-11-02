@@ -13,7 +13,7 @@ mod text;
 mod trace;
 
 pub use analyze::{Limits, analyze};
-pub use html::write_html;
+pub use html::{write_html, write_html_payload};
 pub use model::*;
 pub use text::write_text;
 pub use trace::write_trace;

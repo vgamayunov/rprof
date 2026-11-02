@@ -195,6 +195,7 @@ pub(crate) fn counter(value: CounterValue) -> (String, String) {
 }
 
 struct Pending {
+    source_id: String,
     shard: Uuid,
     track: u64,
     timestamp: u64,
@@ -233,7 +234,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         cuda.observe(&record);
         pmu.observe(&record);
         if let Record::Chunk(chunk) = record {
-            for event in chunk.events {
+            for (event_index, event) in chunk.events.into_iter().enumerate() {
                 if let Payload::Span(span) = &event.payload {
                     let stats = categories
                         .entry(category(&span.category).into())
@@ -299,6 +300,10 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                     }
                     Payload::Span(span) => spans.push(ReportSpan {
                         id: spans.len(),
+                        source_id: format!(
+                            "span:{}:{}:{event_index}",
+                            chunk.shard_id, chunk.sequence
+                        ),
                         track: key(chunk.shard_id, span.track_id),
                         name: span.name,
                         category: category(&span.category).into(),
@@ -334,6 +339,10 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                         pending.insert(
                             (chunk.shard_id, track_id, correlation_id),
                             Pending {
+                                source_id: format!(
+                                    "open:{}:{}:{event_index}",
+                                    chunk.shard_id, chunk.sequence
+                                ),
                                 shard: chunk.shard_id,
                                 track: track_id,
                                 timestamp: start_ns.unwrap_or(event.timestamp_ns),
@@ -376,6 +385,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         let observed = summary.shards[&open.shard].observed_ns;
         spans.push(ReportSpan {
             id: spans.len(),
+            source_id: open.source_id,
             track: key(open.shard, open.track),
             name: open.name,
             category: open.category,

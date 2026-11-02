@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Synthetic overlap and bottleneck-shift example",
+  "baseline_sha256": "a7e8e628f209e14479bde90be05a921e0c67cd9d98046ad21891e91672a46978",
+  "domain": "0", "window_start_ns": "0", "window_duration_ns": "160",
+  "assumptions": "Analytic example: independent GPU streams, explicit finish-to-start checkpoint dependencies, calibrated service ratios and fixed host preparation. Not a real hardware forecast.",
+  "unmodeled": "reject",
+  "scaling_assumption": "Ideal balanced GPU work per representative partition; fixed global problem for strong scaling and fixed per-node work for weak scaling. No graph duplication.",
+  "memory": {"gpu": {"bytes_per_source_node": "2048", "distributed": true}},
+  "required_features": {"gpu": ["fp32"]},
+  "phases": [
+    {"id": "prepare", "span_id": "span:00000000-0000-4000-8000-000000000009:1:0", "name": "Host prepare", "resource": "cpu", "model": {"kind": "unchanged"}, "after": [], "assumption": "Host preparation stays constant."},
+    {"id": "kernel-a", "span_id": "span:00000000-0000-4000-8000-000000000009:1:1", "name": "Compute-bound kernel A", "resource": "gpu", "model": {"kind": "throughput", "metric": "compute"}, "after": ["prepare"], "node_scaling": {"kind": "distributed"}, "assumption": "Same kernel work and geometry; effective compute throughput is the limiting service rate."},
+    {"id": "kernel-b", "span_id": "span:00000000-0000-4000-8000-000000000009:1:2", "name": "Roofline kernel B", "resource": "gpu", "model": {"kind": "roofline", "compute_metric": "compute", "bandwidth_metric": "memory", "work": "80", "bytes": "160"}, "after": ["prepare"], "node_scaling": {"kind": "distributed"}, "assumption": "Declared work and physical byte counts; maximum of compute and memory service costs."},
+    {"id": "checkpoint", "span_id": "span:00000000-0000-4000-8000-000000000009:1:3", "name": "Checkpoint", "resource": "storage", "model": {"kind": "transfer", "bandwidth_metric": "bandwidth", "latency_metric": null, "bytes": "160", "operations": "1"}, "after": ["kernel-a", "kernel-b"], "assumption": "Fixed global checkpoint bytes; effective service bandwidth models the API-visible operation, without changing durability semantics."}
+  ]
+}

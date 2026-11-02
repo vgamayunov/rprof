@@ -5,6 +5,14 @@ uses the system preference initially and remembers explicit choices when browser
 storage is available. Export reports again after rebuilding to include UI updates;
 existing standalone HTML files contain their original embedded viewer bundle.
 
+Projection artifacts (`kind: "rprof-projection"`) use `src/projection.ts` and an
+offline JSON scenario editor. Their embedded `dist/project.wasm` runs the same Rust
+engine as `rprof project`. After changing engine sources or dependencies, install
+`wasm32-unknown-unknown` once and run `bash scripts/build-projection-wasm.sh` from
+the repository root, then rebuild the viewer. `check-generated` checks both the
+viewer bundles and the WASM source/binary manifest. Native/WASM parity is covered
+by browser tests; stale engine hashes produce an error while retaining results.
+
 `index.html` is the Rust report template. It contains exactly one each of `{{STYLE}}`, `{{DATA}}`, and `{{SCRIPT}}`; Rust replaces these with the checked-in `dist/viewer.css`, safely escaped JSON, and `dist/viewer.js`. Do not open the template directly to test a capture: it needs an embedded report payload. No browser network access is required.
 
 ```sh

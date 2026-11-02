@@ -12,7 +12,31 @@ const STYLE: &str = include_str!("../../../ui/dist/viewer.css");
 /// Escape '<' to prevent a workload string from terminating the inert script tag;
 /// also escape '&' and '>'. Unicode line separators are valid in inert JSON.
 pub fn write_html(report: &Report, mut out: impl Write) -> Result<()> {
+    write_html_payload(report, &mut out, None)
+}
+
+/// Embed a derived model using the same inert JSON escaping and bundled viewer.
+/// Optional WebAssembly is application-owned binary, never profile-supplied code.
+pub fn write_html_payload(
+    data: &impl serde::Serialize,
+    mut out: impl Write,
+    wasm: Option<&[u8]>,
+) -> Result<()> {
+    use base64::Engine;
+    let wasm = wasm
+        .map(|bytes| {
+            format!(
+                "<script type=\"application/octet-stream\" id=\"rprof-project-wasm\">{}</script>",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        })
+        .unwrap_or_default();
     let template = TEMPLATE
+        .replacen(
+            "<div id=\"app\"></div>",
+            &format!("<div id=\"app\"></div>{wasm}"),
+            1,
+        )
         .replacen("{{STYLE}}", STYLE, 1)
         .replacen("{{SCRIPT}}", SCRIPT, 1);
     let (before, after) = template
@@ -44,7 +68,7 @@ pub fn write_html(report: &Report, mut out: impl Write) -> Result<()> {
             self.0.flush()
         }
     }
-    serde_json::to_writer(Escaped(&mut out), report)?;
+    serde_json::to_writer(Escaped(&mut out), data)?;
     out.write_all(after.as_bytes())?;
     Ok(())
 }
