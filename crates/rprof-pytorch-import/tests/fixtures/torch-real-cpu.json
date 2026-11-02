@@ -1,0 +1,177 @@
+ {
+    "schemaVersion": 1,
+    "deviceProperties": [],
+    
+      "trace_id": "00000000000000000000000000000000",
+      "host_name": "fixture-host",
+    "displayTimeUnit": "ms",
+    "baseTimeNanoseconds": 1790857026000000000,
+    "traceEvents": [
+    
+  {
+    "ph": "M",
+    "name": "process_name",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 0,
+    "args": {
+      "name": "python3"
+    }
+  },
+  {
+    "ph": "M",
+    "name": "process_labels",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 0,
+    "args": {
+      "labels": "CPU"
+    }
+  },
+  {
+    "ph": "M",
+    "name": "process_sort_index",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 0,
+    "args": {
+      "sort_index": 780919
+    }
+  },
+  {
+    "ph": "M",
+    "name": "thread_name",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 780919,
+    "args": {
+      "name": "thread 780919 (python3)"
+    }
+  },
+  {
+    "ph": "M",
+    "name": "thread_sort_index",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 780919,
+    "args": {
+      "sort_index": 780919
+    }
+  },
+  {
+    "ph": "M",
+    "name": "thread_name",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 780919,
+    "args": {
+      "name": "thread 780919 (python3)"
+    }
+  },
+  {
+    "ph": "M",
+    "name": "thread_sort_index",
+    "ts": 2759893567419.193,
+    "pid": 780919,
+    "tid": 780919,
+    "args": {
+      "sort_index": 780919
+    }
+  },
+  {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::ones",
+    "pid": 780919,
+    "tid": 780919,
+    "ts": 2759893567651.628,
+    "dur": 724.890
+    ,
+    "args": {
+      "External id": 1,"Record function id": 0, "Ev Idx": 0
+    }
+  },
+  {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::empty",
+    "pid": 780919,
+    "tid": 780919,
+    "ts": 2759893567793.240,
+    "dur": 30.581
+    ,
+    "args": {
+      "External id": 2,"Record function id": 0, "Ev Idx": 1
+    }
+  },
+  {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::fill_",
+    "pid": 780919,
+    "tid": 780919,
+    "ts": 2759893567858.504,
+    "dur": 514.390
+    ,
+    "args": {
+      "External id": 3,"Record function id": 0, "Ev Idx": 2
+    }
+  },
+  {
+    "ph": "X",
+    "cat": "cpu_op",
+    "name": "aten::add",
+    "pid": 780919,
+    "tid": 780919,
+    "ts": 2759893568472.214,
+    "dur": 53.986
+    ,
+    "args": {
+      "External id": 4,"Record function id": 0, "Sequence number": 0, "Fwd thread id": 0, "Ev Idx": 3
+    }
+  },
+  {
+    "ph": "X",
+    "cat": "Trace",
+    "name": "PyTorch Profiler (0)",
+    "pid": "Spans",
+    "tid": "PyTorch Profiler",
+    "ts": 2759893567248.514,
+    "dur": 1321.607
+    ,
+    "args": {
+      "Op count": 0
+    }
+  },
+  {
+    "ph": "M",
+    "name": "process_sort_index",
+    "ts": 2759893567248.514,
+    "pid": "Spans",
+    "tid": 0,
+    "args": {
+      "sort_index": 536870912
+    }
+  },
+  {
+    "ph": "i",
+    
+    "s": "g",
+    "name": "Iteration Start: PyTorch Profiler",
+    "pid": "Traces",
+    "tid": "Trace PyTorch Profiler",
+    "ts": 2759893567248.514
+    
+  },
+  {
+    "ph": "i",
+    
+    "s": "g",
+    "name": "Record Window End",
+    "pid": "",
+    "tid": "",
+    "ts": 2759893568960.884
+    
+  }
+  ],
+      "ERROR": ["ERROR:2026-11-02 10:55:19 780919:780919 DeviceProperties.cpp:50] gpuGetDeviceCount failed with code 35"],"traceName": "/tmp/opencode/pytorch-real-cpu.json" }

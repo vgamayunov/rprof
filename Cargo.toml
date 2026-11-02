@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-io-protocol", "crates/rprof-preload", "crates/rprof-mpi-protocol", "crates/rprof-mpi", "crates/rprof-ompt-protocol", "crates/rprof-ompt", "crates/rprof-cuda-protocol", "crates/rprof-cuda", "crates/rprof-perf", "crates/rprof-project", "crates/rprof-cli"]
+members = ["crates/rprof-core", "crates/rprof-capture", "crates/rprof-report", "crates/rprof-io-protocol", "crates/rprof-preload", "crates/rprof-mpi-protocol", "crates/rprof-mpi", "crates/rprof-ompt-protocol", "crates/rprof-ompt", "crates/rprof-cuda-protocol", "crates/rprof-cuda", "crates/rprof-perf", "crates/rprof-project", "crates/rprof-pytorch-import", "crates/rprof-cli"]
 resolver = "3"
 
 [workspace.package]
@@ -22,6 +22,7 @@ rprof-ompt-protocol = { path = "crates/rprof-ompt-protocol" }
 rprof-cuda-protocol = { path = "crates/rprof-cuda-protocol" }
 rprof-perf = { path = "crates/rprof-perf" }
 rprof-project = { path = "crates/rprof-project" }
+rprof-pytorch-import = { path = "crates/rprof-pytorch-import" }
 sha2 = "0.10"
 base64 = "0.22"
 libc = "0.2"

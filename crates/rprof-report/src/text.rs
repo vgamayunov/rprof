@@ -103,6 +103,74 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
             )?;
         }
     }
+    if let Some(python) = &report.python {
+        writeln!(
+            out,
+            "\nPython instrumented execution segments (inclusive wall time; self excludes included child segments, not native/GIL waits):"
+        )?;
+        for r in &python.runtimes {
+            writeln!(
+                out,
+                "  PID {} / interpreter {} / {}: CPython {} via {}; initialized={} finalized={}; source drops={} omitted={} unmatched={} abandoned={}",
+                r.pid,
+                r.interpreter,
+                r.source,
+                r.version,
+                r.backend,
+                r.initialized,
+                r.finalized,
+                r.source_dropped,
+                r.omitted_callbacks,
+                r.unmatched,
+                r.abandoned
+            )?;
+        }
+        for f in &python.functions {
+            writeln!(
+                out,
+                "  {} {} ({}:{}): {} segments, inclusive {} ns, selected-self {} ns, yields={}, unwinds={}",
+                f.kind,
+                f.name,
+                f.file,
+                f.line,
+                f.segments,
+                f.total_ns,
+                f.self_ns.as_deref().unwrap_or("not applicable"),
+                f.yields,
+                f.unwinds
+            )?;
+        }
+        writeln!(
+            out,
+            "  Receiver drops={}, malformed={}; user ranges are elapsed lifetimes and can include suspension.",
+            python.receiver_dropped, python.malformed
+        )?;
+    }
+    if let Some(torch) = &report.pytorch {
+        writeln!(
+            out,
+            "\nPyTorch/Kineto imported activities (source clocks are separate; source profiler loss is unknown):"
+        )?;
+        for a in &torch.activities {
+            writeln!(
+                out,
+                "  {} {:<40} {} observations, total {} ns, CPU contained-self {} ns, bytes {}",
+                a.role,
+                a.name,
+                a.count,
+                a.total_ns,
+                a.self_ns.as_deref().unwrap_or("unavailable/not applicable"),
+                a.bytes.as_deref().unwrap_or("unavailable")
+            )?;
+        }
+        for m in &torch.memory {
+            writeln!(
+                out,
+                "  {} device {:?}: peak observed {} B, last {} B ({} samples)",
+                m.name, m.device, m.peak_bytes, m.last_bytes, m.samples
+            )?;
+        }
+    }
     if let Some(pmu) = &report.pmu {
         writeln!(
             out,

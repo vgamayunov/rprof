@@ -20,6 +20,9 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: cargo fmt --all --check
       - run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -62,3 +65,17 @@ jobs:
       - run: sudo apt-get update
       - run: sudo apt-get install -y clang libomp-dev
       - run: bash scripts/test-openmp.sh
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: cargo test -p rprof-cli --test python -- --test-threads=1

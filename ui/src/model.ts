@@ -1,6 +1,6 @@
 export interface Report {
   version: 1;
-  provenance: { kind: 'measured' | 'synthetic'; label: string; source: string };
+  provenance: { kind: 'measured' | 'synthetic' | 'imported' | 'mixed'; label: string; source: string };
   summary: {
     format: string; session_id: string; complete: boolean; truncated_tail: boolean;
     recovered_inputs: string; tracks: string; spans: string; counters: string;
@@ -37,6 +37,39 @@ export interface Report {
   openmp?: OpenmpSummary | null;
   cuda?: CudaSummary | null;
   pmu?: PmuSummary | null;
+  python?: PythonSummary | null;
+  pytorch?: PytorchSummary | null;
+}
+
+export interface PythonSummary { runtimes: PythonRuntime[]; functions: PythonFunction[]; receiver_dropped: string; malformed: string }
+export interface PythonRuntime {
+  shard: string; domain: string; source: string; pid: string; instance: string; interpreter: string;
+  backend: string; version: string; clock: string; detail: string; initialized: boolean; finalized: boolean;
+  attempted: string; received: string; source_dropped: string; omitted_callbacks: string;
+  sequence_gaps: string; unmatched: string; abandoned: string; inflight: string; source_errors: string; errors: string[];
+}
+export interface PythonFunction {
+  shard: string; domain: string; source: string; kind: string; symbol: string; name: string;
+  file: string; line: string; execution_kind: string; segments: string; total_ns: string;
+  self_ns: string | null; max_ns: string; yields: string; unwinds: string;
+}
+export interface PytorchSummary { sources: PytorchSource[]; activities: PytorchActivity[]; memory: PytorchMemory[] }
+export interface PytorchSource { shard: string; domain: string; metadata: Record<string, string>; diagnostics: Record<string, string> }
+export interface PytorchActivity {
+  shard: string; domain: string; role: string; name: string; device: string | null;
+  count: string; total_ns: string; self_ns: string | null; max_ns: string; bytes: string | null;
+}
+export interface PytorchMemory {
+  shard: string; domain: string; track: string; name: string; device: string | null;
+  samples: string; peak_bytes: string; last_bytes: string;
+}
+
+export function domainClockLabel(report: Report, domainId: string | undefined): string {
+  const domain = report.domains.find(candidate => candidate.id === domainId);
+  if (domain?.calibration) return 'ESTIMATED MPI CLOCK ALIGNMENT';
+  if (report.pytorch?.sources.some(source => source.domain === domainId))
+    return report.domains.length > 1 ? 'IMPORTED PYTORCH µS→NS RELATIVE CLOCK · UNALIGNED WITH NATIVE' : 'IMPORTED PYTORCH µS→NS RELATIVE CLOCK · NOT NATIVE MONOTONIC';
+  return report.domains.length > 1 ? 'CLOCK DOMAINS ARE UNALIGNED' : 'SAME-DOMAIN MONOTONIC TIME';
 }
 
 export interface PmuSummary { hosts: PmuHost[]; events: PmuEvent[]; metrics: PmuMetrics[] }
@@ -299,6 +332,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
 export function isCollectorHealth(name: string): boolean {
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
     name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') || name.startsWith('pmu.meta.') ||
+    name.startsWith('python.meta.') || name === 'python.receiver_dropped' || name === 'python.malformed' || name.startsWith('pytorch.import.') ||
     /^cuda\.(attempted_events|received_events|ingress_dropped_events|cupti_dropped_records|source_errors|finalized|initialized_images|invalid_timing_records|unattributed_records|unresolved_correlations|ambiguous_correlations)$/.test(name);
 }
 

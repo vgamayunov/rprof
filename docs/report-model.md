@@ -9,7 +9,7 @@ indices and bounded event counts used for rendering are JavaScript numbers.
 ```text
 Report {
   version: 1,
-  provenance: { kind: "measured" | "synthetic", label: string, source: string },
+  provenance: { kind: "measured" | "synthetic" | "imported" | "mixed", label: string, source: string },
   summary: {
     format: string, session_id: string, complete: boolean,
     truncated_tail: boolean, recovered_inputs: string,
@@ -84,6 +84,12 @@ event counts are separate from collector loss. Measured and synthetic provenance
 are supported. Projected scenarios use a separate `kind: "rprof-projection"`
 artifact and viewer, documented in [projection model](projection-model.md), so
 model estimates are not confused with native measured spans.
+
+Optional `python` and `pytorch` summaries are defined by the Rust report types.
+Python functions are instrumented execution segments; user ranges are elapsed
+lifetimes. PyTorch tables preserve raw observations and framework-owned memory
+totals. Missing self-time/byte information is null. Imported source clocks are
+explicitly distinct from native monotonic domains, and source export loss is unknown.
 
 The HTML shell contains an inert `<script type="application/json" id="rprof-data">`
 with safely escaped JSON, followed by a self-contained script bundle. The UI

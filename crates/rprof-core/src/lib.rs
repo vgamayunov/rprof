@@ -57,6 +57,8 @@ pub enum Category {
     Openmp,
     Cuda,
     Io,
+    Python,
+    Pytorch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

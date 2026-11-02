@@ -1,11 +1,35 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { averageNs, deviceActivities, formatNs, indexReport, indexSpans, integerPlotValues, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
+import { averageNs, deviceActivities, domainClockLabel, formatNs, indexReport, indexSpans, integerPlotValues, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
 import type { CudaDevice, OpenmpRegion, Report, Span } from '../src/model.ts';
 
 const span = (id: number, start_ns: string, duration_ns: string): Span => ({
   id, track: 't', name: `span ${id}`, category: 'compute', start_ns, duration_ns,
   correlation: null, incomplete: false, attributes: {},
+});
+
+test('Python and PyTorch diagnostic counters stay out of timeline; framework bytes and marker samples remain', () => {
+  for (const name of ['python.meta.backend', 'python.receiver_dropped', 'python.malformed',
+    'pytorch.import.metadata', 'pytorch.import.skipped_records']) assert.equal(isCollectorHealth(name), true, name);
+  for (const name of ['pytorch.memory.allocated', 'pytorch.memory.reserved', '[memory]', 'sensors.watts'])
+    assert.equal(isCollectorHealth(name), false, name);
+  const report = { tracks: [{ id: 't' }], spans: [], counters: [
+    ...['python.meta.backend', 'python.receiver_dropped', 'python.malformed', 'pytorch.import.metadata', 'pytorch.import.skipped_records',
+      'pytorch.memory.allocated', 'pytorch.memory.reserved', '[memory]', 'sensors.watts'].map(name => ({
+        track: 't', name, timestamp_ns: '0', value: '90071992547409931234', value_type: 'integer', unit: name === '[memory]' ? 'marker' : 'bytes', attributes: {},
+      })),
+  ] } as unknown as Report;
+  assert.deepEqual([...indexReport(report).get('t')!.counters.keys()], ['pytorch.memory.allocated [bytes; integer]',
+    'pytorch.memory.reserved [bytes; integer]', '[memory] [marker; integer]', 'sensors.watts [bytes; integer]']);
+});
+
+test('imported domain clock never claims native monotonic alignment, even when it is the only domain', () => {
+  const report = { domains: [{ id: 'import' }], pytorch: { sources: [{ domain: 'import' }] } } as Report;
+  assert.match(domainClockLabel(report, 'import'), /IMPORTED PYTORCH.*NOT NATIVE MONOTONIC/);
+  report.domains.push({ id: 'native', name: 'native', origin_ns: '0', end_ns: '10' });
+  assert.match(domainClockLabel(report, 'import'), /UNALIGNED WITH NATIVE/);
+  assert.equal(domainClockLabel(report, 'native'), 'CLOCK DOMAINS ARE UNALIGNED');
+  assert.equal(domainClockLabel({ ...report, pytorch: undefined, domains: [report.domains[1]!] }, 'native'), 'SAME-DOMAIN MONOTONIC TIME');
 });
 
 test('CUDA metadata and diagnostic counters are not timeline samples', () => {

@@ -6,3 +6,6 @@
 /ui/test-results/
 /ui/playwright-report/
 /reports/
+/python/**/__pycache__/
+/python/*.egg-info/
+/python/build/

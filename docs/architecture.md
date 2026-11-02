@@ -83,7 +83,8 @@ adapter and broader projection models remain planned.
 | `crates/rprof-mpi-protocol` (exists) | Pointer-free MPI wire observations |
 | `crates/rprof-ompt` (exists) | OMPT callbacks and Rust transport; runtime-negotiated capabilities |
 | `crates/rprof-ompt-protocol` (exists) | Pointer-free host callback observations and per-thread sequences |
-| Python/PyTorch adapters (planned) | CPython monitoring/sampling, optional Python bootstrap, PyTorch/Kineto import and correlation |
+| `python/rprof_python` (exists) | Optional CPython monitoring/profile/range bootstrap and framework-owned Torch scheduling; sampling remains planned |
+| `crates/rprof-pytorch-import` (exists) | SDK-free bounded Kineto/Chrome import, exact source timestamps, memory and flow preservation |
 | `crates/rprof-cuda` (exists) | Target-SDK C++ CUPTI injection adapter and Rust native transport |
 | `crates/rprof-cuda-protocol` (exists) | Pointer-free CUDA activities, API callbacks, capabilities and diagnostics |
 | `crates/rprof-perf` (exists) | Pre-exec Linux perf counters, descriptor handoff, exact readings; sampling remains planned |

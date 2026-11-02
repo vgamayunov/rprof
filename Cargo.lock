@@ -367,6 +367,7 @@ dependencies = [
  "rprof-ompt-protocol",
  "rprof-perf",
  "rprof-project",
+ "rprof-pytorch-import",
  "rprof-report",
  "serde",
  "serde_json",
@@ -458,6 +459,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "uuid",
+]
+
+[[package]]
+name = "rprof-pytorch-import"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rprof-capture",
+ "rprof-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "uuid",
 ]
 

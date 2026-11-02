@@ -1,5 +1,5 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, PmuHost, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { ProjectionViewer } from './projection.js';
@@ -18,6 +18,8 @@ const COLORS = ['#6bcdb0', '#65a8ec', '#e5b46d', '#b29be6', '#e17d91', '#86c6d9'
 const MPI_COLOR = '#ff9970';
 const OPENMP_COLOR = '#d5a2ff';
 const CUDA_COLOR = '#e9c264';
+const PYTHON_COLOR = '#ae85ed';
+const PYTORCH_COLOR = '#e48b93';
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -40,6 +42,8 @@ function colorFor(value: string, colors: readonly string[] = COLORS): string {
   if (value.toLowerCase() === 'mpi') return MPI_COLOR;
   if (value.toLowerCase() === 'openmp') return OPENMP_COLOR;
   if (value.toLowerCase() === 'cuda') return CUDA_COLOR;
+  if (value.toLowerCase() === 'python') return PYTHON_COLOR;
+  if (value.toLowerCase() === 'pytorch') return PYTORCH_COLOR;
   let hash = 0;
   for (let i = 0; i < value.length; i++) hash = (Math.imul(hash, 31) + value.charCodeAt(i)) | 0;
   return colors[(hash >>> 0) % colors.length]!;
@@ -94,6 +98,15 @@ class Viewer {
   private pmuHostPage = 0;
   private pmuMetadataPage = 0;
   private selectedPmuHost: PmuHost | undefined;
+  private pythonRuntimePage = 0;
+  private pythonFunctionPage = 0;
+  private pythonRangePage = 0;
+  private selectedPythonRuntime: PythonRuntime | undefined;
+  private pytorchSourcePage = 0;
+  private pytorchMetadataPage = 0;
+  private pytorchActivityPage = 0;
+  private pytorchMemoryPage = 0;
+  private selectedPytorchSource: PytorchSource | undefined;
   private theme: Theme = startingTheme;
   private colors = canvasThemes[startingTheme];
 
@@ -111,10 +124,14 @@ class Viewer {
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p>Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only</p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><details id="openmp-runtimes"><summary>Runtime and callback registration details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
     if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
     if (report.pmu) root.insertAdjacentHTML('beforeend', `<section class="io-section pmu-section" id="pmu-panel"><div class="io-heading"><div><h2>Linux perf counters (PMU)</h2><p>Selected clock domain · workload-tree aggregates or root-thread counts, not per-thread attribution. Hardware, software and raw perf events are distinguished below; software task-clock is not a hardware metric.</p></div><span id="pmu-count"></span></div><p class="io-note">Timeline pmu.EVENT.raw samples are cumulative raw counts, not rates. A missing or failed read is unknown, not zero. Scaled count = raw × enabled / running is an estimate under multiplexing, not an exact count. Events are independently scheduled: IPC and cache-miss ratios are estimates, not jointly scheduled measurements; only valid final pairs yield metrics.</p><div class="io-wrap"><table id="pmu-events"><thead><tr><th>Event / perf type</th><th>PID / shard</th><th>Scope / privilege</th><th>Status / error</th><th>Raw / unit</th><th>Enabled / running (exact ns)</th><th>Running %</th><th>Scaled estimate</th><th>Final read / samples</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-event-pager"></div><h3>Estimated ratios <span id="pmu-metric-count"></span></h3><div class="io-wrap"><table id="pmu-metrics"><thead><tr><th>Shard</th><th>IPC estimate (instructions / cycles)</th><th>Cache-miss estimate (%)</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-metric-pager"></div><details id="pmu-hosts"><summary>Host context at launch (not continuously sampled CPU frequency) <span id="pmu-host-count"></span></summary><p class="io-note">Kernel, CPUID model/vendor, affinity, CPU0 cache, NUMA and frequency context where available. Frequency metadata is launch-time context, not a continuous frequency trace.</p><div id="pmu-host-list"></div><div class="io-pager" id="pmu-host-pager"></div><div id="pmu-host-detail"></div></details></section>`);
+    if (report.python) root.insertAdjacentHTML('beforeend', `<section class="io-section python-section" id="python-panel"><div class="io-heading"><div><h2>Python</h2><p>Selected clock domain · instrumented function execution segments, not whole generator/coroutine lifetimes. Yield/resume creates separate segments. Self time subtracts only selected child segments; it includes native calls, GIL waits and instrumentation, not CPU utilization. User ranges are elapsed time and can include suspension; self time is unavailable.</p></div><span id="python-count"></span></div><p class="io-note" id="python-health"></p><details open><summary>Runtime and source health</summary><div id="python-runtimes"></div><div class="io-pager" id="python-runtime-pager"></div><div id="python-runtime-detail"></div></details><h3>Instrumented functions</h3><div class="io-wrap"><table id="python-functions"><thead><tr><th>Function / source</th><th>File : line / kind / symbol</th><th>Segments</th><th>Inclusive</th><th>Selected-child self</th><th>Max</th><th>Yields / unwinds</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="python-function-pager"></div><h3>User ranges (elapsed)</h3><div class="io-wrap"><table id="python-ranges"><thead><tr><th>Range / source</th><th>File : line / kind / symbol</th><th>Segments</th><th>Inclusive elapsed</th><th>Self</th><th>Max</th><th>Yields / unwinds</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="python-range-pager"></div></section>`);
+    if (report.pytorch) root.insertAdjacentHTML('beforeend', `<section class="io-section pytorch-section" id="pytorch-panel"><div class="io-heading"><div><h2>PyTorch import</h2><p>Selected clock domain · imported µs→ns relative clock, not aligned to native CLOCK_MONOTONIC. Source profiler loss and export coverage are unknown. CPU self is contained-CPU self time, not guaranteed to match torch.key_averages; unavailable for crossing/tied intervals or bounded-index overflow. GPU self time is not applicable.</p></div><span id="pytorch-count"></span></div><p class="io-note">Timeline marker-unit counter samples are trace instants, not execution spans. Memory rows are OBSERVED framework allocated/reserved total-byte counters, not physical GPU usage. Missing reserved samples are unknown, not zero.</p><details open><summary>Imported sources · metadata and diagnostics</summary><div id="pytorch-sources"></div><div class="io-pager" id="pytorch-source-pager"></div><div id="pytorch-source-detail"></div></details><h3>Activities</h3><div class="io-wrap"><table id="pytorch-activities"><thead><tr><th>Role / activity</th><th>Shard / device</th><th>Count</th><th>Inclusive</th><th>Contained-CPU self</th><th>Max</th><th>Bytes</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pytorch-activity-pager"></div><h3>Observed framework memory</h3><div class="io-wrap"><table id="pytorch-memory"><thead><tr><th>Counter / track</th><th>Shard / device</th><th>Samples</th><th>Observed peak</th><th>Last observed</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pytorch-memory-pager"></div></section>`);
     const legend = root.querySelector('.timeline-footer span')!;
     legend.append(node('i', 'legend-swatch mpi-key'), document.createTextNode(' MPI'));
     if (report.openmp) legend.append(node('i', 'legend-swatch openmp-key'), document.createTextNode(' OpenMP'));
     if (report.cuda) legend.append(node('i', 'legend-swatch cuda-key'), document.createTextNode(' CUDA'));
+    if (report.python) legend.append(node('i', 'legend-swatch python-key'), document.createTextNode(' Python'));
+    if (report.pytorch) legend.append(node('i', 'legend-swatch pytorch-key'), document.createTextNode(' PyTorch'));
     this.tooltip = node('div', 'timeline-tooltip');
     this.tooltip.id = 'timeline-tooltip';
     this.tooltip.setAttribute('role', 'tooltip');
@@ -133,7 +150,7 @@ class Viewer {
       rememberTheme(this.theme);
     });
     this.setTheme(this.theme);
-    this.get('domain-note').textContent = report.domains.length > 1 ? 'CLOCK DOMAINS ARE UNALIGNED' : 'SAME-DOMAIN MONOTONIC TIME';
+    this.get('domain-note').textContent = domainClockLabel(report, report.domains[0]?.id);
     for (const domain of report.domains) {
       const option = node('option', '', `${domain.name} · ${domain.id}${report.domains.length > 1 ? ' (unaligned)' : ''}`);
       option.value = domain.id;
@@ -286,7 +303,7 @@ class Viewer {
 
   private setDomain(domain: Domain | undefined): void {
     this.domain = domain;
-    this.get('domain-note').textContent = domain?.calibration ? 'ESTIMATED MPI CLOCK ALIGNMENT' : this.report.domains.length > 1 ? 'CLOCK DOMAINS ARE UNALIGNED' : 'SAME-DOMAIN MONOTONIC TIME';
+    this.get('domain-note').textContent = domainClockLabel(this.report, domain?.id);
     this.hideTooltip();
     this.ioPage = 0;
     this.selectedIo = undefined;
@@ -305,6 +322,12 @@ class Viewer {
     this.pmuEventPage = this.pmuMetricPage = this.pmuHostPage = this.pmuMetadataPage = 0;
     this.selectedPmuHost = undefined;
     if (this.report.pmu) this.renderPmu();
+    this.pythonRuntimePage = this.pythonFunctionPage = this.pythonRangePage = 0;
+    this.selectedPythonRuntime = undefined;
+    if (this.report.python) this.renderPython();
+    this.pytorchSourcePage = this.pytorchMetadataPage = this.pytorchActivityPage = this.pytorchMemoryPage = 0;
+    this.selectedPytorchSource = undefined;
+    if (this.report.pytorch) this.renderPytorch();
     this.selection = undefined;
     this.related.clear();
     this.showDetails();
@@ -348,6 +371,120 @@ class Viewer {
     const next = node('button', '', 'Next'); next.type = 'button'; next.disabled = (page + 1) * IO_PAGE_SIZE >= total;
     next.addEventListener('click', () => change(page + 1));
     parent.append(previous, node('span', '', `Rows ${page * IO_PAGE_SIZE + 1}–${Math.min(total, (page + 1) * IO_PAGE_SIZE)} of ${total}`), next);
+  }
+
+  private tableRows(id: string, rows: string[][], columns: number, empty: string): void {
+    const body = this.get(id).querySelector('tbody')!;
+    body.replaceChildren();
+    for (const cells of rows) {
+      const row = node('tr');
+      for (const cell of cells) row.append(node('td', '', cell));
+      body.append(row);
+    }
+    if (!rows.length) this.emptyCudaRow(body, columns, empty);
+  }
+
+  private renderPython(): void {
+    const python = this.report.python!;
+    const domain = this.domain?.id;
+    const runtimes = python.runtimes.filter(runtime => runtime.domain === domain);
+    const functions = python.functions.filter(item => item.domain === domain && item.kind !== 'range');
+    const ranges = python.functions.filter(item => item.domain === domain && item.kind === 'range');
+    this.get('python-count').textContent = `${functions.length} functions · ${ranges.length} ranges · ${runtimes.length} runtimes`;
+    this.get('python-health').textContent = `Capture-wide receiver drops: ${python.receiver_dropped} · malformed / out-of-order: ${python.malformed}. Runtime health below is selected-domain only; unknown metadata is shown as Unknown.`;
+    const list = this.get('python-runtimes'); list.replaceChildren();
+    for (const runtime of runtimes.slice(this.pythonRuntimePage * IO_PAGE_SIZE, (this.pythonRuntimePage + 1) * IO_PAGE_SIZE)) {
+      const line = node('div', 'openmp-runtime-row');
+      const button = node('button', 'io-file', `PID ${runtime.pid || 'Unknown'} · source ${runtime.source || 'Unknown'} · interpreter ${runtime.interpreter || 'Unknown'} · shard ${runtime.shard}`);
+      button.type = 'button';
+      button.addEventListener('click', () => { this.selectedPythonRuntime = runtime; this.renderPythonRuntimeDetail(); });
+      line.append(button, node('span', '', `backend ${runtime.backend || 'Unknown'} · version ${runtime.version || 'Unknown'} · initialized ${runtime.initialized ? 'Yes' : 'No'} · finalized ${runtime.finalized ? 'Yes' : 'No · incomplete'} · received / attempted ${runtime.received} / ${runtime.attempted}`));
+      list.append(line);
+    }
+    if (!runtimes.length) list.append(node('p', 'io-note', 'No Python runtime in this clock domain.'));
+    this.renderPager(this.get('python-runtime-pager'), runtimes.length, this.pythonRuntimePage, page => { this.pythonRuntimePage = page; this.renderPython(); });
+    this.renderPythonRuntimeDetail();
+    for (const [items, tableId, pagerId, page, setPage, empty] of [
+      [functions, 'python-functions', 'python-function-pager', this.pythonFunctionPage, (value: number) => { this.pythonFunctionPage = value; this.renderPython(); }, 'No instrumented function segments in this clock domain.'],
+      [ranges, 'python-ranges', 'python-range-pager', this.pythonRangePage, (value: number) => { this.pythonRangePage = value; this.renderPython(); }, 'No user ranges in this clock domain.'],
+    ] as const) {
+      const rows = items.slice(page * IO_PAGE_SIZE, (page + 1) * IO_PAGE_SIZE).map(item => [
+        `${item.name} · PID ${runtimes.find(runtime => runtime.shard === item.shard && runtime.source === item.source)?.pid || 'Unknown'} · source ${item.source || 'Unknown'} · shard ${item.shard}`,
+        `${item.file || 'Unknown'}:${item.line || 'Unknown'} · ${item.execution_kind || 'Unknown'} · ${item.kind} · symbol ${item.symbol || 'Unknown'}`,
+        item.segments, `${item.total_ns} ns`, item.self_ns === null ? 'N/A (elapsed range)' : `${item.self_ns} ns`, `${item.max_ns} ns`, `${item.yields} / ${item.unwinds}`,
+      ]);
+      this.tableRows(tableId, rows, 7, empty);
+      this.renderPager(this.get(pagerId), items.length, page, setPage);
+    }
+  }
+
+  private renderPythonRuntimeDetail(): void {
+    const detail = this.get('python-runtime-detail'); detail.replaceChildren();
+    const runtime = this.selectedPythonRuntime;
+    if (!runtime || runtime.domain !== this.domain?.id) return;
+    detail.append(node('h3', '', `Python source ${runtime.source || 'Unknown'} · PID ${runtime.pid || 'Unknown'} · interpreter ${runtime.interpreter || 'Unknown'}`));
+    const lines: [string, string][] = [
+      ['Process instance', runtime.instance || 'Unknown'], ['Backend / version', `${runtime.backend || 'Unknown'} / ${runtime.version || 'Unknown'}`],
+      ['Clock / detail', `${runtime.clock || 'Unknown'} · ${runtime.detail || 'Unknown'}`], ['Initialized / finalized', `${runtime.initialized ? 'Yes' : 'No'} / ${runtime.finalized ? 'Yes' : 'No'}`],
+      ['Attempted / received', `${runtime.attempted} / ${runtime.received}`], ['Source drops / omitted callbacks', `${runtime.source_dropped} / ${runtime.omitted_callbacks}`],
+      ['Sequence gaps / unmatched', `${runtime.sequence_gaps} / ${runtime.unmatched}`], ['Abandoned / in flight', `${runtime.abandoned} / ${runtime.inflight}`],
+      ['Source errors', runtime.source_errors],
+    ];
+    const info = node('dl', 'details-list');
+    for (const [label, value] of lines) put(info, 'div', label, value);
+    detail.append(info, node('h3', '', `Runtime errors · ${runtime.errors.length}`));
+    for (const error of runtime.errors.slice(0, 32)) detail.append(node('p', 'io-note', error));
+  }
+
+  private renderPytorch(): void {
+    const pytorch = this.report.pytorch!;
+    const domain = this.domain?.id;
+    const sources = pytorch.sources.filter(source => source.domain === domain);
+    const activities = pytorch.activities.filter(activity => activity.domain === domain);
+    const memory = pytorch.memory.filter(row => row.domain === domain);
+    this.get('pytorch-count').textContent = `${sources.length} sources · ${activities.length} activities · ${memory.length} memory rows`;
+    const list = this.get('pytorch-sources'); list.replaceChildren();
+    for (const source of sources.slice(this.pytorchSourcePage * IO_PAGE_SIZE, (this.pytorchSourcePage + 1) * IO_PAGE_SIZE)) {
+      const line = node('div', 'openmp-runtime-row');
+      const button = node('button', 'io-file', `Shard ${source.shard}`); button.type = 'button';
+      button.addEventListener('click', () => { this.selectedPytorchSource = source; this.pytorchMetadataPage = 0; this.renderPytorchSourceDetail(); });
+      line.append(button, node('span', '', `Source loss / export coverage: Unknown · ${Object.keys(source.metadata).length} metadata · ${Object.keys(source.diagnostics).length} diagnostics`));
+      list.append(line);
+    }
+    if (!sources.length) list.append(node('p', 'io-note', 'No imported PyTorch sources in this clock domain.'));
+    this.renderPager(this.get('pytorch-source-pager'), sources.length, this.pytorchSourcePage, page => { this.pytorchSourcePage = page; this.renderPytorch(); });
+    this.renderPytorchSourceDetail();
+    this.tableRows('pytorch-activities', activities.slice(this.pytorchActivityPage * IO_PAGE_SIZE, (this.pytorchActivityPage + 1) * IO_PAGE_SIZE).map(activity => [
+      `${activity.role} · ${activity.name}`, `${activity.shard} / ${activity.device ?? '—'}`, activity.count,
+      `${activity.total_ns} ns`, activity.self_ns === null ? (['kernel', 'memcpy', 'memset', 'gpu_range'].includes(activity.role) ? 'N/A (GPU)' : 'Unknown') : `${activity.self_ns} ns`,
+      `${activity.max_ns} ns`, activity.bytes === null ? 'Unknown' : `${activity.bytes} B`,
+    ]), 7, 'No PyTorch activities in this clock domain.');
+    this.renderPager(this.get('pytorch-activity-pager'), activities.length, this.pytorchActivityPage, page => { this.pytorchActivityPage = page; this.renderPytorch(); });
+    this.tableRows('pytorch-memory', memory.slice(this.pytorchMemoryPage * IO_PAGE_SIZE, (this.pytorchMemoryPage + 1) * IO_PAGE_SIZE).map(row => [
+      `${row.name} · track ${row.track}`, `${row.shard} / ${row.device ?? '—'}`, row.samples, `${row.peak_bytes} B`, `${row.last_bytes} B`,
+    ]), 5, 'No observed framework allocated/reserved memory samples in this clock domain; missing counters are unknown.');
+    this.renderPager(this.get('pytorch-memory-pager'), memory.length, this.pytorchMemoryPage, page => { this.pytorchMemoryPage = page; this.renderPytorch(); });
+  }
+
+  private renderPytorchSourceDetail(): void {
+    const detail = this.get('pytorch-source-detail'); detail.replaceChildren();
+    const source = this.selectedPytorchSource;
+    if (!source || source.domain !== this.domain?.id) return;
+    detail.append(node('h3', '', `Imported source · shard ${source.shard}`),
+      node('p', 'io-note', 'Source loss / export coverage: Unknown (sourceLossKnown=false). Import diagnostics count skipped or ambiguous records; they do not measure source profiler coverage. Clock: relative imported microseconds converted to nanoseconds, not aligned with native time.'));
+    const entries = [...Object.entries(source.metadata).map(([key, value]) => ['Metadata', key, value]),
+      ...Object.entries(source.diagnostics).map(([key, value]) => ['Diagnostic', key, value])];
+    const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'pytorch-source-metadata';
+    const header = node('tr'); for (const title of ['Type', 'Key', 'Value']) header.append(node('th', '', title));
+    const head = node('thead'); head.append(header); table.append(head);
+    const body = node('tbody');
+    for (const entry of entries.slice(this.pytorchMetadataPage * IO_PAGE_SIZE, (this.pytorchMetadataPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr'); for (const value of entry) row.append(node('td', '', value)); body.append(row);
+    }
+    if (!entries.length) this.emptyCudaRow(body, 3, 'No source metadata or diagnostics recorded.');
+    table.append(body); wrap.append(table); detail.append(wrap);
+    const pager = node('div', 'io-pager'); pager.id = 'pytorch-metadata-pager'; detail.append(pager);
+    this.renderPager(pager, entries.length, this.pytorchMetadataPage, page => { this.pytorchMetadataPage = page; this.renderPytorchSourceDetail(); });
   }
 
   private renderIoDetail(): void {
@@ -966,6 +1103,7 @@ class Viewer {
       put(dl, 'div', 'Timestamp', `${time} ns`);
       put(dl, 'div', 'Exact value', counter.value);
       put(dl, 'div', 'Type / unit', `${counter.value_type} · ${counter.unit}`);
+      if (counter.unit === 'marker') put(dl, 'div', 'Interpretation', 'Trace instant marker sample; not an execution span or duration.');
       put(dl, 'div', 'Track', counter.track);
       for (const [key, value] of Object.entries(counter.attributes)) put(dl, 'div', key, value);
     }

@@ -1,5 +1,9 @@
 # Testing
 
+Current remote environments: CPU/MPI/Python validation uses `tst3` / `hbv4` while
+`tst4` is unavailable; PyTorch GPU checks use `tst9` H100/H200. Earlier `tst4`
+measurements below remain historical validation records.
+
 ## Local capture-foundation checks
 
 ```sh
@@ -123,6 +127,20 @@ The Intel/WSL-to-HBv4 prediction passed at 14.68%; the observation was outside t
 parameter-case range, which is not an error bound. See
 [projection validation](projection-model.md#independent-measurement-validation)
 for exact results and the remaining component/model validation matrix.
+
+## Python/PyTorch checks
+
+`cargo test --workspace` exercises CPython functions, suspension, threads, user
+ranges, process startup methods, ownership, native I/O identity, and failure paths.
+Set `RPROF_TEST_PYTHON` to select an interpreter. The SDK-free importer suite uses
+synthetic edge cases and a stored Torch CPU export; no Torch installation is needed
+for base CI. Actual framework fixtures are `python/tests/torch_workload.py` and
+`python/tests/torch_distributed.py`; compare exports with `scripts/check-pytorch.py`.
+
+See [Python validation/overhead](python-profiling.md#validation-and-overhead) and
+[PyTorch validation](pytorch-import.md#recorded-validation) for exact versions,
+H200 results, source-clock limitations, and the raw-trace versus key-averages
+normalization used in comparisons.
 
 ## Timeline/report checks
 

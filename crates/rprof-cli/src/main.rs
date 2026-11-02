@@ -8,6 +8,8 @@ mod native_collector;
 mod openmp_collector;
 mod pmu_collector;
 mod project;
+mod python_collector;
+mod pytorch_import;
 mod record;
 mod report;
 mod supervisor;
@@ -38,6 +40,8 @@ enum Action {
     Report(report::ReportArgs),
     /// Project a captured workload onto declared hardware profiles and assumptions.
     Project(project::ProjectArgs),
+    /// Convert torch.profiler/Kineto Chrome JSON into a capture with a separate source clock.
+    ImportPytorch(pytorch_import::ImportArgs),
     /// Serve an offline report snapshot on a loopback-only local browser endpoint.
     View(view::ViewArgs),
     /// Merge same-session capture shards deterministically, preserving clock domains.
@@ -77,7 +81,7 @@ pub(crate) struct RecordArgs {
     /// Path to librprof_io.so (default: alongside the rprof executable).
     #[arg(long)]
     io_library: Option<PathBuf>,
-    /// Bounded raw-event queue per native collector (I/O, MPI, OpenMP, or CUDA).
+    /// Bounded raw-event queue per collector (Python supports at most 32768).
     #[arg(long = "native-buffer-events", alias = "io-buffer-events", default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1..=262144))]
     io_buffer_events: u32,
     /// Target-built PMPI library (default: librprof_mpi.so alongside rprof).
@@ -104,6 +108,15 @@ pub(crate) struct RecordArgs {
     /// Approximate counter-read interval; final counts are always read after cleanup.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(10..=60000))]
     pmu_interval_ms: u64,
+    /// Python source roots to instrument (repeatable; default: working directory).
+    #[arg(long)]
+    python_include: Vec<PathBuf>,
+    /// CPython instrumentation backend; auto uses sys.monitoring when available.
+    #[arg(long, value_enum, default_value_t=PythonBackend::Auto)]
+    python_backend: PythonBackend,
+    /// Include <string>/<stdin> code; also enabled for a direct python -c/- launch.
+    #[arg(long)]
+    python_inline: bool,
     /// Grace before SIGKILL after interruption or leader exit with live descendants.
     #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u64).range(0..=60000))]
     grace_ms: u64,
@@ -121,6 +134,25 @@ pub(crate) enum CollectorKind {
     Openmp,
     Cuda,
     Pmu,
+    Python,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PythonBackend {
+    Auto,
+    Monitoring,
+    Profile,
+    Ranges,
+}
+impl PythonBackend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Monitoring => "monitoring",
+            Self::Profile => "profile",
+            Self::Ranges => "ranges",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -156,6 +188,10 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Action::Project(args) => {
             project::run(args)?;
+            Ok(0)
+        }
+        Action::ImportPytorch(args) => {
+            pytorch_import::run(args)?;
             Ok(0)
         }
         Action::View(args) => {

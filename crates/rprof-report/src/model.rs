@@ -27,6 +27,98 @@ pub struct Report {
     pub cuda: Option<CudaSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pmu: Option<PmuSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python: Option<PythonSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pytorch: Option<PytorchSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PythonSummary {
+    pub runtimes: Vec<PythonRuntime>,
+    pub functions: Vec<PythonFunction>,
+    pub receiver_dropped: String,
+    pub malformed: String,
+}
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct PythonRuntime {
+    pub shard: String,
+    pub domain: String,
+    pub source: String,
+    pub pid: String,
+    pub instance: String,
+    pub interpreter: String,
+    pub backend: String,
+    pub version: String,
+    pub clock: String,
+    pub detail: String,
+    pub initialized: bool,
+    pub finalized: bool,
+    pub attempted: String,
+    pub received: String,
+    pub source_dropped: String,
+    pub omitted_callbacks: String,
+    pub sequence_gaps: String,
+    pub unmatched: String,
+    pub abandoned: String,
+    pub inflight: String,
+    pub source_errors: String,
+    pub errors: Vec<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PythonFunction {
+    pub shard: String,
+    pub domain: String,
+    pub source: String,
+    pub kind: String,
+    pub symbol: String,
+    pub name: String,
+    pub file: String,
+    pub line: String,
+    pub execution_kind: String,
+    pub segments: String,
+    pub total_ns: String,
+    pub self_ns: Option<String>,
+    pub max_ns: String,
+    pub yields: String,
+    pub unwinds: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PytorchSummary {
+    pub sources: Vec<PytorchSource>,
+    pub activities: Vec<PytorchActivity>,
+    pub memory: Vec<PytorchMemory>,
+}
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct PytorchSource {
+    pub shard: String,
+    pub domain: String,
+    pub metadata: BTreeMap<String, String>,
+    pub diagnostics: BTreeMap<String, String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PytorchActivity {
+    pub shard: String,
+    pub domain: String,
+    pub role: String,
+    pub name: String,
+    pub device: Option<String>,
+    pub count: String,
+    pub total_ns: String,
+    pub self_ns: Option<String>,
+    pub max_ns: String,
+    pub bytes: Option<String>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PytorchMemory {
+    pub shard: String,
+    pub domain: String,
+    pub track: String,
+    pub name: String,
+    pub device: Option<String>,
+    pub samples: String,
+    pub peak_bytes: String,
+    pub last_bytes: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

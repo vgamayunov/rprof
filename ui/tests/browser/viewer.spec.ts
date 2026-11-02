@@ -101,6 +101,96 @@ async function canvasCorner(page: Page): Promise<number[]> {
     Array.from((element as HTMLCanvasElement).getContext('2d')!.getImageData(1, 1, 1, 1).data));
 }
 
+test('optional language panels remain absent on old reports', async ({ page }) => {
+  await loaded(page);
+  await expect(page.locator('#python-panel, #pytorch-panel')).toHaveCount(0);
+});
+
+test('Python and PyTorch panels filter by domain, page exact string counts, preserve null self and hostile metadata in both themes', async ({ page }) => {
+  const huge = '90071992547409931234567890';
+  const hostile = '<img src=x onerror=alert(1)><script>window.injected=true</script>';
+  const url = injected('language-panels', report => {
+    const native = report.domains[0].id;
+    const imported = 'import-domain';
+    const shard = report.shards[0].id;
+    report.provenance.kind = 'mixed';
+    report.domains.push({ id: imported, name: 'PyTorch source relative µs', origin_ns: '0', end_ns: '1000000' });
+    report.shards.push({ ...report.shards[0], id: 'import-shard', domain: imported, name: 'torch export', collectors: ['pytorch'] });
+    report.python = { receiver_dropped: huge, malformed: '4', runtimes: [
+      { shard, domain: native, source: 'source-one', pid: '123', instance: 'image', interpreter: 'interp', backend: '', version: '', clock: 'clock', detail: hostile,
+        initialized: true, finalized: false, attempted: huge, received: '5', source_dropped: '2', omitted_callbacks: '3', sequence_gaps: '4', unmatched: '5', abandoned: '6', inflight: '7', source_errors: '8', errors: [hostile] },
+      { shard: 'import-shard', domain: imported, source: 'other', pid: '999', instance: '', interpreter: '', backend: '', version: '', clock: '', detail: '',
+        initialized: false, finalized: false, attempted: '0', received: '0', source_dropped: '0', omitted_callbacks: '0', sequence_gaps: '0', unmatched: '0', abandoned: '0', inflight: '0', source_errors: '0', errors: [] },
+      ...Array.from({ length: 101 }, (_, index) => ({ shard, domain: native, source: `source-${index}`, pid: `${index}`, instance: '', interpreter: '', backend: '', version: '', clock: '', detail: '', initialized: false, finalized: false, attempted: '0', received: '0', source_dropped: '0', omitted_callbacks: '0', sequence_gaps: '0', unmatched: '0', abandoned: '0', inflight: '0', source_errors: '0', errors: [] })),
+    ], functions: [
+      ...Array.from({ length: 102 }, (_, index) => ({ shard, domain: native, source: 'source-one', kind: 'function', symbol: huge, name: `fn-${index}`, file: hostile, line: '14', execution_kind: 'coroutine', segments: huge, total_ns: huge, self_ns: '0', max_ns: huge, yields: '2', unwinds: '1' })),
+      ...Array.from({ length: 102 }, (_, index) => ({ shard, domain: native, source: 'source-one', kind: 'range', symbol: '0', name: `range-${index}`, file: '', line: '0', execution_kind: 'range', segments: '1', total_ns: huge, self_ns: null, max_ns: huge, yields: '0', unwinds: '0' })),
+      { shard: 'import-shard', domain: imported, source: 'other', kind: 'function', symbol: '1', name: 'import-only', file: '', line: '0', execution_kind: 'function', segments: '1', total_ns: '1', self_ns: '1', max_ns: '1', yields: '0', unwinds: '0' },
+    ] };
+    report.pytorch = { sources: [{ shard: 'import-shard', domain: imported, metadata: {
+      'pytorch.source_loss_known': 'false', 'pytorch.distributedInfo': '{"backend":"gloo","rank":0}', 'pytorch.clock_method': 'source_minimum_ts; relative microseconds converted to nanoseconds; no monotonic alignment',
+      'pytorch.ERROR': hostile, 'pytorch.import_source_sha256': 'deadbeef', ...Object.fromEntries(Array.from({ length: 105 }, (_, index) => [`pytorch.helper.${index}`, `value-${index}`])),
+    }, diagnostics: { 'pytorch.import.skipped_records': '8' } },
+    ...Array.from({ length: 101 }, (_, index) => ({ shard: `other-${index}`, domain: imported, metadata: {}, diagnostics: {} }))], activities: [
+      { shard: 'import-shard', domain: imported, role: 'operator', name: hostile, device: null, count: huge, total_ns: huge, self_ns: null, max_ns: huge, bytes: huge },
+      { shard: 'import-shard', domain: imported, role: 'kernel', name: 'GPU kernel', device: 'cuda:0', count: '1', total_ns: '2', self_ns: null, max_ns: '2', bytes: '0' },
+      ...Array.from({ length: 100 }, (_, index) => ({ shard: 'import-shard', domain: imported, role: 'python', name: `python-${index}`, device: null, count: '1', total_ns: '1', self_ns: '1', max_ns: '1', bytes: '0' })),
+    ], memory: [{ shard: 'import-shard', domain: imported, track: 'mem-track', name: 'pytorch.memory.allocated', device: 'cuda:0', samples: '1', peak_bytes: huge, last_bytes: huge },
+    ...Array.from({ length: 101 }, (_, index) => ({ shard: 'import-shard', domain: imported, track: `track-${index}`, name: 'pytorch.memory.allocated', device: null, samples: '1', peak_bytes: '1', last_bytes: '1' }))] };
+  });
+  await loaded(page, url);
+  await expect(page.locator('#domain-note')).toContainText('UNALIGNED');
+  await expect(page.locator('#python-functions tbody tr')).toHaveCount(100);
+  await expect(page.locator('#python-ranges tbody tr')).toHaveCount(100);
+  await expect(page.locator('#python-runtimes button')).toHaveCount(100);
+  await page.locator('#python-runtime-pager button').last().click();
+  await expect(page.locator('#python-runtimes button')).toHaveCount(2);
+  await page.locator('#python-runtime-pager button').first().click();
+  await expect(page.locator('#python-functions tbody tr').first()).toContainText(huge);
+  await expect(page.locator('#python-functions tbody tr').first()).toContainText('0 ns');
+  await expect(page.locator('#python-ranges tbody tr').first()).toContainText('N/A (elapsed range)');
+  await expect(page.locator('#python-panel')).not.toContainText('import-only');
+  await page.locator('#python-function-pager button').last().click();
+  await expect(page.locator('#python-functions tbody tr')).toHaveCount(2);
+  await page.locator('#python-range-pager button').last().click();
+  await expect(page.locator('#python-ranges tbody tr')).toHaveCount(2);
+  await page.locator('#python-runtimes button').first().click();
+  await expect(page.locator('#python-runtime-detail')).toContainText('Unknown');
+  await expect(page.locator('#python-runtime-detail')).toContainText(huge);
+  await expect(page.locator('#python-runtime-detail')).toContainText('No');
+  await page.locator('#domain-select').selectOption('import-domain');
+  await expect(page.locator('#domain-note')).toContainText('IMPORTED PYTORCH µS→NS RELATIVE CLOCK');
+  await expect(page.locator('#python-functions tbody tr')).toHaveCount(1);
+  await expect(page.locator('#python-functions')).toContainText('import-only');
+  await expect(page.locator('#pytorch-activities tbody tr')).toHaveCount(100);
+  await expect(page.locator('#pytorch-activities')).toContainText('Unknown');
+  await expect(page.locator('#pytorch-activities')).toContainText('N/A (GPU)');
+  await expect(page.locator('#pytorch-memory')).toContainText(`${huge} B`);
+  await expect(page.locator('#pytorch-memory')).not.toContainText('reserved');
+  await page.locator('#pytorch-activity-pager button').last().click();
+  await expect(page.locator('#pytorch-activities tbody tr')).toHaveCount(2);
+  await page.locator('#pytorch-memory-pager button').last().click();
+  await expect(page.locator('#pytorch-memory tbody tr')).toHaveCount(2);
+  await expect(page.locator('#pytorch-sources button')).toHaveCount(100);
+  await page.locator('#pytorch-source-pager button').last().click();
+  await expect(page.locator('#pytorch-sources button')).toHaveCount(2);
+  await page.locator('#pytorch-source-pager button').first().click();
+  await page.locator('#pytorch-sources button').first().click();
+  await expect(page.locator('#pytorch-source-detail')).toContainText('Source loss / export coverage: Unknown');
+  await expect(page.locator('#pytorch-source-metadata tbody tr')).toHaveCount(100);
+  await expect(page.locator('#pytorch-source-metadata')).toContainText('gloo');
+  await page.locator('#pytorch-metadata-pager button').last().click();
+  await expect(page.locator('#pytorch-source-metadata tbody tr')).toHaveCount(11);
+  await page.locator('#pytorch-metadata-pager button').first().click();
+  for (const theme of ['dark', 'light']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+    await expect(page.locator('#pytorch-source-detail')).toContainText(hostile);
+    await expect(page.locator('#pytorch-panel img, #pytorch-panel script, #python-panel img, #python-panel script')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).injected)).toBeUndefined();
+  }
+});
+
 test('offline theme toggle redraws the canvas, preserves the view, and remembers the choice', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await loaded(page);

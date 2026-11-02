@@ -21,6 +21,14 @@
 .openmp-runtime-row{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid #324a58;padding:6px 0;font-size:11px;color:#b4c6d2;overflow-wrap:anywhere}
 .openmp-runtime-row .io-file{flex:0 0 auto}
 .cuda-key{background:#e9c264}
+.python-key{background:#ae85ed}.pytorch-key{background:#e48b93}
+.python-section h3,.pytorch-section h3{font-size:14px;margin:16px 0 8px;overflow-wrap:anywhere}
+.python-section details,.pytorch-section details{margin-top:16px;border-top:1px solid #324a58;padding-top:12px}
+.python-section summary,.pytorch-section summary{cursor:pointer;color:#a6e2cb;font-size:12px;font-weight:600}
+.python-section #python-runtime-detail,.pytorch-section #pytorch-source-detail{border-top:1px solid #324a58;margin-top:14px;overflow-wrap:anywhere}
+.python-section #python-runtime-detail:empty,.pytorch-section #pytorch-source-detail:empty{display:none}
+.python-section .io-wrap table,.pytorch-section .io-wrap table{min-width:1050px}
+.pytorch-section #pytorch-source-metadata td{white-space:normal;overflow-wrap:anywhere;max-width:660px}
 .cuda-section .io-wrap table{min-width:1050px}
 .cuda-section #cuda-activities,.cuda-section #cuda-capabilities{min-width:650px}
 .cuda-section h3{font-size:14px;overflow-wrap:anywhere;margin:16px 0 8px}
@@ -114,6 +122,9 @@
 :root[data-theme="light"] .cuda-section #cuda-runtime-detail{border-color:#d6e0e8}
 :root[data-theme="light"] .pmu-section details,
 :root[data-theme="light"] .pmu-section #pmu-host-detail{border-color:#d6e0e8}
+:root[data-theme="light"] .python-section details,:root[data-theme="light"] .pytorch-section details,
+:root[data-theme="light"] .python-section #python-runtime-detail,:root[data-theme="light"] .pytorch-section #pytorch-source-detail{border-color:#d6e0e8}
+:root[data-theme="light"] .python-section summary,:root[data-theme="light"] .pytorch-section summary{color:#176b61}
 :root[data-theme="light"] .plot-scroll,
 :root[data-theme="light"] .detail-content{scrollbar-color:#9bb0be #f8fafc}
 :root[data-theme="light"] .badge{background:#edf3f7;color:#405f70;border-color:#b9cdd9}

@@ -52,6 +52,29 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let openmp_enabled = args.collectors.contains(&CollectorKind::Openmp);
     let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
+    let python_enabled = args.collectors.contains(&CollectorKind::Python);
+    ensure!(
+        python_enabled
+            || (args.python_include.is_empty()
+                && args.python_backend == crate::PythonBackend::Auto
+                && !args.python_inline),
+        "Python options require --collect python"
+    );
+    let direct_python = std::path::Path::new(&args.command[0])
+        .file_name()
+        .is_some_and(|p| p.to_string_lossy().starts_with("python"));
+    let inline = args.python_inline
+        || (direct_python && args.command.iter().skip(1).any(|a| a == "-c" || a == "-"));
+    let mut python_prepared = if python_enabled {
+        Some(crate::python_collector::Prepared::new(
+            &args.python_include,
+            args.python_backend.name(),
+            args.io_buffer_events as usize,
+            inline,
+        )?)
+    } else {
+        None
+    };
     let pmu_settings = crate::pmu_collector::Settings {
         scope: args.pmu_scope,
         kernel: args.pmu_kernel,
@@ -176,6 +199,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             openmp_enabled.then_some("openmp"),
             cuda_enabled.then_some("cuda"),
             pmu_enabled.then_some("pmu"),
+            python_enabled.then_some("python"),
         ]
         .into_iter()
         .flatten()
@@ -198,6 +222,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut openmp_running = None;
     let mut cuda_running = None;
     let mut pmu_running = None;
+    let mut python_running = None;
     let mut environment = vec![
         (
             OsString::from("RPROF_SESSION_ID"),
@@ -248,6 +273,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             "CUDA_INJECTION64_PATH".into(),
             cuda.library().as_os_str().to_owned(),
         ));
+    }
+    if let Some(python) = &python_prepared {
+        environment.extend(python.environment());
     }
     let launch_start = elapsed()?;
     let result = supervisor::supervise(
@@ -313,6 +341,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     if let Some(prepared) = cuda_prepared.take() {
                         cuda_running = Some(prepared.start(Arc::clone(&sink), origin)?);
                     }
+                    if let Some(prepared) = python_prepared.take() {
+                        python_running = Some(prepared.start(Arc::clone(&sink), origin)?);
+                    }
                 }
                 supervisor::Event::Heartbeat { .. } => {
                     if let Some(pmu) = &mut pmu_running {
@@ -331,6 +362,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     }
                     if let Some(cuda) = &cuda_running {
                         cuda.check()?;
+                    }
+                    if let Some(python) = &python_running {
+                        python.check()?;
                     }
                 }
             }
@@ -359,8 +393,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             pmu.finish(&mut out, elapsed()?)
         })
         .transpose();
+    let python_result = python_running
+        .map(crate::python_collector::Running::finish)
+        .transpose();
     let result = result.and_then(|outcome| {
         pmu_result?;
+        if let Some(python)=python_result?{
+            eprintln!("Python: {} packets received; {} observed drops/omitted callbacks; {} initialized interpreters",python.received,python.dropped,python.initialized);
+            ensure!(python.initialized>0,"No Python initialization observed; use CPython with site enabled (without -S/-I/-E) and inspect interpreter/bootstrap diagnostics");
+            ensure!(python.errors==0,"Python instrumentation reported {} errors; inspect the saved capture",python.errors);
+        }
         if let Some(io) = io_result? {
             eprintln!("I/O: {} attempted, {} received, {} ingress drops across {} process images", io.attempted, io.received, io.dropped, io.initialized);
             ensure!(io.initialized > 0, "I/O preload collector did not initialize; check dynamic linking, LD_PRELOAD support, and the library path");

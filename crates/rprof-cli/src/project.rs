@@ -205,6 +205,17 @@ fn evidence(path: &Path, domain: Option<&str>, max_events: u32) -> Result<Baseli
                         || e.final_read)
             });
     }
+    if let Some(python) = &report.python {
+        complete &= python.malformed == "0"
+            && python.runtimes.iter().all(|r| {
+                r.initialized
+                    && r.finalized
+                    && r.source_errors == "0"
+                    && r.unmatched == "0"
+                    && r.abandoned == "0"
+                    && r.inflight == "0"
+            });
+    }
     let dropped = selected_shards
         .iter()
         .try_fold(0u64, |sum, s| -> Result<u64> {

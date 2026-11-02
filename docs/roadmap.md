@@ -251,6 +251,10 @@ not a prerequisite for the first release or the next collector phase.
 
 ## 10. Python and PyTorch profiling
 
+Prioritized after phase 8 at the user's request; remote-file GUI work remains a
+separate follow-up. Current CPU validation uses `tst3` HBv4 while `tst4` is down;
+PyTorch GPU validation uses `tst9` H100/H200.
+
 - Add optional CPython integration for Python stacks/functions, thread/interpreter
   identity, and user ranges. Distinguish sampled stacks from instrumented intervals;
   version-gate monitoring/profiling APIs and cover async/generator lifetimes.
@@ -273,8 +277,15 @@ not a prerequisite for the first release or the next collector phase.
 with native activity, preserved source correlations, explicit coverage/overhead,
 and results checked against PyTorch's profiler on supported version combinations.
 
-See [Python and PyTorch](python-pytorch.md). Trace import can start independently;
-integrated GPU collection builds on phase 6. These are planned capabilities.
+**First increments implemented:** SDK-free Kineto/Chrome import, selected CPython
+function execution segments and elapsed ranges, worker bootstrap, optional scheduled
+Torch collection, Python/native track sharing, and text/HTML summaries. H200 eager
+and compiled training, DataLoader workers, CPU/autograd, and single-host two-rank
+Gloo reference checks passed. Native Python+CUPTI collection also passed. Source
+loss/clock uncertainty and unresolved trace endpoints remain explicit. Fine-grained
+Python function tracing has high overhead; sampling, free-threaded/subinterpreter
+lifecycle coverage and broader distributed/version matrices remain follow-ups.
+See [Python and PyTorch](python-pytorch.md) for supported scope.
 
 ## 11. Combined-workload validation and release
 

@@ -1,4 +1,24 @@
-# Python and PyTorch profiling — planned
+# Python and PyTorch profiling
+
+## First implementation
+
+The first delivery is implemented: selected CPython function execution segments,
+elapsed user ranges, native thread/image identity, multiprocessing bootstrap,
+SDK-free Kineto/Chrome trace import, and an opt-in scheduled `torch.profiler` helper.
+Text/HTML panels distinguish native Python observations, imported CPU operators,
+GPU execution, framework memory counters, and source-health diagnostics.
+
+```sh
+rprof record --collect python -- python3 application.py
+rprof import-pytorch torch-trace.json -o torch.rprof.jsonl
+rprof report torch.rprof.jsonl --format html -o torch.html
+```
+
+See [Python collection](python-profiling.md) and [PyTorch import and collection](pytorch-import.md)
+for exact contracts and limits. Function tracing is opt-in and substantially
+perturbs tiny functions; `--python-backend ranges` supports coarser annotations.
+Statistical stack sampling, broader interpreter matrices, and automatic alignment
+of imported framework traces with native captures remain future work.
 
 ## Goal and implementation boundary
 
@@ -7,7 +27,7 @@ retaining rprof's unified native timeline. Rust remains the collection/analysis
 core; an optional Python-facing package or native extension provides the language
 and framework integration. The base CLI continues to work without Python/PyTorch.
 
-## Python support
+## Python support goals
 
 - Start with CPython and an explicit interpreter-version matrix. Evaluate stack
   sampling for low-overhead attribution and opt-in instrumented function intervals.
@@ -31,7 +51,8 @@ user `record_function` ranges, available stacks, CUDA activities, source flow ID
 and step boundaries. Normalize timestamps with explicit source precision and clock
 metadata; importing a trace cannot recover information it did not contain.
 
-Then add opt-in runtime collection, including warmup/active profiling schedules:
+The helper now supports opt-in runtime collection with warmup/active schedules.
+The broader framework coverage goals remain:
 
 - Forward/backward/autograd operations, module/user ranges, optimizer steps, and
   training versus inference iterations.
@@ -73,7 +94,14 @@ complete hardware performance model.
 3. Add scheduled PyTorch collection and native CPU/GPU correlation.
 4. Cover workers, distributed backends, compiled execution, and overhead tuning.
 
-Validate CPU operator/autograd fixtures, a small CUDA workload on `tst9`/`h100`,
+Validate CPU operator/autograd fixtures, small CUDA workloads on `tst9` H100/H200,
 DataLoader workers, and two-rank distributed runs. Compare with PyTorch's reference
 profiler and known fixture outcomes. Track CPython/PyTorch/CUDA/collector ABI
 combinations independently, including unsupported or absent metadata.
+
+Recorded validation uses CPython 3.12.9 and PyTorch 2.13.0+cu130: CPU operators,
+two-rank single-host Gloo, H200 eager and compiled training, DataLoader spawn workers,
+and native Python+CUPTI collection. CPU-side Python/IO and multiprocessing checks
+also passed on `tst3` HBv4 (`hbv404EX3U`); `tst4` was unavailable. All scheduled
+H200 kernel/copy execution records had their supplied API correlations imported.
+Unpaired flow endpoints from the original trace remain explicit diagnostics.

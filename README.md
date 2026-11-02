@@ -21,9 +21,10 @@ explicit assumptions, evaluated parameter ranges, and projected phase timelines.
 Initial models use user-authored/calibrated hardware profiles and an explicit
 phase graph. See [projection models and validation](docs/projection-model.md).
 
-[Python and PyTorch profiling](docs/python-pytorch.md) is also planned: Python
-execution/stacks, PyTorch operators and autograd, data-loading/distributed activity,
-and CPU–GPU correlation alongside native MPI/OpenMP/I/O events.
+[Python and PyTorch profiling](docs/python-pytorch.md) supports selected CPython
+execution segments/ranges, worker processes, scheduled framework-owned collection,
+and importing operator/autograd/GPU traces. Source coverage, clock domains, and
+instrumentation overhead remain explicit.
 
 [Remote operation](docs/remote-operation.md) uses direct collection on the remote
 system and an SSH tunnel to the existing snapshot viewer. This needs no additional
@@ -52,6 +53,8 @@ read-only feature.
   capability diagnostics, and PMU text/HTML summaries.
 - Versioned hardware/workload projection profiles, dependency/resource schedules,
   explicit strong/weak node sweeps, and an offline editor running the Rust engine in WASM.
+- CPython instrumented segments and ranges, plus SDK-free PyTorch/Kineto imports
+  with CPU/GPU correlations, framework memory counters, and source diagnostics.
 
 Hardware counters and multiplexing have been checked against `perf stat` on HBv4;
 software events and unsupported-event behavior were also validated on the H100 VM.
@@ -193,6 +196,19 @@ Author the model from stable evidence IDs and explicit workload assumptions.
 infeasible scenarios have no numeric speedup; parameter-case ranges are not
 confidence intervals. See [projection model](docs/projection-model.md) for scope,
 replay, validation, and editor controls.
+
+### Python and PyTorch
+
+```sh
+target/release/rprof record --collect python -o python.rprof.jsonl -- python3 app.py
+target/release/rprof import-pytorch torch-trace.json -o torch.rprof.jsonl
+target/release/rprof report torch.rprof.jsonl --format html -o torch.html
+```
+
+Use `--python-include` to select source roots and `--python-backend ranges` for
+annotation-only collection. Fine-grained function instrumentation can heavily
+perturb tiny functions. See [Python collection](docs/python-profiling.md) and
+[PyTorch workflows](docs/pytorch-import.md), including exclusive CUPTI ownership.
 
 ### Multiple shards
 

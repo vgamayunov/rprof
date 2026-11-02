@@ -162,6 +162,8 @@ pub(crate) fn category(category: &Category) -> &'static str {
         Category::Openmp => "openmp",
         Category::Cuda => "cuda",
         Category::Io => "io",
+        Category::Python => "python",
+        Category::Pytorch => "pytorch",
     }
 }
 
@@ -226,6 +228,8 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut openmp = crate::openmp_summary::OpenmpAnalysis::default();
     let mut cuda = crate::cuda_summary::CudaAnalysis::default();
     let mut pmu = crate::pmu_summary::PmuAnalysis::default();
+    let mut python = crate::python_summary::PythonAnalysis::default();
+    let mut pytorch = crate::pytorch_summary::PytorchAnalysis::default();
     let data = scan(path, None, |record| {
         io.observe(&record);
         clocks.observe(&record);
@@ -233,6 +237,8 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         openmp.observe(&record);
         cuda.observe(&record);
         pmu.observe(&record);
+        python.observe(&record);
+        pytorch.observe(&record);
         if let Record::Chunk(chunk) = record {
             for (event_index, event) in chunk.events.into_iter().enumerate() {
                 if let Payload::Span(span) = &event.payload {
@@ -354,6 +360,10 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                                     "mpi"
                                 } else if attrs.contains_key("cuda.role") {
                                     "cuda"
+                                } else if attrs.contains_key("python.role") {
+                                    "python"
+                                } else if attrs.contains_key("pytorch.role") {
+                                    "pytorch"
                                 } else {
                                     "activity"
                                 }
@@ -525,19 +535,38 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             "{unresolved} dependency links have endpoints missing from the retained timeline."
         ));
     }
+    let imported = shards
+        .iter()
+        .filter(|s| s.collectors.iter().any(|c| c == "pytorch-import"))
+        .count();
     let label = if synthetic {
         "Synthetic fixture / generated data"
+    } else if imported == shards.len() && imported > 0 {
+        "Imported profiling trace; source coverage unknown"
+    } else if imported > 0 {
+        "Measured and imported profiling sources"
     } else {
         "Measured capture"
     };
     let openmp = openmp.finish(&shards, &mut warnings);
     let cuda = cuda.finish(&shards, &mut warnings);
     let pmu = pmu.finish(&shards, &mut warnings);
+    let python = python.finish(&shards, &mut warnings);
+    let pytorch = pytorch.finish(&shards, &mut warnings);
     Ok(Report {
         source_bytes: data.source_bytes,
         version: 1,
         provenance: Provenance {
-            kind: if synthetic { "synthetic" } else { "measured" }.into(),
+            kind: if synthetic {
+                "synthetic"
+            } else if imported == shards.len() && imported > 0 {
+                "imported"
+            } else if imported > 0 {
+                "mixed"
+            } else {
+                "measured"
+            }
+            .into(),
             label: label.into(),
             source: path.display().to_string(),
         },
@@ -583,5 +612,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         openmp,
         cuda,
         pmu,
+        python,
+        pytorch,
     })
 }
