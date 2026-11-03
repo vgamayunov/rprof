@@ -32,10 +32,10 @@ pub struct ReportArgs {
 
 #[derive(Args)]
 pub struct TimelineLimits {
-    /// Maximum retained timeline observations; full-capture summaries remain exact.
+    /// Maximum raw timeline observations; system gauges and I/O summaries have separate budgets.
     #[arg(long, default_value_t = 200_000, value_parser = clap::value_parser!(u32).range(0..=2_000_000))]
     max_events: u32,
-    /// Encoded-event retention budget for HTML reports, in MiB.
+    /// Raw encoded-event retention budget in MiB (excludes system gauges and derived summaries).
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=512))]
     max_report_mib: u32,
 }

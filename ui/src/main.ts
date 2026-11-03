@@ -2,6 +2,7 @@ import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollap
 import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
+import { formatBytes, formatByteRate, formatMeanLatency } from './model.js';
 import { ProjectionViewer } from './projection.js';
 import type { Projection } from './projection.js';
 
@@ -28,9 +29,11 @@ function node<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', tex
   return element;
 }
 
-function put(parent: Element, tag: keyof HTMLElementTagNameMap, label: string, value: string): void {
+function put(parent: Element, tag: keyof HTMLElementTagNameMap, label: string, value: string, exact?: string): void {
   const row = node('div', 'detail-row');
-  row.append(node('dt', '', label), node('dd', '', value));
+  const detail = node('dd', '', value);
+  if (exact) detail.title = exact;
+  row.append(node('dt', '', label), detail);
   parent.append(row);
 }
 
@@ -82,7 +85,7 @@ class Viewer {
   private ioFilesystem = 'all';
   private ioMetric: IoMetric = 'throughput';
   private ioVisible = true;
-  private readonly ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; values: [number, number][]; max: number }>>();
+  private readonly ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; starts: bigint[]; ends: bigint[]; values: [number, number][]; max: number }>>();
   private regionPage = 0;
   private threadPage = 0;
   private selectedRegion: OpenmpRegion | undefined;
@@ -1141,7 +1144,9 @@ class Viewer {
     }
     ctx.stroke(); ctx.lineWidth = 1;
     ctx.fillStyle = this.colors.muted; ctx.font = '10px system-ui';
-    ctx.fillText(row.system ? `${points.length} samples · ${row.system === 'cpu' ? '0–100%' : `0–${row.capacity ? (Number(BigInt(row.capacity)) / 2 ** 30).toFixed(1) + ' GiB' : 'observed peak (capacity unknown)'}`} · ${row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not app usage'}` : `${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
+    const sourceSamples = samples[0]?.counter.attributes['system.report_samples'];
+    const sampling = sourceSamples && sourceSamples !== String(samples.length) ? `${samples.length}/${sourceSamples} full-run samples` : `${samples.length} samples`;
+    ctx.fillText(row.system ? `${sampling} · ${row.system === 'cpu' ? '0–100%' : `0–${row.capacity ? (Number(BigInt(row.capacity)) / 2 ** 30).toFixed(1) + ' GiB' : 'observed peak (capacity unknown)'}`} · ${row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not app usage'}` : `${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
   }
 
   private drawIoGraph(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
@@ -1154,43 +1159,60 @@ class Viewer {
       const values = bins.map(bin => ioMetricValues(bin, this.ioMetric));
       let max = 0;
       for (const pair of values) for (const value of pair) if (Number.isFinite(value)) max = Math.max(max, value);
-      plot = { bins, values, max: max || 1 }; cache.set(this.ioMetric, plot);
+      plot = { bins, values, starts: bins.map(bin => BigInt(bin.start_ns)), ends: bins.map(bin => BigInt(bin.start_ns) + BigInt(bin.duration_ns)), max: max || 1 }; cache.set(this.ioMetric, plot);
     }
     ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
     if (!plot.bins.length) { ctx.fillText('No full-capture I/O bins available for this selection', LABEL_WIDTH + 8, y + 32); return; }
-    const first = lowerBound(plot.bins, bin => BigInt(bin.start_ns) + BigInt(bin.duration_ns) > this.start);
-    const last = lowerBound(plot.bins, bin => BigInt(bin.start_ns) >= end);
+    const first = lowerBound(plot.ends, time => time > this.start);
+    const last = lowerBound(plot.starts, time => time >= end);
     const palette = this.theme === 'light' ? ['#176b61', '#af661c'] : ['#6bcdb0', '#e5b46d'];
-    const top = y + 9, bottom = y + row.height - 19, height = bottom - top;
+    const top = y + 9, bottom = y + row.height - 24, height = bottom - top;
+    const unit = this.ioMetric === 'throughput' ? 'MiB/s' : this.ioMetric === 'iops' ? 'calls/s' : 'ms';
+    const geometry: { left: number; right: number }[] = [];
+    for (let i = first; i < last; i++) geometry.push({
+      left: Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(plot.starts[i]!, this.start, this.nsPerPx)),
+      right: Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(plot.ends[i]!, this.start, this.nsPerPx)),
+    });
+    ctx.strokeStyle = this.colors.border; ctx.lineWidth = 1;
+    for (const fraction of [0, .5, 1]) {
+      const py = bottom - height * fraction;
+      ctx.beginPath(); ctx.moveTo(LABEL_WIDTH + 1, py); ctx.lineTo(this.scroll.clientWidth, py); ctx.stroke();
+    }
     for (let series = 0; series < 2; series++) {
       ctx.fillStyle = palette[series]!; ctx.strokeStyle = palette[series]!; ctx.lineWidth = 1.5;
       let previous: { x: number; y: number } | undefined;
+      ctx.beginPath();
       for (let i = first; i < last; i++) {
-        const bin = plot.bins[i]!, value = plot.values[i]![series]!;
+        const value = plot.values[i]![series]!;
         if (!Number.isFinite(value)) { previous = undefined; continue; }
-        const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(BigInt(bin.start_ns), this.start, this.nsPerPx));
-        const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(BigInt(bin.start_ns) + BigInt(bin.duration_ns), this.start, this.nsPerPx));
+        const { left, right } = geometry[i - first]!;
         const py = bottom - height * value / plot.max;
         ctx.globalAlpha = .14; ctx.fillRect(left, py, right - left, bottom - py); ctx.globalAlpha = 1;
-        ctx.beginPath();
         if (previous && Math.abs(previous.x - left) < 1) { ctx.moveTo(left, previous.y); ctx.lineTo(left, py); }
         else ctx.moveTo(left, py);
-        ctx.lineTo(right, py); ctx.stroke(); previous = { x: right, y: py };
+        ctx.lineTo(right, py); previous = { x: right, y: py };
       }
+      ctx.stroke();
     }
     for (let i = first; i < last; i++) {
       const bin = plot.bins[i]!;
-      const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(BigInt(bin.start_ns), this.start, this.nsPerPx));
-      const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(BigInt(bin.start_ns) + BigInt(bin.duration_ns), this.start, this.nsPerPx));
+      const { left, right } = geometry[i - first]!;
       if (right <= left) continue;
       this.hits.push({ x: left, y: top, width: right - left, height, selection: { kind: 'io', bin, graph } });
       if (this.selection?.kind === 'io' && this.selection.graph.key === graph.key && this.selection.bin === bin) {
         ctx.strokeStyle = this.colors.selected; ctx.strokeRect(left, top, right - left, height);
       }
     }
-    ctx.lineWidth = 1; ctx.fillStyle = this.colors.muted;
-    const unit = this.ioMetric === 'throughput' ? 'MiB/s' : this.ioMetric === 'iops' ? 'calls/s (POSIX)' : 'ms · no calls = unknown';
-    ctx.fillText(`0–${plot.max.toLocaleString(undefined, { maximumSignificantDigits: 3 })} ${unit} · ${last - first} visible bins`, LABEL_WIDTH + 8, y + row.height - 4);
+    ctx.font = '600 11px system-ui'; ctx.textAlign = 'right';
+    for (const fraction of [0, .5, 1]) {
+      const label = `${(plot.max * fraction).toLocaleString(undefined, { maximumSignificantDigits: 3 })} ${unit}`;
+      const py = Math.max(top + 10, bottom - height * fraction - 3);
+      ctx.lineWidth = 3; ctx.strokeStyle = this.colors.background; ctx.strokeText(label, this.scroll.clientWidth - 8, py);
+      ctx.fillStyle = this.colors.heading; ctx.fillText(label, this.scroll.clientWidth - 8, py);
+    }
+    ctx.textAlign = 'left'; ctx.lineWidth = 1; ctx.fillStyle = this.colors.muted; ctx.font = '11px system-ui';
+    const binWidth = plot.bins[0]?.duration_ns ?? '0';
+    ctx.fillText(`Bin width ${formatNs(BigInt(binWidth))} · ${last - first} visible bins · each step is an average, not one operation`, LABEL_WIDTH + 8, y + row.height - 5);
   }
 
   private drawLinks(ctx: CanvasRenderingContext2D, anchors: Map<string, { x: number; y: number }>): void {
@@ -1283,14 +1305,15 @@ class Viewer {
       const rates = ioBinMetrics(bin);
       this.detail.append(node('h3', '', graph.label), node('p', 'muted', 'Full-capture POSIX I/O · calls assigned to completion bins; not physical disk rates.'));
       put(dl, 'div', 'Window', `${formatNs(BigInt(bin.start_ns))}–${formatNs(BigInt(bin.start_ns) + BigInt(bin.duration_ns))}`);
-      put(dl, 'div', 'Read bytes / calls', `${bin.read_bytes} B / ${bin.read_ops}`);
-      put(dl, 'div', 'Write bytes / calls', `${bin.write_bytes} B / ${bin.write_ops}`);
-      put(dl, 'div', 'Read throughput / IOPS', `${rates.readBytesPerSec} B/s / ${rates.readOpsPerSec} calls/s`);
-      put(dl, 'div', 'Write throughput / IOPS', `${rates.writeBytesPerSec} B/s / ${rates.writeOpsPerSec} calls/s`);
-      put(dl, 'div', 'Mean read / write latency', `${rates.readLatencyNs} / ${rates.writeLatencyNs}`);
-      put(dl, 'div', 'Weighted mean latency', rates.meanLatencyNs);
+      put(dl, 'div', 'Bin duration', `${formatNs(BigInt(bin.duration_ns))} · completion-time average`);
+      put(dl, 'div', 'Read bytes / calls', `${formatBytes(bin.read_bytes)} / ${bin.read_ops}`, `${bin.read_bytes} B / ${bin.read_ops} calls`);
+      put(dl, 'div', 'Write bytes / calls', `${formatBytes(bin.write_bytes)} / ${bin.write_ops}`, `${bin.write_bytes} B / ${bin.write_ops} calls`);
+      put(dl, 'div', 'Read throughput / IOPS', `${formatByteRate(bin.read_bytes, bin.duration_ns)} / ${rates.readOpsPerSec} calls/s`, `${rates.readBytesPerSec} B/s; ${bin.read_bytes} bytes in ${bin.duration_ns} ns`);
+      put(dl, 'div', 'Write throughput / IOPS', `${formatByteRate(bin.write_bytes, bin.duration_ns)} / ${rates.writeOpsPerSec} calls/s`, `${rates.writeBytesPerSec} B/s; ${bin.write_bytes} bytes in ${bin.duration_ns} ns`);
+      put(dl, 'div', 'Mean read / write latency', `${formatMeanLatency(bin.read_latency_ns, bin.read_ops)} / ${formatMeanLatency(bin.write_latency_ns, bin.write_ops)}`, `${rates.readLatencyNs} / ${rates.writeLatencyNs}`);
+      put(dl, 'div', 'Weighted mean latency', formatMeanLatency((BigInt(bin.read_latency_ns) + BigInt(bin.write_latency_ns)).toString(), (BigInt(bin.read_ops) + BigInt(bin.write_ops)).toString()), rates.meanLatencyNs);
       put(dl, 'div', 'Other operations / errors', `${bin.other_ops} / ${bin.errors}`);
-      put(dl, 'div', 'Max latency (all calls)', BigInt(bin.read_ops) + BigInt(bin.write_ops) + BigInt(bin.other_ops) > 0n ? `${bin.max_latency_ns} ns` : '—');
+      put(dl, 'div', 'Max latency (all calls)', BigInt(bin.read_ops) + BigInt(bin.write_ops) + BigInt(bin.other_ops) > 0n ? formatMeanLatency(bin.max_latency_ns, '1') : '—', `${bin.max_latency_ns} ns`);
     } else {
       const { counter, time } = this.selection.item;
       this.detail.append(node('h3', '', counter.name));

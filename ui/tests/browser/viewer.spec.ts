@@ -509,7 +509,8 @@ test('main timeline I/O graph expands rank/process/thread and opt-in files, with
   await expect(page.locator('#detail-content')).toContainText('105 B / 5');
   await page.locator('#io-metric-select').selectOption('latency');
   await canvas.click({ position: { x: 300, y: 30 } });
-  await expect(page.locator('#detail-content')).toContainText('1000000.000 ns');
+  await expect(page.locator('#detail-content')).toContainText('1 ms');
+  await expect(page.locator('#detail-content dd[title="1000000.000 ns"]')).toBeVisible();
   const before = await page.locator('#range-label').textContent();
   await page.locator('#zoom-in').click();
   await expect(page.locator('#range-label')).not.toHaveText(before!);
@@ -543,6 +544,30 @@ test('main timeline I/O graph expands rank/process/thread and opt-in files, with
   await expect(page.locator('#detail-content')).toContainText('999 B / 1');
   await expect(page.locator('#io-toolbar img')).toHaveCount(0);
   expect(await page.evaluate(() => (globalThis as any).rprofInjected)).toBeUndefined();
+});
+
+test('training-sized I/O rates have readable inspector units, explicit vertical scale and bin width', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = CanvasRenderingContext2D.prototype.fillText;
+    (globalThis as any).ioAxisText = [];
+    CanvasRenderingContext2D.prototype.fillText = function(text: string, x: number, y: number, maxWidth?: number) {
+      if (text.includes('MiB/s') || text.startsWith('Bin width')) (globalThis as any).ioAxisText.push(text);
+      if (maxWidth === undefined) original.call(this, text, x, y); else original.call(this, text, x, y, maxWidth);
+    };
+  });
+  const report = ioFixture();
+  for (const series of [...report.io_timeline!.filesystems.filter(f => f.id === 'f2'), ...report.io_timeline!.threads!.filter(t => t.filesystem_id === 'f2')]) {
+    Object.assign(series.bins[0]!, { read_bytes: '667129363', read_latency_ns: '97669853', max_latency_ns: '97669853' });
+  }
+  await loaded(page, injected('readable-io', target => Object.assign(target, report)));
+  await page.locator('#io-fs-select').selectOption('f2');
+  await page.locator('#timeline-canvas').click({ position: { x: 300, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('636.22 MiB/s');
+  await expect(page.locator('#detail-content')).toContainText('97.67 ms');
+  await expect(page.locator('#detail-content')).toContainText('Bin duration');
+  await expect(page.locator('#detail-content dd[title^="667129363.000 B/s"]')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (globalThis as any).ioAxisText.some((text: string) => text === '636 MiB/s'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => (globalThis as any).ioAxisText.some((text: string) => text.startsWith('Bin width 1.000 s')))).toBe(true);
 });
 
 test('legacy I/O retains optional per-file details and does not invent time series', async ({ page }) => {

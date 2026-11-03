@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ioGraph, ioGraphBins, ioMetricValues } from '../src/model.ts';
+import { formatBytes, formatByteRate, formatMeanLatency } from '../src/model.ts';
 import { ioFixture } from './io-fixture.ts';
 import { aggregateIoBins, averageNs, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, indexSpans, integerPlotValues, ioBinMetrics, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, systemGapPrefix, systemPointsConnected, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
 import type { CudaDevice, IoFilesystem, IoTimeBin, OpenmpRegion, Report, Span } from '../src/model.ts';
@@ -28,6 +29,28 @@ test('I/O bins use actual short durations, exact counts, weighted latency and un
   const empty = { ...bin, read_ops: '0', write_ops: '0', read_latency_ns: '0', write_latency_ns: '0' };
   assert.equal(ioBinMetrics(empty).meanLatencyNs, '—');
   assert.equal(ioBinMetrics({ ...empty, duration_ns: '0' }).readOpsPerSec, '—');
+});
+
+test('I/O inspector units are readable without rounding exact integer inputs through Number', () => {
+  assert.equal(formatByteRate('667129363', '1000000000'), '636.22 MiB/s');
+  assert.equal(formatBytes('9694815501'), '9.03 GiB');
+  assert.equal(formatMeanLatency('97669853129', '1000'), '97.67 ms');
+  assert.equal(formatByteRate('1048576', '250000000'), '4 MiB/s');
+  assert.equal(formatBytes('9007199254740993'), '8 PiB');
+  assert.equal(formatByteRate('0', '1000'), '0 B/s');
+  assert.equal(formatByteRate('1', '3600000000000'), '<0.01 B/s');
+  assert.equal(formatMeanLatency('0', '0'), '—');
+  assert.equal(formatMeanLatency('1000', '1'), '1 µs');
+});
+
+test('intentional full-run system downsampling preserves lines but genuine source gaps break them', () => {
+  const samples = [1, 5, 9].map((n, i) => ({ time: BigInt(n) * 1000000000n, counter: {
+    track: 'cpu', name: 'system.cpu.utilization', timestamp_ns: String(n * 1000000000), value: '40', value_type: 'float' as const, unit: '%',
+    attributes: { 'system.sample_index': String(n), 'system.interval_ns': '1000000000', 'system.report_gap_before': String(i === 2) },
+  } }));
+  const gaps = systemGapPrefix(samples);
+  assert.equal(systemPointsConnected(gaps, 0, 1), true);
+  assert.equal(systemPointsConnected(gaps, 1, 2), false);
 });
 
 const span = (id: number, start_ns: string, duration_ns: string): Span => ({

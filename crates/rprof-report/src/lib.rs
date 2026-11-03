@@ -12,6 +12,7 @@ mod openmp_summary;
 mod pmu_summary;
 mod python_summary;
 mod pytorch_summary;
+mod system_timeline;
 mod text;
 mod trace;
 

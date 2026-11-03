@@ -545,7 +545,7 @@ pub struct ReportSpan {
     pub attributes: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReportCounter {
     pub track: String,
     pub name: String,

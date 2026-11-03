@@ -81,11 +81,15 @@ native adapters/protocol crates.
   about eight call names can omit detailed rows while the capture remains intact.
 - I/O: 8,192 per-file summary keys.
 - I/O graphs: 1,024 filesystem groups plus 4,096 thread/filesystem series share
-  4 MiB identity metadata and 65,536 bins globally (at most 512 per series). A second
+  4 MiB identity metadata. Overview and thread detail each have a separate
+  65,536-bin budget (up to 2,048 bins/filesystem and 512 bins/thread series). A second
   fixed-snapshot pass derives rates independently of timeline retention; more groups
   reduce time resolution. Rank/process/thread aggregation is cached in the viewer;
   file lanes are opt-in within each thread and only visible rows are drawn.
-- HTML/`view`: first **200,000 observations or 64 MiB** by default, configurable up
+- System CPU/memory graphs: a separate 65,536-point full-run budget across up to
+  16,384 series, prioritizing host overviews. First/last values and source gaps are
+  preserved when downsampling. These points are additional to raw event retention.
+- HTML/`view` raw timeline: first **200,000 observations or 64 MiB** by default, configurable up
   to 2 million/512 MiB. Track metadata has a separate 16 MiB bound. This is not a
   random sample and later phases may be absent from the timeline. Text summaries
   stream the capture; HTML summary computation also scans beyond timeline retention.

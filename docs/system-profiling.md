@@ -28,12 +28,27 @@ inspector. Memory is displayed in GiB with exact bytes retained; CPU axes use 0â
 
 System tracks carry a stable `system.host_id` (hostname/boot identity) and a
 `resource` key (`cpu`, `cpu:N`, `memory`, or `node:N`). Overview averages are derived
-in the viewer; original samples remain intact in the report/capture. Use a current
-rprof reader for captures containing the new `system` track kind.
+in the viewer; original samples remain intact in the capture. Use a current rprof
+reader for captures containing the `system` track kind.
 
 CPU/NUMA rows are canvas-rendered, not thousands of DOM elements. Only visible rows
 and bounded samples from the visible time window are drawn. Derived host groups and
 aggregate series are cached, and large overview series have bounded time bins.
+
+System gauges have a **separate full-run report budget**, so busy I/O/Python traces
+cannot evict later CPU/memory samples when the raw timeline reaches its retention
+limit. The report retains at most 65,536 gauge points across 16,384 series, at most
+4,096 per series, prioritizing host CPU/memory over individual CPUs/NUMA nodes.
+When reduction is needed it keeps original first/last samples and a last-observed
+sample per time bucket across the whole run. Source gaps remain breaks in the graph;
+no values are invented beyond the observed sampling interval. This is downsampling,
+not averaging or a guarantee to preserve every peak. Warnings and sample attributes
+record the source/retained counts. Oversized gauge events (>1 KiB) and excess series
+are explicitly omitted. This budget is additional to `--max-events`/`--max-report-mib`.
+
+If an older HTML report shows only the first few CPU/memory samples, regenerate it
+from the original capture with an updated CLI. Measurements absent from the capture
+itself cannot be recovered.
 
 ## What the measurements mean
 

@@ -105,6 +105,13 @@ I/O charts above the timeline.
 - Click a bin for exact bytes/counts/durations, errors, other operations (including
   open/close/fsync), and the maximum latency across all call types.
 
+Each graph now has labeled zero/midpoint/maximum vertical ticks. The horizontal axis
+is the timeline's elapsed time; throughput is MiB/s, IOPS is calls/s, and latency is
+ms. **Bin width** is shown on the row and in the inspector. A wide step represents
+an average over that interval, not one long I/O operation. Zooming does not create
+finer data than the report's bins. The inspector automatically uses B/KiB/MiB/GiB
+and ns/µs/ms/s; hover its values for the original bytes, rates and nanoseconds.
+
 Calls and completed bytes are assigned to the bin containing the **call completion**;
 a long operation is not spread across earlier bins. Empty bins mean no recorded
 calls, not proof of idle storage. The final shorter bin uses its actual duration.
@@ -114,8 +121,12 @@ combine within a common clock domain (including explicitly estimated MPI alignme
 Graphs are computed in Rust from a second streaming pass over the fixed capture
 snapshot, independently of raw HTML event retention. Metadata is bounded to 1,024
 filesystem groups and 4,096 thread/filesystem series, sharing a 4 MiB metadata budget.
-Time bins are bounded to 65,536 globally across both, at most 512 per series and at
-least 1 ms wide. Resolution adapts to duration and group count. Missing identities
+Filesystem overviews have their own 65,536-bin budget, up to 2,048 bins per filesystem.
+Thread detail has a separate 65,536-bin budget, up to 512 bins per series; adding
+threads no longer reduces overview resolution. Bins are at least 1 ms wide.
+Resolution adapts to duration and group count within each layer. For example, an
+approximately 988-second run with 8 filesystems and 960 thread series gets roughly
+0.483-second overview bins, while detail may use roughly 14.5-second bins. Missing identities
 or scope limits produce explicit thread-graph omissions; filesystem totals continue
 independently. The browser caches scope aggregates and rates and draws only visible
 rows/bins. Expanding one rank does not expand all its processes or files. Per-file

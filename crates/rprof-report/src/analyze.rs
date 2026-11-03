@@ -22,7 +22,9 @@ use crate::model::*;
 pub struct Limits {
     /// Text summaries don't retain timeline events or track metadata.
     pub retain_timeline: bool,
+    /// Raw observations only; system gauges and derived I/O bins have separate bounds.
     pub max_events: usize,
+    /// Raw encoded-event bytes, excluding structural metadata and reserved summaries.
     pub max_bytes: usize,
 }
 
@@ -224,6 +226,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut metadata_bytes = 0;
     let mut io = crate::io_summary::IoAnalysis::default();
     let mut io_discovery = crate::io_timeline::Discovery::default();
+    let mut system_discovery = crate::system_timeline::Discovery::default();
     let mut clocks = crate::clock::Clocks::default();
     let mut mpi = crate::mpi_summary::MpiAnalysis::default();
     let mut openmp = crate::openmp_summary::OpenmpAnalysis::default();
@@ -236,6 +239,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         io.observe(&record);
         if limits.retain_timeline {
             io_discovery.observe(&record);
+            system_discovery.observe(&record);
         }
         clocks.observe(&record);
         mpi.observe(&record);
@@ -268,6 +272,11 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                     }
                 }
                 if !limits.retain_timeline || matches!(event.payload, Payload::Heartbeat) {
+                    continue;
+                }
+                // System gauges use bounded full-run sampling in the second pass;
+                // busy I/O/Python spans must not evict their later observations.
+                if system_discovery.is_sample(chunk.shard_id, &event) {
                     continue;
                 }
                 let cost = serde_json::to_vec(&event)?.len();
@@ -491,14 +500,20 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             (offsets[track_shards[counter.track.as_str()]] + local as u128).to_string();
     }
     let mut warnings = clock_layout.warnings;
-    let io_timeline = if let Some(mut series) =
-        io_discovery.start(&domains, &lookup, &clock_layout.offsets)
-    {
+    let mut system_timeline = system_discovery.start(&clock_layout.offsets);
+    let mut io_series = io_discovery.start(&domains, &lookup, &clock_layout.offsets);
+    if io_series.is_some() || !system_timeline.is_empty() {
         // A fixed snapshot keeps a growing capture from changing the binning window.
         scan(path, Some(data.source_bytes), |record| {
-            series.observe(&record);
+            if let Some(series) = &mut io_series {
+                series.observe(&record);
+            }
+            system_timeline.observe(&record);
             Ok(())
         })?;
+    }
+    counters.extend(system_timeline.finish(&mut warnings));
+    let io_timeline = if let Some(series) = io_series {
         let series = series.finish();
         if series.omitted_events != "0" {
             warnings.push(format!(

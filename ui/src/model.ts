@@ -305,6 +305,31 @@ export function ioRate(value: string, durationNs: string): string {
   return `${milli / 1000n}.${(milli % 1000n).toString().padStart(3, '0')}`;
 }
 
+// Human-readable display of exact integer ratios; Number is used only for plot
+// geometry elsewhere. Keep original totals available in inspector tooltips.
+function scaledRatio(numerator: bigint, denominator: bigint, base: bigint, units: readonly string[]): string {
+  if (denominator <= 0n) return '—';
+  let unit = 0, scale = 1n;
+  while (unit < units.length - 1 && numerator >= denominator * scale * base) { unit++; scale *= base; }
+  let hundredths = (numerator * 100n + denominator * scale / 2n) / (denominator * scale);
+  if (hundredths >= base * 100n && unit < units.length - 1) {
+    unit++; scale *= base;
+    hundredths = (numerator * 100n + denominator * scale / 2n) / (denominator * scale);
+  }
+  if (numerator > 0n && hundredths === 0n) return `<0.01 ${units[unit]}`;
+  const fraction = (hundredths % 100n).toString().padStart(2, '0').replace(/0+$/, '');
+  return `${hundredths / 100n}${fraction ? `.${fraction}` : ''} ${units[unit]}`;
+}
+export function formatBytes(bytes: string): string {
+  return scaledRatio(BigInt(bytes), 1n, 1024n, ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB']);
+}
+export function formatByteRate(bytes: string, durationNs: string): string {
+  return scaledRatio(BigInt(bytes) * 1_000_000_000n, BigInt(durationNs), 1024n, ['B/s', 'KiB/s', 'MiB/s', 'GiB/s', 'TiB/s', 'PiB/s', 'EiB/s']);
+}
+export function formatMeanLatency(totalNs: string, calls: string): string {
+  return scaledRatio(BigInt(totalNs), BigInt(calls), 1000n, ['ns', 'µs', 'ms', 's']);
+}
+
 export function ioBinMetrics(bin: IoTimeBin): { readBytesPerSec: string; writeBytesPerSec: string;
   readOpsPerSec: string; writeOpsPerSec: string; readLatencyNs: string; writeLatencyNs: string; meanLatencyNs: string } {
   const reads = BigInt(bin.read_ops), writes = BigInt(bin.write_ops);
@@ -376,7 +401,8 @@ export function systemGapPrefix(samples: readonly IndexedCounter[]): Uint32Array
     const index = current.counter.attributes['system.sample_index'];
     const priorIndex = previous.counter.attributes['system.sample_index'];
     const width = current.counter.attributes['system.bin_width_ns'] ?? current.counter.attributes['system.interval_ns'] ?? '1000000000';
-    const missing = current.counter.attributes['system.gap_before'] === 'true' ||
+    const reportGap = current.counter.attributes['system.report_gap_before'];
+    const missing = reportGap !== undefined ? reportGap === 'true' : current.counter.attributes['system.gap_before'] === 'true' ||
       (index !== undefined && priorIndex !== undefined && BigInt(index) > BigInt(priorIndex) + 1n) ||
       current.time - previous.time > BigInt(width) * 2n;
     gaps[i + 1] = gaps[i]! + Number(missing);
@@ -485,7 +511,10 @@ function aggregateSystem(hosts: SystemGraph[], data: Map<string, TrackData>, kin
   const lists = hosts.map(host => data.get(host.track.id)?.counters.get(host.series) ?? []);
   const intervals = lists.flatMap(list => list.slice(0, 1).map(item => {
     const value = item.counter.attributes['system.interval_ns'];
-    return value && /^\d+$/.test(value) ? BigInt(value) : 1_000_000_000n;
+    const reportInterval = item.counter.attributes['system.report_interval_ns'];
+    const original = value && /^\d+$/.test(value) ? BigInt(value) : 1_000_000_000n;
+    const sampled = reportInterval && /^\d+$/.test(reportInterval) ? BigInt(reportInterval) : 0n;
+    return sampled > original ? sampled : original;
   }));
   const maxInterval = intervals.reduce((a, b) => a > b ? a : b, 1n);
   const width = (BigInt(domain.end_ns) / 199_999n + 1n) > maxInterval ? BigInt(domain.end_ns) / 199_999n + 1n : maxInterval;
@@ -510,7 +539,7 @@ function aggregateSystem(hosts: SystemGraph[], data: Map<string, TrackData>, kin
     }
     if (values.size !== hosts.length) continue;
     const members = [...values.values()];
-    const gap = previous === undefined || bin !== previous + 1n;
+    const gap = previous === undefined || bin !== previous + 1n || members.some(item => item.counter.attributes['system.report_gap_before'] === 'true');
     previous = bin;
     const value = kind === 'memory' ? members.reduce((sum, item) => sum + BigInt(item.counter.value), 0n).toString() :
       (members.reduce((sum, item) => sum + Number(item.counter.value), 0) / members.length).toString();
@@ -617,7 +646,7 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
       if (query && !inherited && !hasMatch(graph)) return;
       const filesKey = `${graph.key}:files`;
       const expanded = !collapsed.has(graph.key) || (!!query && !match && !inherited && hasMatch(graph));
-      add({ key: graph.key, kind: 'io', label: graph.label, depth, height: 72, shard: graph.shard,
+      add({ key: graph.key, kind: 'io', label: graph.label, depth, height: 96, shard: graph.shard,
         io: graph, hasChildren: graph.children.length > 0 || !!graph.files?.length, expanded });
       if (!expanded) return;
       for (const child of graph.children) addIo(child, depth + 1, inherited || match);

@@ -12,8 +12,11 @@ use uuid::Uuid;
 const MAX_FILESYSTEMS: usize = 1024;
 const MAX_THREAD_SERIES: usize = 4096;
 const MAX_METADATA: usize = 4 * 1024 * 1024;
-const MAX_TOTAL_BINS: usize = 65_536;
-const MAX_BINS_PER_FILESYSTEM: usize = 512;
+// Independent overview and detail budgets: many threads must not coarsen the
+// main filesystem/aggregate graph into multi-second plateaus.
+const MAX_TOTAL_BINS: usize = 65_536; // per layer
+const MAX_BINS_PER_FILESYSTEM: usize = 2048;
+const MAX_BINS_PER_SCOPE: usize = 512;
 type Host = (String, String);
 type Key = (Host, String, String);
 type ScopeKey = (Uuid, u64, Key);
@@ -232,8 +235,9 @@ impl Discovery {
         if !self.seen {
             return None;
         }
-        let target = (MAX_TOTAL_BINS / (self.groups.len() + self.thread_groups.len()).max(1))
-            .min(MAX_BINS_PER_FILESYSTEM);
+        let target = (MAX_TOTAL_BINS / self.groups.len().max(1)).min(MAX_BINS_PER_FILESYSTEM);
+        let scope_target =
+            (MAX_TOTAL_BINS / self.thread_groups.len().max(1)).min(MAX_BINS_PER_SCOPE);
         let groups: BTreeMap<_, _> = self
             .groups
             .into_iter()
@@ -261,8 +265,17 @@ impl Discovery {
             .into_iter()
             .map(|(key, metadata)| {
                 let group = &groups[&key.2];
-                let bins = vec![Bin::default(); group.bins.len()];
-                (key, ScopeGroup { metadata, bins })
+                let width = group.end.div_ceil(scope_target as u128).max(1_000_000);
+                let bins = vec![Bin::default(); group.end.div_ceil(width) as usize];
+                (
+                    key,
+                    ScopeGroup {
+                        metadata,
+                        bins,
+                        width,
+                        end: group.end,
+                    },
+                )
             })
             .collect();
         Some(Analysis {
@@ -353,6 +366,8 @@ struct Group {
 struct ScopeGroup {
     metadata: ScopeMetadata,
     bins: Vec<Bin>,
+    width: u128,
+    end: u128,
 }
 pub(crate) struct Analysis {
     hosts: HashMap<Uuid, Host>,
@@ -391,6 +406,7 @@ impl Analysis {
             if let Some(thread) = thread_track(&self.tracks, chunk.shard_id, span.track_id)
                 && let Some(scope) = self.thread_groups.get_mut(&(chunk.shard_id, thread, key))
             {
+                let index = (end.min(scope.end - 1) / scope.width) as usize;
                 scope.bins[index].observe(span, &event.attributes);
             }
         }
@@ -410,8 +426,8 @@ impl Analysis {
                     pid: scope.metadata.pid.to_string(),
                     tid: scope.metadata.tid.to_string(),
                     thread_track: format!("{shard}:{thread}"),
-                    bin_width_ns: group.width.to_string(),
-                    bins: export_bins(scope.bins, group.width, group.end),
+                    bin_width_ns: scope.width.to_string(),
+                    bins: export_bins(scope.bins, scope.width, scope.end),
                 }
             })
             .collect();
@@ -445,6 +461,103 @@ mod tests {
         Span, Track,
         stream::{Chunk, Event, Loss},
     };
+    #[test]
+    fn training_length_overview_stays_subsecond_with_hundreds_of_thread_series() {
+        let shard = Uuid::new_v4();
+        let host = ("training-host".into(), "boot".into());
+        let mut discovery = Discovery::default();
+        discovery.hosts.insert(shard, host.clone());
+        let mut events = Vec::new();
+        for id in 0..960u64 {
+            events.push(Event::new(
+                0,
+                Payload::Track(Track {
+                    id,
+                    parent_id: None,
+                    name: "thread".into(),
+                    rank: Some(0),
+                    kind: TrackKind::Thread { tid: id },
+                }),
+            ));
+            events.push(Event {
+                timestamp_ns: 1,
+                attributes: BTreeMap::from([
+                    ("io.operation".into(), Attribute::Text("read".into())),
+                    (
+                        "io.filesystem.id".into(),
+                        Attribute::Text(format!("mount:{}", id % 8)),
+                    ),
+                    (
+                        "io.filesystem.kind".into(),
+                        Attribute::Text("filesystem".into()),
+                    ),
+                    ("io.completed_bytes".into(), Attribute::Unsigned(4096)),
+                    ("pid".into(), Attribute::Unsigned(1)),
+                    ("tid".into(), Attribute::Unsigned(id)),
+                    ("process_instance".into(), Attribute::Unsigned(1)),
+                ]),
+                payload: Payload::Span(Span {
+                    track_id: id,
+                    name: "read".into(),
+                    category: Category::Io,
+                    start_ns: 0,
+                    duration_ns: 1,
+                    correlation_id: None,
+                }),
+            });
+        }
+        let record = Record::Chunk(Chunk {
+            shard_id: shard,
+            sequence: 0,
+            loss: Loss::default(),
+            events,
+        });
+        discovery.observe(&record);
+        let domains = vec![Domain {
+            id: "0".into(),
+            name: "training-host".into(),
+            origin_ns: "0".into(),
+            end_ns: "988185000000".into(),
+            calibration: None,
+        }];
+        let mut analysis = discovery
+            .start(
+                &domains,
+                &HashMap::from([(host, 0)]),
+                &HashMap::from([(shard, 0)]),
+            )
+            .unwrap();
+        analysis.observe(&record);
+        let result = analysis.finish();
+        assert_eq!(result.filesystems.len(), 8);
+        assert_eq!(result.threads.len(), 960);
+        assert!(result.filesystems.iter().all(
+            |f| f.bins.len() == 2048 && f.bin_width_ns.parse::<u64>().unwrap() < 1_000_000_000
+        ));
+        assert!(
+            result
+                .threads
+                .iter()
+                .all(|t| t.bin_width_ns.parse::<u64>().unwrap() > 10_000_000_000)
+        );
+        let total = |bins: &[IoTimeBin]| {
+            bins.iter()
+                .map(|b| b.read_bytes.parse::<u64>().unwrap())
+                .sum::<u64>()
+        };
+        assert_eq!(
+            result
+                .filesystems
+                .iter()
+                .map(|f| total(&f.bins))
+                .sum::<u64>(),
+            960 * 4096
+        );
+        assert_eq!(
+            result.threads.iter().map(|t| total(&t.bins)).sum::<u64>(),
+            960 * 4096
+        );
+    }
     #[test]
     fn scope_budget_does_not_stop_parent_totals_and_identity_keeps_reused_tids_separate() {
         let shard = Uuid::new_v4();
@@ -529,7 +642,11 @@ mod tests {
             .map(|f| f.bins.len())
             .sum::<usize>()
             + result.threads.iter().map(|t| t.bins.len()).sum::<usize>();
-        assert!(bins <= MAX_TOTAL_BINS);
+        assert!(bins <= 2 * MAX_TOTAL_BINS);
+        assert!(
+            result.filesystems[0].bins.len() > result.threads[0].bins.len(),
+            "overview resolution must not shrink with thread count"
+        );
     }
     #[test]
     fn filesystem_cardinality_and_bins_are_bounded_without_truncating_existing_groups() {
