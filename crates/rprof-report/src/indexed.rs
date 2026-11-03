@@ -20,7 +20,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const MAX_REPLY: usize = 16 * 1024 * 1024;
 const MAX_RAW: usize = 20_000;
 const MAX_METADATA: usize = 64 * 1024 * 1024;
@@ -488,13 +488,18 @@ impl CaptureIndex {
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
                     let mut sample: ReportCounter = serde_json::from_str(&data)?;
+                    let prefix = if sample.name.starts_with("storage.") {
+                        "storage"
+                    } else {
+                        "system"
+                    };
                     sample.attributes.insert(
-                        "system.report_gap_before".into(),
+                        format!("{prefix}.report_gap_before"),
                         previous.is_some_and(|g| g != gap).to_string(),
                     );
                     sample
                         .attributes
-                        .insert("system.report_interval_ns".into(), width.to_string());
+                        .insert(format!("{prefix}.report_interval_ns"), width.to_string());
                     sample
                         .attributes
                         .insert("viewer.resolution_ns".into(), width.to_string());
@@ -870,14 +875,33 @@ impl Builder<'_> {
                     }
                     let filter =
                         serde_json::to_string(&(&counter.name, &counter.unit, value_type))?;
-                    let interval = uint(&event.attributes, "system.interval_ns")
-                        .unwrap_or(1_000_000)
-                        .max(1_000_000) as u128;
+                    let storage = self.tracks[&track].kind == "storage";
+                    let interval = uint(
+                        &event.attributes,
+                        if storage {
+                            "storage.interval_ns"
+                        } else {
+                            "system.interval_ns"
+                        },
+                    )
+                    .unwrap_or(1_000_000)
+                    .max(1_000_000) as u128;
                     let (series, base) =
                         self.series("gauge", &domain, &track, &filter, interval, extent)?;
-                    let sequence = uint(&event.attributes, "system.sample_index");
-                    let is_system = self.tracks[&track].kind == "system";
-                    let gap_key = self.tracks[&track].n;
+                    let sequence = uint(
+                        &event.attributes,
+                        if storage {
+                            "storage.sample_index"
+                        } else {
+                            "system.sample_index"
+                        },
+                    );
+                    let is_system = self.tracks[&track].kind == "system" || storage;
+                    let gap_key = if storage {
+                        -series
+                    } else {
+                        self.tracks[&track].n
+                    };
                     let gap = if is_system && let Some((last, seq, epoch)) = self.gaps.get(&gap_key)
                     {
                         epoch

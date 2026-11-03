@@ -62,6 +62,14 @@ pub enum TrackKind {
         resource: String,
         host_id: String,
     },
+    /// Host block-device or filesystem-client observations, separate from POSIX calls.
+    Storage {
+        backend: String,
+        resource: String,
+        host_id: String,
+        filesystem: String,
+        mount_point: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

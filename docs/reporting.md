@@ -40,6 +40,15 @@ Controls:
 - **Filter:** search names, categories, and rank labels; for example `cuda rank:0`.
 - **Zoom:** click the `+`/`−` buttons, or use those keys with the timeline focused.
 - **Pan:** drag horizontally; when the plot is focused, use left/right arrows.
+- **Select a time range:** Shift-drag, or enable *Select range* and drag. Dragging
+  backwards works too; middle-drag pans while selection mode is enabled.
+- **Zoom to selection:** fit the selected interval to the plot width.
+- **Filter by selection:** show and inspect timeline activity only within the range,
+  without changing zoom. Spans and sampled graphs are clipped at its boundaries;
+  inspector values keep their original full intervals. This is a timeline display
+  filter, not a recalculation of summary tables or partial-bin totals.
+- **Clear range:** remove the selection and time filter, or press Escape in the plot.
+  Reset/Home and switching clock domains clear them too.
 - **Reset zoom:** click *Reset* or press Home while the plot is focused.
 - **Scroll:** the mouse wheel/trackpad scrolls vertically over both labels and plots;
   it does not change the timeline's zoom. Drag the plot to pan horizontally.

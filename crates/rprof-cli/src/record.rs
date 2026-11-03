@@ -59,6 +59,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
     let python_enabled = args.collectors.contains(&CollectorKind::Python);
     let system_enabled = args.collectors.contains(&CollectorKind::System);
+    let storage_enabled =
+        args.collectors.contains(&CollectorKind::Storage) || (io_enabled && !args.no_storage);
+    ensure!(
+        !args.no_storage || (io_enabled && !args.collectors.contains(&CollectorKind::Storage)),
+        "--no-storage requires --collect io and conflicts with --collect storage"
+    );
+    ensure!(
+        storage_enabled || args.storage_interval_ms == 1000,
+        "--storage-interval-ms requires --collect storage or --collect io"
+    );
     ensure!(
         system_enabled || args.system_interval_ms == 1000,
         "--system-interval-ms requires --collect system"
@@ -217,6 +227,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             pmu_enabled.then_some("pmu"),
             python_enabled.then_some("python"),
             system_enabled.then_some("system"),
+            storage_enabled.then_some("storage"),
         ]
         .into_iter()
         .flatten()
@@ -241,6 +252,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut pmu_running = None;
     let mut python_running = None;
     let mut system_running = None;
+    let mut storage_running = None;
     let mut environment = vec![
         (
             OsString::from("RPROF_SESSION_ID"),
@@ -324,6 +336,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                         args.system_interval_ms
                     } else {
                         u64::MAX
+                    })
+                    .min(if storage_enabled {
+                        args.storage_interval_ms
+                    } else {
+                        u64::MAX
                     }),
             ),
             perf: pmu_prepared.as_ref().map(|p| p.child.clone()),
@@ -391,8 +408,22 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     if let Some(prepared) = python_prepared.take() {
                         python_running = Some(prepared.start(Arc::clone(&sink), origin)?);
                     }
+                    if storage_enabled {
+                        let mut out = sink
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+                        storage_running = crate::storage_collector::Running::start(
+                            &mut out,
+                            elapsed()?,
+                            args.storage_interval_ms,
+                            session_id,
+                        )?;
+                    }
                 }
                 supervisor::Event::Heartbeat { .. } => {
+                    if let Some(storage) = &mut storage_running {
+                        storage.sample(&mut out, now, false)?;
+                    }
                     if let Some(system) = &mut system_running {
                         system.sample(&mut out, now, false)?;
                     }
@@ -423,6 +454,14 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     );
     let workload_end_ns = elapsed()?;
     let workload_status = result.as_ref().ok().copied();
+    let storage_result = storage_running
+        .map(|mut storage| {
+            let mut out = sink
+                .lock()
+                .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+            storage.sample(&mut out, elapsed()?, true)
+        })
+        .transpose();
     let system_result = system_running
         .map(|mut system| {
             let mut out = sink
@@ -455,6 +494,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         .map(crate::python_collector::Running::finish)
         .transpose();
     let result = result.and_then(|outcome| {
+        storage_result?;
         system_result?;
         pmu_result?;
         if let Some(python)=python_result?{

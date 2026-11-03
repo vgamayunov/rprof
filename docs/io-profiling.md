@@ -1,5 +1,9 @@
 # POSIX I/O profiling
 
+`--collect io` also enables [storage-layer monitoring](storage-profiling.md): separate
+block-device, NFS and Lustre client graphs appear beside POSIX activity. Use
+`--no-storage` for only the POSIX collector described on this page.
+
 ## Build and collect
 
 Build the optional preload library with a C compiler and the Rust toolchain:

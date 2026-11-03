@@ -29,7 +29,7 @@ Report {
   }],
   tracks: [{
     id: string, shard: string, parent: string|null, name: string,
-    kind: "process"|"thread"|"gpu_device"|"gpu_stream"|"io"|"system",
+    kind: "process"|"thread"|"gpu_device"|"gpu_stream"|"io"|"system"|"storage",
     rank: number|null, details: { [key: string]: string }
   }],
   spans: [{

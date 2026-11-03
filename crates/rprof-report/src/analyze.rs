@@ -256,6 +256,8 @@ fn analyze_impl(
     let mut python = crate::python_summary::PythonAnalysis::default();
     let mut pytorch = crate::pytorch_summary::PytorchAnalysis::default();
     let mut system_errors = BTreeMap::<Uuid, u64>::new();
+    let mut storage_errors = BTreeMap::<Uuid, (u64, String)>::new();
+    let mut storage_unavailable = BTreeMap::<(Uuid, String), String>::new();
     let data = scan(path, snapshot, |record| {
         // Indexed viewing pages raw file lanes; the standalone per-file table
         // is not materialized into the bootstrap HTML.
@@ -277,6 +279,34 @@ fn analyze_impl(
         pytorch.observe(&record);
         if let Record::Chunk(chunk) = record {
             for (event_index, event) in chunk.events.into_iter().enumerate() {
+                if let Payload::Counter(sample) = &event.payload
+                    && let CounterValue::Integer(value) = sample.value
+                {
+                    if sample.name == "storage.meta.read_errors" {
+                        let entry = storage_errors.entry(chunk.shard_id).or_default();
+                        if value >= entry.0 {
+                            entry.0 = value;
+                            entry.1 = match event.attributes.get("storage.last_error") {
+                                Some(Attribute::Text(s)) => s.chars().take(512).collect(),
+                                _ => String::new(),
+                            };
+                        }
+                    }
+                    if let Some(backend) = sample.name.strip_prefix("storage.meta.status.") {
+                        if ["block", "nfs", "lustre"].contains(&backend) {
+                            let key = (chunk.shard_id, backend.to_owned());
+                            if value == 0 {
+                                let detail = match event.attributes.get("storage.detail") {
+                                    Some(Attribute::Text(s)) => s.chars().take(512).collect(),
+                                    _ => "unavailable".into(),
+                                };
+                                storage_unavailable.insert(key, detail);
+                            } else {
+                                storage_unavailable.remove(&key);
+                            }
+                        }
+                    }
+                }
                 if let Payload::Counter(sample) = &event.payload
                     && sample.name == "system.meta.read_errors"
                     && let rprof_core::CounterValue::Integer(count) = sample.value
@@ -347,6 +377,19 @@ fn analyze_impl(
                             TrackKind::System { resource, host_id } => {
                                 attrs.insert("system.host_id".into(), host_id);
                                 ("system", [("resource".into(), resource)])
+                            }
+                            TrackKind::Storage {
+                                backend,
+                                resource,
+                                host_id,
+                                filesystem,
+                                mount_point,
+                            } => {
+                                attrs.insert("storage.backend".into(), backend);
+                                attrs.insert("storage.host_id".into(), host_id);
+                                attrs.insert("storage.filesystem".into(), filesystem);
+                                attrs.insert("storage.mount_point".into(), mount_point);
+                                ("storage", [("resource".into(), resource)])
                             }
                         };
                         tracks.push(ReportTrack {
@@ -571,6 +614,16 @@ fn analyze_impl(
         if count > 0 {
             warnings.push(format!("Host system sampling for shard {shard}: {count} read/parse/topology errors; missing CPU or memory samples are unknown, not zero. Inspect system.meta.read_errors for details."));
         }
+    }
+    for (shard, (count, error)) in storage_errors {
+        if count > 0 {
+            warnings.push(format!("Storage monitoring for shard {shard}: {count} source/reset errors; unavailable intervals are not zero. Last: {error}"));
+        }
+    }
+    for ((shard, backend), detail) in storage_unavailable {
+        warnings.push(format!(
+            "Storage {backend} monitoring unavailable for shard {shard}: {detail}"
+        ));
     }
     if mpi.omitted > 0 {
         warnings.push(format!(

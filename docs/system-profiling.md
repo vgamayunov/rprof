@@ -54,6 +54,11 @@ not averaging or a guarantee to preserve every peak. Warnings and sample attribu
 record the source/retained counts. Oversized gauge events (>1 KiB) and excess series
 are explicitly omitted. This budget is additional to `--max-events`/`--max-report-mib`.
 
+The same bounded full-run path also retains sampled storage rates, with a 4 KiB
+per-storage-sample bound for their additional RPC/device attributes. CPU/memory
+host overviews keep priority within the shared point budget. Indexed viewing
+queries the original stored observations instead of this standalone-report budget.
+
 If an older HTML report shows only the first few CPU/memory samples, regenerate it
 from the original capture with an updated CLI. Measurements absent from the capture
 itself cannot be recovered.

@@ -45,6 +45,7 @@ read-only feature.
 - Optional C/Rust POSIX I/O preload collector with process/thread/file attribution.
 - Per-file byte counts, errors, latency summaries, and I/O call timeline spans.
 - I/O timeline graphs with throughput/IOPS/latency, rank/process/thread drill-down and optional file lanes.
+- Concurrent block-device, NFS server-payload and Lustre bulk-RPC monitoring, grouped by filesystem.
 - Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
 - Optional MPI clock calibration with explicit uncertainty and drift reporting.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.

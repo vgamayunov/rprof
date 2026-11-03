@@ -1,23 +1,23 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, storageBins, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, StorageBin, StorageGraph, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { formatBytes, formatByteRate, formatMeanLatency } from './model.js';
 import { ProjectionViewer } from './projection.js';
 import type { Projection } from './projection.js';
+import { WindowCache, emptyScopes, hasScopes, windowIdentity } from './window-cache.js';
+import type { WindowRequest, WindowResponse, WindowScopes } from './window-cache.js';
 
 const startingTheme = initialTheme();
 document.documentElement.dataset.theme = startingTheme;
 
-type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter } | { kind: 'io'; bin: IoTimeBin; graph: IoGraph };
+type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter } | { kind: 'io'; bin: IoTimeBin; graph: IoGraph } | { kind: 'storage'; bin: StorageBin; graph: StorageGraph };
 type Hit = { x: number; y: number; width: number; height: number; selection: Selection };
+type TimeRange = { start: bigint; end: bigint };
 
 const LABEL_WIDTH = 260;
 const MAX_DRAWN_SPANS = 5000;
 const IO_PAGE_SIZE = 100;
-type WindowResponse = { snapshot: string; domain: string; start_ns: string; end_ns: string;
-  spans: Report['spans']; counters: Report['counters']; dependencies: Report['dependencies'];
-  io: Record<string, IoTimeBin[]>; limited: boolean; warnings: string[] };
 type FilePage = { thread: string; offset: number; total: number; tracks: Track[] };
 function localEndpoint(path: string): string | undefined {
   if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('#')) return undefined;
@@ -87,7 +87,10 @@ class Viewer {
   private nsPerPx = 1;
   private selection: Selection | undefined;
   private related = new Set<string>();
-  private drag: { x: number; y: number; start: bigint; moved: boolean } | undefined;
+  private drag: { x: number; y: number; start: bigint; moved: boolean; selecting: boolean; anchor: bigint; previous: TimeRange | undefined } | undefined;
+  private selectRangeMode = false;
+  private timeRange: TimeRange | undefined;
+  private timeFilter: TimeRange | undefined;
   private frame = 0;
   private ioPage = 0;
   private operationPage = 0;
@@ -96,12 +99,16 @@ class Viewer {
   private ioMetric: IoMetric = 'throughput';
   private ioVisible = true;
   private ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; starts: bigint[]; ends: bigint[]; values: [number, number][]; max: number }>>();
+  private storagePlots = new WeakMap<StorageGraph, Map<IoMetric, StorageBin[]>>();
   private windowTimer: ReturnType<typeof setTimeout> | undefined;
   private windowAbort: AbortController | undefined;
   private windowKey = '';
   private loadedWindowKey = '';
   private hasWindowData = false;
-  private windowCache = new Map<string, WindowResponse>();
+  private windowCache = new WindowCache();
+  private visibleWindowKey = '';
+  private attemptedScopes: WindowScopes = emptyScopes();
+  private windowFailed = false;
   private windowScopeLimited = false;
   private currentIoBins: Record<string, IoTimeBin[]> = {};
   private filePages = new Map<string, FilePage>();
@@ -157,8 +164,9 @@ class Viewer {
     this.get('fit-view').textContent = 'Reset';
     this.get('fit-view').title = 'Reset zoom to the full capture (Home)';
     this.get('fit-view').setAttribute('aria-label', 'Reset zoom');
-    this.get('timeline-scroll').setAttribute('aria-label', 'Timeline tracks; wheel scrolls vertically, drag pans time, buttons zoom and reset');
-    this.root.querySelector('.timeline-footer > span:last-child')!.textContent = 'Wheel: scroll rows · Drag: pan time · Buttons / + −: zoom · Home: reset';
+    this.get('timeline-scroll').setAttribute('aria-label', 'Timeline tracks; wheel scrolls vertically, drag pans time, Shift-drag selects a range');
+    this.root.querySelector('.timeline-footer > span:last-child')!.textContent = 'Wheel: scroll rows · Drag: pan · Shift-drag: select · + −: zoom · Home: reset · Esc: clear range';
+    this.root.querySelector('.toolbar')!.insertAdjacentHTML('beforeend', `<div class="range-toolbar"><button id="select-range" type="button" aria-pressed="false" title="Drag to select; Shift-drag also selects in pan mode">Select range</button><button id="zoom-selection" type="button" disabled>Zoom to selection</button><button id="filter-selection" type="button" disabled title="Show timeline activity only within the selected interval">Filter by selection</button><button id="clear-selection" type="button" disabled>Clear range</button><span id="selection-range" role="status">Shift-drag to select a time range</span></div>`);
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
     const perFile = this.get('io-panel');
@@ -185,11 +193,20 @@ class Viewer {
         this.selection = undefined; this.showDetails();
         this.buildRows(); this.schedule();
       });
-      this.get('io-metric-select').addEventListener('change', () => {
-        this.ioMetric = (this.get('io-metric-select') as HTMLSelectElement).value as IoMetric;
-        this.schedule();
-      });
     }
+    if (report.tracks.some(track => track.kind === 'storage')) {
+      this.get('io-toolbar').hidden = false;
+      if (!report.io_timeline) {
+        perFile.hidden = !(report.io?.length);
+        (this.get('io-toggle') as HTMLButtonElement).hidden = true;
+        this.get('io-fs-select').parentElement!.hidden = true;
+        this.get('io-coverage').textContent = 'Storage is captured only while monitoring · host block-device, Lustre client bulk RPC and NFS client server payload are separate layers, not application-only or server physical I/O.';
+      }
+    }
+    this.get('io-metric-select').addEventListener('change', () => {
+      this.ioMetric = (this.get('io-metric-select') as HTMLSelectElement).value as IoMetric;
+      this.schedule();
+    });
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p id="openmp-coverage"></p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><div id="gomp-panel" hidden><h3>GNU libgomp observed calls and outlined bodies</h3><p class="io-note" id="gomp-coverage"></p><p class="io-note" id="gomp-tasks"></p><h3>GOMP API calls <span id="gomp-api-count"></span></h3><div class="io-wrap"><table id="gomp-apis"><thead><tr><th>API · image / shard</th><th>Calls</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-api-pager"></div><h3>Outlined body returns <span id="gomp-body-count"></span></h3><div class="io-wrap"><table id="gomp-bodies"><thead><tr><th>Kind · image / shard</th><th>Thread ID</th><th>Opaque code pointer (not source)</th><th>Body spans</th><th>Inclusive wall time</th><th>Max wall time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-body-pager"></div></div><details id="openmp-runtimes"><summary>Runtime and capability details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
     if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
     if (report.pmu) root.insertAdjacentHTML('beforeend', `<section class="io-section pmu-section" id="pmu-panel"><div class="io-heading"><div><h2>Linux perf counters (PMU)</h2><p>Selected clock domain · workload-tree aggregates or root-thread counts, not per-thread attribution. Hardware, software and raw perf events are distinguished below; software task-clock is not a hardware metric.</p></div><span id="pmu-count"></span></div><p class="io-note">Timeline pmu.EVENT.raw samples are cumulative raw counts, not rates. A missing or failed read is unknown, not zero. Scaled count = raw × enabled / running is an estimate under multiplexing, not an exact count. Events are independently scheduled: IPC and cache-miss ratios are estimates, not jointly scheduled measurements; only valid final pairs yield metrics.</p><div class="io-wrap"><table id="pmu-events"><thead><tr><th>Event / perf type</th><th>PID / shard</th><th>Scope / privilege</th><th>Status / error</th><th>Raw / unit</th><th>Enabled / running (exact ns)</th><th>Running %</th><th>Scaled estimate</th><th>Final read / samples</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-event-pager"></div><h3>Estimated ratios <span id="pmu-metric-count"></span></h3><div class="io-wrap"><table id="pmu-metrics"><thead><tr><th>Shard</th><th>IPC estimate (instructions / cycles)</th><th>Cache-miss estimate (%)</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-metric-pager"></div><details id="pmu-hosts"><summary>Host context at launch (not continuously sampled CPU frequency) <span id="pmu-host-count"></span></summary><p class="io-note">Kernel, CPUID model/vendor, affinity, CPU0 cache, NUMA and frequency context where available. Frequency metadata is launch-time context, not a continuous frequency trace.</p><div id="pmu-host-list"></div><div class="io-pager" id="pmu-host-pager"></div><div id="pmu-host-detail"></div></details></section>`);
@@ -221,6 +238,12 @@ class Viewer {
       this.get('range-label').after(this.windowStatus);
       this.get('io-toolbar').after(this.fileControls);
       this.windowStatus.textContent = 'Loading window…';
+      const retry = node('button', '', 'Retry window');
+      retry.id = 'retry-window'; retry.type = 'button'; retry.hidden = true;
+      retry.addEventListener('click', () => {
+        this.windowFailed = false; this.attemptedScopes = emptyScopes(); retry.hidden = true; this.schedule();
+      });
+      this.windowStatus.after(retry);
     }
     if (report.tracks.some(track => track.kind === 'system')) for (const [kind, label] of [['cpu', 'CPU ▸'], ['memory', 'Memory ▸']] as const) {
       const button = node('button', '', label);
@@ -254,11 +277,29 @@ class Viewer {
     this.get('zoom-in').addEventListener('click', () => this.zoom(0.5));
     this.get('zoom-out').addEventListener('click', () => this.zoom(2));
     this.get('fit-view').addEventListener('click', () => this.fit());
+    this.get('select-range').addEventListener('click', () => {
+      this.selectRangeMode = !this.selectRangeMode;
+      this.get('select-range').setAttribute('aria-pressed', String(this.selectRangeMode));
+      this.canvas.style.cursor = this.selectRangeMode ? 'crosshair' : '';
+    });
+    this.get('zoom-selection').addEventListener('click', () => {
+      if (!this.timeRange) return;
+      this.nsPerPx = Math.max(1, Number(this.timeRange.end - this.timeRange.start) / this.plotWidth());
+      this.start = this.clampStart(this.timeRange.start); this.schedule();
+    });
+    this.get('filter-selection').addEventListener('click', () => {
+      if (!this.timeRange) return;
+      this.timeFilter = { ...this.timeRange };
+      this.selection = undefined; this.updateRelated(); this.showDetails();
+      this.updateRangeControls(); this.schedule();
+    });
+    this.get('clear-selection').addEventListener('click', () => this.clearRange());
     this.scroll.addEventListener('scroll', () => { this.hideTooltip(); this.schedule(); });
     this.scroll.addEventListener('keydown', event => {
       if (event.key === '+' || event.key === '=') { this.zoom(0.5); event.preventDefault(); }
       else if (event.key === '-') { this.zoom(2); event.preventDefault(); }
       else if (event.key === 'Home') { this.fit(); event.preventDefault(); }
+      else if (event.key === 'Escape') { this.clearRange(); event.preventDefault(); }
       else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         const step = BigInt(Math.round(this.plotWidth() * this.nsPerPx / 5));
         this.start = this.clampStart(this.start + (event.key === 'ArrowRight' ? step : -step));
@@ -268,9 +309,13 @@ class Viewer {
     // Let the browser handle wheel/trackpad scrolling and delta modes naturally.
     // Time zoom is explicit (buttons/keyboard), never an accidental wheel gesture.
     this.canvas.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 && event.button !== 1) return;
+      event.preventDefault(); this.scroll.focus({ preventScroll: true });
       this.canvas.setPointerCapture(event.pointerId);
-      this.drag = { x: event.clientX, y: event.clientY, start: this.start, moved: false };
+      const inPlot = event.clientX - this.canvas.getBoundingClientRect().left >= LABEL_WIDTH;
+      this.drag = { x: event.clientX, y: event.clientY, start: this.start, moved: false,
+        selecting: inPlot && event.button === 0 && (event.shiftKey || this.selectRangeMode),
+        anchor: this.pointerTime(event.clientX), previous: this.timeRange };
     });
     this.canvas.addEventListener('pointermove', event => {
       this.hover(event);
@@ -278,7 +323,11 @@ class Viewer {
       const dx = event.clientX - this.drag.x;
       if (Math.abs(dx) + Math.abs(event.clientY - this.drag.y) > 4) this.drag.moved = true;
       if (this.drag.moved && this.drag.x - this.canvas.getBoundingClientRect().left >= LABEL_WIDTH) {
-        this.start = this.clampStart(this.drag.start - BigInt(Math.round(dx * this.nsPerPx)));
+        if (this.drag.selecting) {
+          const at = this.pointerTime(event.clientX), anchor = this.drag.anchor;
+          this.timeRange = at === anchor ? undefined : { start: at < anchor ? at : anchor, end: at > anchor ? at : anchor };
+          this.updateRangeControls(); this.hideTooltip();
+        } else this.start = this.clampStart(this.drag.start - BigInt(Math.round(dx * this.nsPerPx)));
         this.schedule();
       }
     });
@@ -286,9 +335,15 @@ class Viewer {
       if (!this.drag) return;
       const moved = this.drag.moved;
       this.drag = undefined;
-      if (!moved) this.onClick(event.offsetX, event.offsetY);
+      if (this.canvas.hasPointerCapture(event.pointerId)) this.canvas.releasePointerCapture(event.pointerId);
+      if (!moved && event.button === 0) this.onClick(event.offsetX, event.offsetY);
     });
-    this.canvas.addEventListener('pointercancel', () => { this.drag = undefined; });
+    const cancelDrag = () => {
+      if (this.drag?.selecting) this.timeRange = this.drag.previous;
+      this.drag = undefined; this.updateRangeControls(); this.schedule();
+    };
+    this.canvas.addEventListener('pointercancel', cancelDrag);
+    this.canvas.addEventListener('lostpointercapture', cancelDrag);
     this.canvas.addEventListener('pointerleave', () => this.hideTooltip());
     new ResizeObserver(() => { this.buildRows(); this.schedule(); }).observe(this.scroll);
     window.addEventListener('resize', () => { this.buildRows(); this.schedule(); });
@@ -977,7 +1032,7 @@ class Viewer {
     const hit = this.hitAt(x, y);
     const row = x < LABEL_WIDTH ? this.rows[lowerBound(this.rows, row => row.top + row.height > y + this.scroll.scrollTop)] : undefined;
     if (!hit && !row) { this.hideTooltip(); return; }
-    const label = row ? row.label : hit!.selection.kind === 'span' ? hit!.selection.item.span.name : hit!.selection.kind === 'io' ? `${hit!.selection.graph.label} · ${this.ioMetric}` : hit!.selection.item.counter.name;
+    const label = row ? row.label : hit!.selection.kind === 'span' ? hit!.selection.item.span.name : hit!.selection.kind === 'io' || hit!.selection.kind === 'storage' ? `${hit!.selection.graph.label} · ${this.ioMetric}` : hit!.selection.item.counter.name;
     this.tooltip.textContent = label;
     this.canvas.title = label;
     this.tooltip.hidden = false;
@@ -986,11 +1041,39 @@ class Viewer {
   }
 
   private fit(): void {
+    this.clearRange();
     const extent = this.extent();
     // Numeric conversion is restricted to the view-relative domain extent.
     this.nsPerPx = Math.max(1, Number(extent) / this.plotWidth());
     this.start = 0n;
     this.schedule();
+  }
+
+  private pointerTime(clientX: number): bigint {
+    const x = clamp(clientX - this.canvas.getBoundingClientRect().left - LABEL_WIDTH, 0, this.plotWidth());
+    const at = xToTime(x, this.start, this.nsPerPx);
+    return at < 0n ? 0n : at > this.extent() ? this.extent() : at;
+  }
+
+  private clearRange(): void {
+    this.drag = undefined; this.timeRange = undefined; this.timeFilter = undefined;
+    this.updateRangeControls(); this.schedule();
+  }
+
+  private updateRangeControls(): void {
+    for (const id of ['zoom-selection', 'filter-selection']) (this.get(id) as HTMLButtonElement).disabled = !this.timeRange;
+    (this.get('clear-selection') as HTMLButtonElement).disabled = !this.timeRange && !this.timeFilter;
+    const text = (range: TimeRange) => `${formatNs(range.start)}–${formatNs(range.end)} (${formatNs(range.end - range.start)})`;
+    const label = this.get('selection-range');
+    label.textContent = `${this.timeRange ? `Selected ${text(this.timeRange)}` : 'Shift-drag to select a time range'}${this.timeFilter ? ` · Timeline filter ${text(this.timeFilter)} · summaries remain capture-wide` : ''}`;
+    label.title = this.timeRange ? `${this.timeRange.start}–${this.timeRange.end} ns · domain-relative` : '';
+    label.dataset.startNs = this.timeRange?.start.toString() ?? '';
+    label.dataset.endNs = this.timeRange?.end.toString() ?? '';
+    label.dataset.filtered = String(!!this.timeFilter);
+  }
+
+  private rangePixels(range: TimeRange): [number, number] {
+    return [range.start, range.end].map(time => clamp(LABEL_WIDTH + timeToX(time, this.start, this.nsPerPx), LABEL_WIDTH + 1, this.scroll.clientWidth)) as [number, number];
   }
 
   private zoom(factor: number, cursorX = this.plotWidth() / 2): void {
@@ -1041,7 +1124,7 @@ class Viewer {
     if (!viewer || !this.domain || !this.plotWidth()) return;
     const begin = lowerBound(this.rows, row => row.top + row.height > this.scroll.scrollTop);
     const visible = this.rows.slice(begin).filter(row => row.top < this.scroll.scrollTop + this.scroll.clientHeight);
-    const rawTracks = [...new Set(visible.filter(row => row.kind === 'track' || row.kind === 'counter' && !row.system)
+    const rawTracks = [...new Set(visible.filter(row => row.kind === 'track')
       .map(row => row.track?.id).filter((id): id is string => !!id))];
     const rawScopes = [...new Set(visible.filter(row => row.io).map(row => row.io!.key))];
     const systemIds = new Set<string>();
@@ -1052,29 +1135,51 @@ class Viewer {
       else if (row.system) for (const track of this.report.tracks) if (track.kind === 'system' && !track.parent &&
         track.details.resource === row.system && shards.get(track.shard)?.domain === this.domain.id) systemIds.add(track.id);
     }
+    for (const row of visible) if (row.storage) for (const leaf of row.storage.leaves) systemIds.add(leaf.id);
     const end = this.start + this.visibleDuration();
     const request = { snapshot: viewer.snapshot, domain: this.domain.id, start_ns: this.start.toString(),
       end_ns: (end < this.extent() ? end : this.extent()).toString(), pixels: clamp(Math.round(this.plotWidth()), 64, 4096),
-      tracks: rawTracks.slice(0, 64), systems: [...systemIds].slice(0, 1024), io_scopes: rawScopes.slice(0, 32), filesystem: this.ioFilesystem };
+      tracks: rawTracks, systems: [...systemIds], io_scopes: rawScopes, filesystem: this.ioFilesystem };
     if (BigInt(request.end_ns) <= this.start) return;
-    const key = JSON.stringify(request);
-    if (key === this.windowKey) return;
-    this.windowKey = key;
-    this.windowScopeLimited = rawTracks.length > 64 || rawScopes.length > 32 || systemIds.size > 1024;
+    const key = windowIdentity(request);
+    if (key !== this.windowKey) {
+      this.windowKey = key;
+      this.windowAbort?.abort(); this.windowAbort = undefined;
+      if (this.windowTimer) clearTimeout(this.windowTimer);
+      this.windowTimer = undefined;
+      this.windowCache = new WindowCache(); this.windowFailed = false;
+      this.windowScopeLimited = false;
+      this.visibleWindowKey = ''; this.get('retry-window').hidden = true;
+    }
+    const visibleKey = JSON.stringify([rawTracks, [...systemIds], rawScopes]);
+    if (visibleKey !== this.visibleWindowKey) {
+      this.visibleWindowKey = visibleKey; this.attemptedScopes = emptyScopes();
+    }
+    if (this.windowAbort || this.windowFailed) return;
+    const missing = this.windowCache.missing(request);
+    for (const kind of ['tracks', 'systems', 'io_scopes'] as const)
+      missing[kind] = missing[kind].filter(id => !this.attemptedScopes[kind].includes(id));
+    if (!hasScopes(missing)) {
+      if (this.windowTimer) clearTimeout(this.windowTimer);
+      this.windowTimer = undefined;
+      const result = this.windowCache.merged();
+      if (result) this.showWindowStatus(result);
+      else {
+        this.windowStatus.textContent = 'No visible rows to load'; this.windowStatus.dataset.state = 'ready';
+      }
+      return;
+    }
     if (this.windowTimer) clearTimeout(this.windowTimer);
-    this.windowAbort?.abort();
-    this.windowStatus.textContent = 'Loading window · previous data may be stale';
+    const batch = { ...request, tracks: missing.tracks.slice(0, 64), systems: missing.systems.slice(0, 1024), io_scopes: missing.io_scopes.slice(0, 32) };
+    this.windowStatus.textContent = this.loadedWindowKey === key ? 'Loading additional rows · reusing cached data' : 'Loading window · previous data may be stale';
     this.windowStatus.dataset.state = 'loading';
-    this.windowTimer = setTimeout(() => { this.windowTimer = undefined; void this.loadWindow(key, request); }, 120);
+    this.windowTimer = setTimeout(() => { this.windowTimer = undefined; void this.loadWindow(key, batch); }, 120);
   }
 
-  private async loadWindow(key: string, request: { snapshot: string; domain: string; start_ns: string; end_ns: string;
-    pixels: number; tracks: string[]; systems: string[]; io_scopes: string[]; filesystem: string }): Promise<void> {
+  private async loadWindow(key: string, request: WindowRequest): Promise<void> {
     const viewer = this.report.viewer!;
-    const cached = this.windowCache.get(key);
-    if (cached) { this.windowCache.delete(key); this.windowCache.set(key, cached); this.applyWindow(cached); return; }
     const path = localEndpoint(viewer.endpoint);
-    if (!path) { this.windowStatus.textContent = 'Window unavailable: invalid local endpoint'; return; }
+    if (!path) { this.windowStatus.textContent = 'Window unavailable: invalid local endpoint'; this.windowFailed = true; return; }
     const controller = new AbortController(); this.windowAbort = controller;
     try {
       const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal: controller.signal });
@@ -1084,15 +1189,17 @@ class Viewer {
       if (result.snapshot !== viewer.snapshot || result.domain !== request.domain || result.start_ns !== request.start_ns ||
         result.end_ns !== request.end_ns || !Array.isArray(result.spans) || !Array.isArray(result.counters) ||
         !Array.isArray(result.dependencies) || !result.io) throw new Error('Invalid window response');
-      this.windowCache.set(key, result);
-      while (this.windowCache.size > 2) this.windowCache.delete(this.windowCache.keys().next().value!);
-      this.applyWindow(result);
+      this.windowCache.add(request, result);
+      for (const kind of ['tracks', 'systems', 'io_scopes'] as const) this.attemptedScopes[kind].push(...request[kind]);
+      this.windowScopeLimited = this.windowCache.evicted;
+      this.applyWindow(this.windowCache.merged()!);
     } catch (error) {
       if (!controller.signal.aborted && this.windowKey === key) {
         this.windowStatus.textContent = `Window failed (${error instanceof Error ? error.message : 'network error'}) · previous data may be stale`;
         this.windowStatus.dataset.state = 'error';
+        this.windowFailed = true; this.get('retry-window').hidden = false;
       }
-    } finally { if (this.windowAbort === controller) this.windowAbort = undefined; }
+    } finally { if (this.windowAbort === controller) { this.windowAbort = undefined; this.schedule(); } }
   }
 
   private applyWindow(result: WindowResponse): void {
@@ -1105,6 +1212,7 @@ class Viewer {
     this.currentIoBins = result.io;
     setIoWindow(this.report, result.io);
     this.ioPlots = new WeakMap();
+    this.storagePlots = new WeakMap();
     this.data = indexReport(this.report);
     if (old?.kind === 'span') {
       const span = old.item.span;
@@ -1116,12 +1224,32 @@ class Viewer {
       const found = [...(this.data.get(counter.track)?.counters.values() ?? [])].flat().find(item =>
         item.counter.timestamp_ns === counter.timestamp_ns && item.counter.name === counter.name && item.counter.value === counter.value);
       this.selection = found ? { kind: 'counter', item: found } : undefined;
-    } else if (old?.kind === 'io') this.selection = undefined;
+    } else if (old?.kind === 'io' || old?.kind === 'storage') this.selection = undefined;
     this.updateRelated(); this.showDetails();
+    this.showWindowStatus(result);
+    this.buildRows(); this.schedule();
+  }
+
+  private showWindowStatus(result: WindowResponse): void {
     this.windowStatus.dataset.state = result.limited || this.windowScopeLimited ? 'limited' : 'ready';
     const bins = Object.values(result.io).reduce((count, values) => count + values.length, 0);
-    this.windowStatus.textContent = `Loaded ${formatNs(BigInt(result.start_ns))}–${formatNs(BigInt(result.end_ns))} · ${result.spans.length} spans · ${result.counters.length} counter samples · ${bins} I/O bins${result.limited || this.windowScopeLimited ? ' · limited: zoom in / expand fewer tracks' : ''}${result.warnings?.length ? ` · ${result.warnings.join('; ')}` : ''}`;
-    this.buildRows(); this.schedule();
+    this.windowStatus.textContent = `Loaded ${formatNs(BigInt(result.start_ns))}–${formatNs(BigInt(result.end_ns))} · ${result.spans.length} spans · ${result.counters.length} counter samples · ${bins} I/O bins${this.windowScopeLimited ? ' · cache limit: oldest rows may reload' : ''}${result.limited ? ' · limited: zoom in / expand fewer tracks' : ''}${result.warnings?.length ? ` · ${result.warnings.join('; ')}` : ''}`;
+  }
+
+  private emptyWindowMessage(row: TimelineRow, loading: string, empty: string): string {
+    if (!this.report.viewer) return empty;
+    let covered = this.hasWindowData && this.loadedWindowKey === this.windowKey;
+    if (row.io) covered &&= this.windowCache.covers('io_scopes', row.io.key);
+    else if (row.storage) covered &&= row.storage.leaves.every(track => this.windowCache.covers('systems', track.id));
+    else if (row.system && row.track?.id.startsWith('system:')) {
+      const shards = new Set(this.report.shards.filter(shard => shard.domain === this.domain?.id).map(shard => shard.id));
+      covered &&= this.report.tracks.filter(track => track.kind === 'system' && !track.parent &&
+        track.details.resource === row.system && shards.has(track.shard)).every(track => this.windowCache.covers('systems', track.id));
+    } else if (row.track) covered &&= this.windowCache.covers('systems', row.track.id);
+    if (covered) return empty;
+    if (this.windowFailed) return 'Window unavailable · Retry window';
+    if (this.windowCache.evicted && this.windowStatus.dataset.state !== 'loading') return 'Cache limit · zoom in / expand fewer rows';
+    return loading;
   }
 
   private showFileControls(thread: string): void {
@@ -1174,6 +1302,7 @@ class Viewer {
       this.data = indexReport(this.report);
       setIoWindow(this.report, this.currentIoBins);
       this.ioPlots = new WeakMap();
+      this.storagePlots = new WeakMap();
       if (this.activeFiles === thread) this.showFileControls(thread);
       this.buildRows(); this.schedule();
     } catch (error) {
@@ -1209,15 +1338,20 @@ class Viewer {
         for (const x of ticks) { ctx.moveTo(x + .5, y + 1); ctx.lineTo(x + .5, y + row.height - 1); }
         ctx.stroke();
       }
+      if (this.timeFilter) {
+        const [left, right] = this.rangePixels(this.timeFilter);
+        ctx.beginPath(); ctx.rect(left, y, right - left, row.height); ctx.clip();
+      }
       if (row.kind === 'track') this.drawSpans(ctx, row, y, viewEnd, anchors);
       if (row.kind === 'counter') this.drawCounter(ctx, row, y, viewEnd);
       if (row.kind === 'io') this.drawIoGraph(ctx, row, y, viewEnd);
+      if (row.kind === 'storage') this.drawStorageGraph(ctx, row, y, viewEnd);
       ctx.restore();
       ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
-      ctx.font = row.kind === 'shard' || row.kind === 'rank' || row.system && row.depth === 0 ? '600 12px system-ui' : '12px system-ui';
+      ctx.font = row.kind === 'shard' || row.kind === 'rank' || (row.system || row.storage) && row.depth === 0 ? '600 12px system-ui' : '12px system-ui';
       const indent = Math.min(125, 15 + row.depth * 17);
       if (row.hasChildren) { ctx.fillStyle = this.colors.muted; ctx.fillText((row.expanded ?? !this.collapsed.has(row.key)) ? '▾' : '▸', indent, y + row.height / 2 + 4); }
-      ctx.fillStyle = row.system ? this.colors[row.system] : row.kind === 'shard' ? this.colors.heading : this.colors.label;
+      ctx.fillStyle = row.system ? this.colors[row.system] : row.storage ? this.colors.storage : row.kind === 'shard' ? this.colors.heading : this.colors.label;
       const labelX = indent + (row.hasChildren ? 16 : 4);
       const maxWidth = LABEL_WIDTH - labelX - 10;
       ctx.fillText(this.ellipsize(ctx, row.label, maxWidth), labelX, y + row.height / 2 + (row.system ? -3 : 4));
@@ -1225,6 +1359,12 @@ class Viewer {
         ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
         const subtitle = row.system === 'cpu' ? 'CPU utilization · 0–100%' : 'Memory used · includes cache';
         ctx.fillText(this.ellipsize(ctx, subtitle, maxWidth), labelX, y + row.height / 2 + 13);
+      }
+      if (row.storage) {
+        ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
+        const subtitle = row.storage.backend === 'block' ? 'Host block-device layer · not application-only' :
+          row.storage.backend === 'lustre' ? 'Client bulk RPC · not server physical I/O' : 'Client server payload · not server physical I/O';
+        ctx.fillText(this.ellipsize(ctx, subtitle, maxWidth), labelX, y + row.height / 2 + 14);
       }
       if (row.kind === 'track' && row.track && row.height >= 52) {
         ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
@@ -1234,7 +1374,26 @@ class Viewer {
         ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.partial; ctx.fillText('PARTIAL', LABEL_WIDTH - 55, y + row.height / 2 + 4);
       }
     }
-    this.drawLinks(ctx, anchors);
+    ctx.save();
+    if (this.timeFilter) {
+      const [left, right] = this.rangePixels(this.timeFilter);
+      ctx.beginPath(); ctx.rect(left, 0, right - left, height); ctx.clip();
+      const visibleHits = this.hits.flatMap(hit => {
+        const x = Math.max(left, hit.x), end = Math.min(right, hit.x + hit.width);
+        return end > x ? [{ ...hit, x, width: end - x }] : [];
+      });
+      this.hits.splice(0, this.hits.length, ...visibleHits);
+    }
+    this.drawLinks(ctx, anchors); ctx.restore();
+    const range = this.timeRange ?? this.timeFilter;
+    if (range) {
+      const [left, right] = this.rangePixels(range);
+      if (right > left) {
+        ctx.save(); ctx.fillStyle = this.colors.selected; ctx.globalAlpha = .13;
+        ctx.fillRect(left, 0, right - left, height); ctx.globalAlpha = .85;
+        ctx.strokeStyle = this.colors.selected; ctx.strokeRect(left, .5, right - left, height - 1); ctx.restore();
+      }
+    }
     ctx.fillStyle = this.colors.border; ctx.fillRect(LABEL_WIDTH - 1, 0, 1, height);
     if (!this.rows.length) {
       ctx.fillStyle = this.colors.muted; ctx.font = '14px system-ui';
@@ -1294,7 +1453,9 @@ class Viewer {
     if (!data) return;
     const query = this.filter.value;
     const wholeTrack = matchesFilter(track.name, track.kind, track.rank, query);
-    const spans = visibleSpans(data.spans, this.start, end, MAX_DRAWN_SPANS);
+    const begin = this.timeFilter && this.timeFilter.start > this.start ? this.timeFilter.start : this.start;
+    const finish = this.timeFilter && this.timeFilter.end < end ? this.timeFilter.end : end;
+    const spans = finish > begin ? visibleSpans(data.spans, begin, finish, MAX_DRAWN_SPANS) : [];
     for (const item of spans) {
       const span = item.span;
       if (query && !wholeTrack && !matchesFilter(`${track.name} ${span.name}`, span.category, track.rank, query)) continue;
@@ -1361,9 +1522,8 @@ class Viewer {
     const top = y + 10, bottom = y + row.height - 22, height = bottom - top;
     ctx.font = '11px system-ui'; ctx.fillStyle = this.colors.muted;
     if (!samples.length) {
-      ctx.fillText(this.report.viewer && (!this.hasWindowData || this.loadedWindowKey !== this.windowKey) ?
-        this.windowStatus.textContent?.startsWith('Window failed') ? 'System window unavailable; previous data may be stale' : 'Loading system samples…' :
-        row.depth === 0 ? 'No aligned samples; expand hosts' : this.report.viewer ? 'No observed samples in this window' : 'No retained samples',
+      ctx.fillText(this.emptyWindowMessage(row, 'Loading system samples…',
+        row.depth === 0 ? 'No aligned samples; expand hosts' : this.report.viewer ? 'No observed samples in this window' : 'No retained samples'),
       LABEL_WIDTH + 8, y + row.height / 2);
       return;
     }
@@ -1450,9 +1610,8 @@ class Viewer {
       plot = { bins, values, starts: bins.map(bin => BigInt(bin.start_ns)), ends: bins.map(bin => BigInt(bin.start_ns) + BigInt(bin.duration_ns)), max: max || 1 }; cache.set(this.ioMetric, plot);
     }
     ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
-    if (!plot.bins.length) { ctx.fillText(this.report.viewer ? !this.hasWindowData || this.loadedWindowKey !== this.windowKey ?
-      this.windowStatus.textContent?.startsWith('Window failed') ? 'I/O window unavailable; previous data may be stale' : 'Loading I/O window…' :
-      'No observed I/O bins in this window' : 'No full-capture I/O bins available for this selection', LABEL_WIDTH + 8, y + 32); return; }
+    if (!plot.bins.length) { ctx.fillText(this.emptyWindowMessage(row, 'Loading I/O window…', this.report.viewer ?
+      'No observed I/O bins in this window' : 'No full-capture I/O bins available for this selection'), LABEL_WIDTH + 8, y + 32); return; }
     const first = lowerBound(plot.ends, time => time > this.start);
     const last = lowerBound(plot.starts, time => time >= end);
     const palette = this.theme === 'light' ? ['#176b61', '#af661c'] : ['#6bcdb0', '#e5b46d'];
@@ -1505,6 +1664,70 @@ class Viewer {
     ctx.fillText(`Bin width ${formatNs(BigInt(binWidth))} · ${last - first} visible bins · each step is an average, not one operation`, LABEL_WIDTH + 8, y + row.height - 5);
   }
 
+  private drawStorageGraph(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
+    const graph = row.storage!;
+    let cache = this.storagePlots.get(graph);
+    if (!cache) { cache = new Map(); this.storagePlots.set(graph, cache); }
+    let bins = cache.get(this.ioMetric);
+    if (!bins) { bins = storageBins(graph, this.data, this.ioMetric); cache.set(this.ioMetric, bins); }
+    const top = y + 9, bottom = y + row.height - 24, height = bottom - top;
+    ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
+    if (!bins.length) {
+      ctx.fillText(this.emptyWindowMessage(row, 'Loading storage window…', 'No observed storage samples in this window (missing is not zero)'), LABEL_WIDTH + 8, y + 31);
+      return;
+    }
+    const first = lowerBound(bins, bin => bin.start + bin.duration > this.start);
+    const last = lowerBound(bins, bin => bin.start >= end);
+    let max = 0;
+    for (const bin of bins) for (const value of bin.values) if (Number.isFinite(value)) max = Math.max(max, value);
+    max ||= 1;
+    const palette = [this.colors.storageRead, this.colors.storageWrite];
+    const unit = this.ioMetric === 'throughput' ? 'MiB/s' : this.ioMetric === 'iops' ? 'ops/s' : 'ms';
+    for (const fraction of [0, .5, 1]) {
+      const py = bottom - fraction * height;
+      ctx.strokeStyle = this.colors.border; ctx.beginPath(); ctx.moveTo(LABEL_WIDTH + 1, py); ctx.lineTo(this.scroll.clientWidth, py); ctx.stroke();
+    }
+    for (let side = 0; side < 2; side++) {
+      ctx.strokeStyle = palette[side]!; ctx.lineWidth = 1.5; ctx.beginPath();
+      let previous: { x: number; y: number } | undefined;
+      for (let i = first; i < last; i++) {
+        const bin = bins[i]!, value = bin.values[side]!;
+        if (!Number.isFinite(value)) { previous = undefined; continue; }
+        const interval = bin.windows[side];
+        if (!interval) { previous = undefined; continue; }
+        const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(interval.start, this.start, this.nsPerPx));
+        const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(interval.start + interval.duration, this.start, this.nsPerPx));
+        if (right <= left) continue;
+        const py = bottom - height * value / max;
+        ctx.fillStyle = palette[side]!; ctx.globalAlpha = .12; ctx.fillRect(left, py, right - left, bottom - py); ctx.globalAlpha = 1;
+        if (previous && !bin.gapBeforeSides[side] && Math.abs(previous.x - left) < 1) { ctx.moveTo(left, previous.y); ctx.lineTo(left, py); }
+        else ctx.moveTo(left, py);
+        ctx.lineTo(right, py); previous = { x: right, y: py };
+      }
+      ctx.stroke();
+    }
+    for (let i = first; i < last; i++) {
+      const bin = bins[i]!;
+      if (!bin.values.some(Number.isFinite)) continue;
+      const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(bin.start, this.start, this.nsPerPx));
+      const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(bin.start + bin.duration, this.start, this.nsPerPx));
+      if (right <= left) continue;
+      this.hits.push({ x: left, y: top, width: right - left, height, selection: { kind: 'storage', bin, graph } });
+      if (this.selection?.kind === 'storage' && this.selection.graph.key === graph.key && this.selection.bin === bin) {
+        ctx.strokeStyle = this.colors.selected; ctx.strokeRect(left, top, right - left, height);
+      }
+    }
+    ctx.textAlign = 'right'; ctx.font = '600 10px system-ui';
+    for (const fraction of [0, 1]) {
+      const label = `${(max * fraction).toLocaleString(undefined, { maximumSignificantDigits: 3 })} ${unit}`;
+      ctx.strokeStyle = this.colors.background; ctx.lineWidth = 3;
+      ctx.strokeText(label, this.scroll.clientWidth - 8, fraction ? top + 9 : bottom - 3);
+      ctx.fillStyle = this.colors.heading; ctx.fillText(label, this.scroll.clientWidth - 8, fraction ? top + 9 : bottom - 3);
+    }
+    ctx.lineWidth = 1; ctx.textAlign = 'left'; ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
+    ctx.fillText(`${bins.length} observed windows · ${graph.leaves.length} unique host resources · ${graph.leaves.length > 1 ? 'sampled aggregate estimate' : 'host resource'} · partial coverage in inspector`, LABEL_WIDTH + 8, y + row.height - 5);
+  }
+
   private drawLinks(ctx: CanvasRenderingContext2D, anchors: Map<string, { x: number; y: number }>): void {
     if (this.selection?.kind !== 'span' || !this.selection.item.span.correlation) return;
     const selected = this.selection.item.span.correlation;
@@ -1531,11 +1754,12 @@ class Viewer {
             if (!this.filePages.has(thread)) void this.loadFiles(thread, 0);
           } else if (thread && !opening && this.activeFiles === thread) { this.activeFiles = undefined; this.fileControls.replaceChildren(); }
         }
-        if ((row.system || (row.io && row.expanded && this.collapsed.has(row.key))) && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
+        if ((row.system || row.storage || (row.io && row.expanded && this.collapsed.has(row.key))) && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
         else if (this.collapsed.has(row.key)) this.collapsed.delete(row.key); else this.collapsed.add(row.key);
         this.buildRows(); this.schedule();
       } else if (row?.kind === 'shard') this.showShard(row.shard);
       else if (row?.track) this.showTrack(row.track);
+      else if (row?.storage) { this.selection = undefined; this.detail.replaceChildren(node('h3', '', row.label), node('p', 'muted', 'Selected backend only · expand to filesystem and host resource; no cross-layer physical total.')); }
       return;
     }
     const hit = this.hitAt(x, y);
@@ -1579,7 +1803,7 @@ class Viewer {
   private showDetails(): void {
     this.detail.replaceChildren();
     if (!this.selection) {
-      this.detail.append(node('div', 'empty-detail', 'Select a span or counter sample to inspect exact values, attributes, and correlations.'));
+      this.detail.append(node('div', 'empty-detail', 'Select a span or counter sample to inspect exact values, attributes, and correlations. Storage and I/O windows can also be inspected.'));
       return;
     }
     const dl = node('dl', 'details-list');
@@ -1613,6 +1837,33 @@ class Viewer {
       put(dl, 'div', 'Weighted mean latency', formatMeanLatency((BigInt(bin.read_latency_ns) + BigInt(bin.write_latency_ns)).toString(), (BigInt(bin.read_ops) + BigInt(bin.write_ops)).toString()), rates.meanLatencyNs);
       put(dl, 'div', 'Other operations / errors', `${bin.other_ops} / ${bin.errors}`);
       put(dl, 'div', 'Max latency (all calls)', BigInt(bin.read_ops) + BigInt(bin.write_ops) + BigInt(bin.other_ops) > 0n ? formatMeanLatency(bin.max_latency_ns, '1') : '—', `${bin.max_latency_ns} ns`);
+    } else if (this.selection.kind === 'storage') {
+      const { bin, graph } = this.selection;
+      this.detail.append(node('h3', '', graph.label), node('p', 'muted', graph.backend === 'block' ?
+        'Host block-device layer I/O · virtual disks and shared/unmapped devices cannot be apportioned to an application or filesystem.' :
+        graph.backend === 'lustre' ? 'Lustre client bulk RPC I/O · not server physical I/O or metadata RPC bandwidth.' :
+          'NFS client server payload I/O · not server physical I/O or application-only bandwidth.'));
+      put(dl, 'div', 'Observed window', `${formatNs(bin.start)}–${formatNs(bin.start + bin.duration)} · ${formatNs(bin.duration)} plotted extent`);
+      put(dl, 'div', 'Read / write', bin.values.map(value => Number.isFinite(value) ? `${value.toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${this.ioMetric === 'throughput' ? 'MiB/s' : this.ioMetric === 'iops' ? 'ops/s' : 'ms'}` : 'unavailable').join(' / '));
+      put(dl, 'div', 'Fresh contributors read / write', bin.coverage.join(' / ') + ' · missing is not zero');
+      put(dl, 'div', 'Measurement basis', `${graph.leaves.length > 1 || new Set(bin.members.map(item => item.timestamp_ns)).size > 1 ? 'Sampled aggregate estimate from fresh rates (not total bytes over the grid)' : 'Single-resource observed counter window'} · independent layers must not be summed; not application-only`);
+      if (bin.gapBefore) put(dl, 'div', 'Continuity', 'Gap or missing source before this window; no interpolation');
+      for (const counter of bin.members) {
+        const track = this.report.tracks.find(track => track.id === counter.track);
+        const group = node('details', 'storage-member'); group.append(node('summary', '', `${track?.name || counter.track} · ${counter.name} · ${counter.value} ${counter.unit}`));
+        const attrs = node('dl', 'details-list');
+        put(attrs, 'div', 'Sample end', `${formatNs(BigInt(counter.timestamp_ns))} (${counter.timestamp_ns} ns)`);
+        const window = counter.attributes['storage.window_ns'];
+        if (window) put(attrs, 'div', 'Measured interval', `${formatNs(BigInt(window))} ending at sample timestamp`, `${window} ns`);
+        put(attrs, 'div', 'Observed value', counter.unit === 'B/s' ? `${(Number(counter.value) / 1048576).toLocaleString(undefined, { maximumSignificantDigits: 6 })} MiB/s` :
+          counter.unit === 'ms' ? `${Number(counter.value).toLocaleString(undefined, { maximumSignificantDigits: 6 })} ms` : `${counter.value} ${counter.unit}`, `${counter.value} ${counter.unit}`);
+        for (const [key, value] of Object.entries({ ...track?.details, ...counter.attributes })) {
+          const formatted = /^storage\.(read_bytes|write_bytes)$/.test(key) && /^\d+$/.test(value) ? formatBytes(value) :
+            /^storage\.(interval_ns|window_ns|read_latency_ns|write_latency_ns|busy_ns|weighted_io_ns|read_queue_ns|write_queue_ns|read_rtt_ns|write_rtt_ns|rpc_wait_ns|metadata_wait_ns|metadata_rpc_latency_ns)$/.test(key) && /^\d+$/.test(value) ? formatNs(BigInt(value)) : value;
+          put(attrs, 'div', key, formatted, formatted === value ? undefined : value);
+        }
+        group.append(attrs); this.detail.append(group);
+      }
     } else {
       const { counter, time } = this.selection.item;
       this.detail.append(node('h3', '', counter.name));

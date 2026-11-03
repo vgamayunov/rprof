@@ -12,6 +12,7 @@ mod python_collector;
 mod pytorch_import;
 mod record;
 mod report;
+mod storage_collector;
 mod supervisor;
 mod system_collector;
 mod view;
@@ -118,6 +119,12 @@ pub(crate) struct RecordArgs {
     /// Host CPU/memory sampling interval, including logical CPUs and NUMA nodes.
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
     system_interval_ms: u64,
+    /// Host block-device/NFS/Lustre sampling interval (also enabled by --collect io).
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
+    storage_interval_ms: u64,
+    /// Collect POSIX calls without automatic host storage monitoring.
+    #[arg(long)]
+    no_storage: bool,
     /// Python source roots to instrument (repeatable; default: working directory).
     #[arg(long)]
     python_include: Vec<PathBuf>,
@@ -146,6 +153,7 @@ pub(crate) enum CollectorKind {
     Pmu,
     Python,
     System,
+    Storage,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

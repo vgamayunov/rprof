@@ -13,22 +13,49 @@ const MAX_POINTS: usize = 65_536;
 const MAX_PER_SERIES: usize = 4096;
 const MAX_SAMPLE_BYTES: usize = 1024;
 type Key = (Uuid, u64);
+type SeriesKey = (Uuid, u64, String);
 
 #[derive(Clone, Copy)]
 struct Kind {
     memory: bool,
     root: bool,
+    storage: bool,
+}
+impl Kind {
+    fn matches(self, name: &str) -> bool {
+        if self.storage {
+            [
+                "storage.read.bytes_per_second",
+                "storage.write.bytes_per_second",
+                "storage.read.operations_per_second",
+                "storage.write.operations_per_second",
+                "storage.read.latency_ms",
+                "storage.write.latency_ms",
+            ]
+            .contains(&name)
+        } else {
+            name == if self.memory {
+                "system.memory.used"
+            } else {
+                "system.cpu.utilization"
+            }
+        }
+    }
+    fn limit(self) -> usize {
+        if self.storage { 4096 } else { MAX_SAMPLE_BYTES }
+    }
 }
 struct Metadata {
     count: u64,
     first: u64,
     last: u64,
     root: bool,
+    storage: bool,
 }
 #[derive(Default)]
 pub(crate) struct Discovery {
     tracks: HashMap<Key, Kind>,
-    series: BTreeMap<Key, Metadata>,
+    series: BTreeMap<SeriesKey, Metadata>,
     omitted: u64,
 }
 fn uint(attrs: &BTreeMap<String, Attribute>, key: &str) -> Option<u64> {
@@ -44,14 +71,7 @@ impl Discovery {
         };
         self.tracks
             .get(&(shard, counter.track_id))
-            .is_some_and(|kind| {
-                counter.name
-                    == if kind.memory {
-                        "system.memory.used"
-                    } else {
-                        "system.cpu.utilization"
-                    }
-            })
+            .is_some_and(|kind| kind.matches(&counter.name))
     }
     pub fn observe(&mut self, record: &Record) {
         let Record::Chunk(chunk) = record else { return };
@@ -68,6 +88,19 @@ impl Discovery {
                     Kind {
                         memory: resource == "memory" || resource.starts_with("node:"),
                         root: resource == "cpu" || resource == "memory",
+                        storage: false,
+                    },
+                );
+            }
+            if let Payload::Track(track) = &event.payload
+                && matches!(track.kind, TrackKind::Storage { .. })
+            {
+                self.tracks.insert(
+                    (chunk.shard_id, track.id),
+                    Kind {
+                        memory: false,
+                        root: false,
+                        storage: true,
                     },
                 );
             }
@@ -77,9 +110,10 @@ impl Discovery {
             let Payload::Counter(counter) = &event.payload else {
                 unreachable!()
             };
-            let key = (chunk.shard_id, counter.track_id);
+            let kind = self.tracks[&(chunk.shard_id, counter.track_id)];
+            let key = (chunk.shard_id, counter.track_id, counter.name.clone());
             if (!self.series.contains_key(&key) && self.series.len() == MAX_SERIES)
-                || serde_json::to_vec(event).map_or(true, |v| v.len() > MAX_SAMPLE_BYTES)
+                || serde_json::to_vec(event).map_or(true, |v| v.len() > kind.limit())
             {
                 self.omitted += 1;
                 continue;
@@ -88,7 +122,8 @@ impl Discovery {
                 count: 0,
                 first: counter.timestamp_ns,
                 last: counter.timestamp_ns,
-                root: self.tracks[&key].root,
+                root: kind.root,
+                storage: kind.storage,
             });
             metadata.count += 1;
             metadata.first = metadata.first.min(counter.timestamp_ns);
@@ -157,7 +192,7 @@ struct Series {
 }
 pub(crate) struct Analysis {
     tracks: HashMap<Key, Kind>,
-    series: BTreeMap<Key, Series>,
+    series: BTreeMap<SeriesKey, Series>,
     offsets: HashMap<Uuid, u128>,
     omitted: u64,
 }
@@ -175,23 +210,32 @@ impl Analysis {
             let Some(kind) = self.tracks.get(&key) else {
                 continue;
             };
-            if counter.name
-                != if kind.memory {
-                    "system.memory.used"
-                } else {
-                    "system.cpu.utilization"
-                }
-            {
+            if !kind.matches(&counter.name) {
                 continue;
             }
-            let Some(series) = self.series.get_mut(&key) else {
+            let Some(series) = self.series.get_mut(&(key.0, key.1, counter.name.clone())) else {
                 continue;
             };
-            if serde_json::to_vec(event).map_or(true, |v| v.len() > MAX_SAMPLE_BYTES) {
+            if serde_json::to_vec(event).map_or(true, |v| v.len() > kind.limit()) {
                 continue;
             }
-            let sequence = uint(&event.attributes, "system.sample_index");
-            let interval = uint(&event.attributes, "system.interval_ns").unwrap_or(1_000_000_000);
+            let sequence = uint(
+                &event.attributes,
+                if kind.storage {
+                    "storage.sample_index"
+                } else {
+                    "system.sample_index"
+                },
+            );
+            let interval = uint(
+                &event.attributes,
+                if kind.storage {
+                    "storage.interval_ns"
+                } else {
+                    "system.interval_ns"
+                },
+            )
+            .unwrap_or(1_000_000_000);
             if let Some((time, previous)) = series.previous
                 && (counter.timestamp_ns < time
                     || counter.timestamp_ns.saturating_sub(time) > interval.saturating_mul(2)
@@ -252,6 +296,7 @@ impl Analysis {
     pub fn finish(self, warnings: &mut Vec<String>) -> Vec<ReportCounter> {
         let mut counters = Vec::new();
         let mut reduced = 0u64;
+        let storage = self.series.values().any(|s| s.meta.storage);
         for (_, series) in self.series {
             let mut selected = BTreeMap::new();
             for sample in series
@@ -266,29 +311,34 @@ impl Analysis {
             reduced += series.meta.count.saturating_sub(retained as u64);
             let mut previous_gap = None;
             for (_, mut sample) in selected {
+                let prefix = if series.meta.storage {
+                    "storage"
+                } else {
+                    "system"
+                };
                 let gap = previous_gap.is_some_and(|epoch| sample.gap_epoch != epoch);
                 previous_gap = Some(sample.gap_epoch);
                 sample
                     .counter
                     .attributes
-                    .insert("system.report_gap_before".into(), gap.to_string());
+                    .insert(format!("{prefix}.report_gap_before"), gap.to_string());
                 sample.counter.attributes.insert(
-                    "system.report_samples".into(),
+                    format!("{prefix}.report_samples"),
                     series.meta.count.to_string(),
                 );
                 sample.counter.attributes.insert(
-                    "system.report_retained_samples".into(),
+                    format!("{prefix}.report_retained_samples"),
                     retained.to_string(),
                 );
-                sample
-                    .counter
-                    .attributes
-                    .insert("system.report_interval_ns".into(), series.width.to_string());
+                sample.counter.attributes.insert(
+                    format!("{prefix}.report_interval_ns"),
+                    series.width.to_string(),
+                );
                 counters.push(sample.counter);
             }
         }
         if reduced > 0 {
-            warnings.push(format!("System timeline downsampled {reduced} gauge observations across the full run using a separate {MAX_POINTS}-point budget; endpoints and source gaps are preserved."));
+            warnings.push(format!("{} timeline downsampled {reduced} gauge observations across the full run using a separate {MAX_POINTS}-point budget; endpoints and source gaps are preserved.", if storage { "System/storage" } else { "System" }));
         }
         if self.omitted > 0 {
             warnings.push(format!("{} system gauge observations omitted by series/sample-size limits; missing measurements remain unknown.", self.omitted));

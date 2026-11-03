@@ -25,10 +25,15 @@ const MAX_FILE: u64 = 2 * 1024 * 1024;
 
 // Never unlink an active lease: a new inode would allow two simultaneous owners.
 // Closed/stale zero-byte files are harmless; flock releases on exit/crash.
-fn lease(directory: &Path, session: Uuid, host_id: &str) -> Result<Option<fs::File>> {
+pub(crate) fn lease(
+    directory: &Path,
+    session: Uuid,
+    host_id: &str,
+    collector: &str,
+) -> Result<Option<fs::File>> {
     let uid = unsafe { libc::geteuid() };
     let hash = format!("{:x}", Sha256::digest(host_id.as_bytes()));
-    let path = directory.join(format!("rprof-system-{uid}-{session}-{hash}.lock"));
+    let path = directory.join(format!("rprof-{collector}-{uid}-{session}-{hash}.lock"));
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -190,7 +195,7 @@ impl Running {
             read(Path::new("/proc/sys/kernel/hostname"))?.trim(),
             read(Path::new("/proc/sys/kernel/random/boot_id"))?.trim()
         );
-        let Some(lease) = lease(&std::env::temp_dir(), session, &host_id)? else {
+        let Some(lease) = lease(&std::env::temp_dir(), session, &host_id, "system")? else {
             let mut event = Event::new(
                 now,
                 Payload::Counter(CounterSample {
@@ -613,27 +618,27 @@ mod tests {
     fn host_leases_deduplicate_ranks_but_not_hosts_or_sessions() {
         let directory = tempfile::tempdir().unwrap();
         let session = Uuid::new_v4();
-        let first = lease(directory.path(), session, "host-a/boot-a")
+        let first = lease(directory.path(), session, "host-a/boot-a", "system")
             .unwrap()
             .unwrap();
         assert!(
-            lease(directory.path(), session, "host-a/boot-a")
+            lease(directory.path(), session, "host-a/boot-a", "system")
                 .unwrap()
                 .is_none()
         );
         assert!(
-            lease(directory.path(), session, "host-b/boot-b")
+            lease(directory.path(), session, "host-b/boot-b", "system")
                 .unwrap()
                 .is_some()
         );
         assert!(
-            lease(directory.path(), Uuid::new_v4(), "host-a/boot-a")
+            lease(directory.path(), Uuid::new_v4(), "host-a/boot-a", "system")
                 .unwrap()
                 .is_some()
         );
         drop(first);
         assert!(
-            lease(directory.path(), session, "host-a/boot-a")
+            lease(directory.path(), session, "host-a/boot-a", "system")
                 .unwrap()
                 .is_some()
         );

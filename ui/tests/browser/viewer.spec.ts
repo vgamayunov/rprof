@@ -10,6 +10,68 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, indexReport, integerPlotValues, SPAN_PITCH, SPAN_TOP, timelineRows } from '../../src/model.ts';
 import type { Report } from '../../src/model.ts';
 import { ioFixture } from '../io-fixture.ts';
+import { storageFixture } from '../storage-fixture.ts';
+
+test('offline storage overlays coexist with POSIX, expand by filesystem and keep wheel scrolling', async ({ page }) => {
+  const url = injected('storage-offline', report => Object.assign(report, storageFixture()));
+  await loaded(page, url);
+  const report = storageFixture(), domain = report.shards[0]!.domain, collapsed = defaultTimelineCollapsed(report);
+  const rows = () => timelineRows(report, indexReport(report), domain, '', collapsed);
+  expect(rows().filter(row => row.storage).map(row => row.label)).toEqual([
+    'Block-device I/O total', 'Lustre bulk RPC I/O total', 'NFS server payload I/O total',
+  ]);
+  expect(rows().some(row => row.io)).toBeTruthy();
+  expect(await page.locator('#io-toolbar').isVisible()).toBeTruthy();
+  await page.locator('#io-metric-select').selectOption('latency');
+  const root = rows().find(row => row.storage?.backend === 'block')!;
+  const canvas = page.locator('#timeline-canvas');
+  const scrollTop = await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = top; return element.scrollTop; }, root.top);
+  await canvas.click({ position: { x: 28, y: root.top - scrollTop + root.height / 2 } });
+  collapsed.delete(root.key);
+  expect(rows().filter(row => row.storage?.backend === 'block')).toHaveLength(3);
+  const fs = rows().find(row => row.storage?.backend === 'block' && row.depth === 1)!;
+  const fsScroll = await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = top; return element.scrollTop; }, fs.top);
+  await canvas.click({ position: { x: 40, y: fs.top - fsScroll + fs.height / 2 } });
+  collapsed.delete(fs.key);
+  expect(rows().filter(row => row.storage?.backend === 'block' && row.depth === 2)).toHaveLength(2);
+  await page.locator('#timeline-scroll').hover();
+  await page.mouse.wheel(0, 350);
+  await expect.poll(() => page.locator('#timeline-scroll').evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await page.locator('script[src],link[rel="stylesheet"]').count()).toBe(0);
+});
+
+test('indexed storage requests unique contributing leaf IDs through existing systems field', async ({ page }) => {
+  const url = injected('storage-indexed', report => {
+    const storage = storageFixture(); Object.assign(report, storage);
+    delete report.io_timeline;
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', snapshot: 'storage-snapshot' };
+    report.counters = [];
+  });
+  const source = readFileSync(fileURLToPath(url), 'utf8');
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(source);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const requests: any[] = [];
+  try {
+    const samples = storageFixture().counters;
+    await page.route('**/api/window', async route => {
+      const request = route.request().postDataJSON(); requests.push(request);
+      await route.fulfill({ json: { snapshot: request.snapshot, domain: request.domain, start_ns: request.start_ns,
+        end_ns: request.end_ns, spans: [], counters: samples.filter(counter => request.systems.includes(counter.track)),
+        dependencies: [], io: {}, limited: false, warnings: [] } });
+    });
+    await loaded(page, `http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    await expect.poll(() => requests.length).toBeGreaterThan(0);
+    expect(requests[0].systems).toContain('block-a');
+    expect(requests[0].systems).toContain('lustre');
+    expect(requests[0].systems).toContain('nfs');
+    expect(requests[0].systems).not.toContain('block-copy');
+    await expect(page.locator('#window-status')).toContainText('Loaded');
+    expect(await page.locator('#io-fs-select').locator('..').isHidden()).toBeTruthy();
+    await page.locator('#io-metric-select').selectOption('iops');
+  } finally { server.close(); await once(server, 'close'); }
+});
 
 const root = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 const binary = join(root, 'target/debug/rprof');
@@ -53,6 +115,142 @@ test.beforeAll(() => {
 });
 
 test.afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
+
+test('indexed scrolling reuses rows, keeps same-window requests in flight and retries errors explicitly', async ({ page }) => {
+  const url = injected('scroll-cache', report => {
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', snapshot: 'scroll-snapshot' };
+    report.shards = [report.shards[0]];
+    report.tracks = Array.from({ length: 80 }, (_, i) => ({ id: `row-${i}`, shard: report.shards[0].id,
+      parent: null, name: `Row ${i}`, kind: 'thread', rank: null, details: { 'viewer.has_non_io': 'true' } }));
+    report.spans = []; report.counters = []; report.dependencies = []; delete report.io_timeline;
+  });
+  const source = readFileSync(fileURLToPath(url), 'utf8');
+  const server = createServer((_request, response) => { response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(source); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const requests: any[] = []; let release: (() => void) | undefined; let fail = false; let limited = false;
+  try {
+    await page.route('**/api/window', async route => {
+      const request = route.request().postDataJSON(); requests.push(request);
+      if (requests.length === 2) await new Promise<void>(resolve => { release = resolve; });
+      if (fail) { await route.fulfill({ status: 503, body: 'unavailable' }); return; }
+      await route.fulfill({ json: { ...request, spans: request.tracks.map((track: string) => ({ track, id: Number(track.slice(4)), source_id: track,
+        name: `loaded ${track}`, category: 'compute', start_ns: request.start_ns, duration_ns: '1000000', correlation: null, incomplete: false, attributes: {} })),
+        counters: [], dependencies: [], io: {}, limited, warnings: limited ? ['test response limit'] : [] } });
+    });
+    await loaded(page, `http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    await expect(page.locator('#window-status')).toHaveAttribute('data-state', 'ready');
+    const initial = [...requests];
+    const scroll = page.locator('#timeline-scroll');
+    await scroll.evaluate(element => { element.scrollTop = 900; });
+    await expect.poll(() => requests.length).toBe(2);
+    const second = requests[1];
+    expect(second.tracks.every((id: string) => !initial.flatMap(request => request.tracks).includes(id))).toBe(true);
+    await scroll.evaluate(element => { element.scrollTop = 1800; });
+    await page.waitForTimeout(180);
+    expect(requests).toHaveLength(2); // Useful same-window fetch is not aborted by scrolling.
+    release!();
+    await expect.poll(() => requests.length).toBe(3);
+    await expect(page.locator('#window-status')).toHaveAttribute('data-state', 'ready');
+    for (const top of [0, 900, 1800, 0]) {
+      await scroll.evaluate((element, value) => { element.scrollTop = value; }, top);
+      await page.waitForTimeout(180);
+    }
+    expect(requests).toHaveLength(3);
+    expect(new Set(requests.flatMap(request => request.tracks)).size).toBe(requests.flatMap(request => request.tracks).length);
+    const canvas = (await page.locator('#timeline-canvas').boundingBox())!;
+    await page.keyboard.down('Shift');
+    await page.mouse.move(canvas.x + 260 + (canvas.width - 260) * .2, canvas.y + 50);
+    await page.mouse.down();
+    await page.mouse.move(canvas.x + 260 + (canvas.width - 260) * .6, canvas.y + 50, { steps: 6 });
+    await page.mouse.up(); await page.keyboard.up('Shift');
+    const selectedStart = await page.locator('#selection-range').getAttribute('data-start-ns');
+    const selectedEnd = await page.locator('#selection-range').getAttribute('data-end-ns');
+    await page.getByRole('button', { name: 'Filter by selection' }).click();
+    await page.waitForTimeout(180);
+    expect(requests).toHaveLength(3); // A display filter reuses the loaded data.
+    await page.getByRole('button', { name: 'Zoom to selection' }).click();
+    await expect.poll(() => requests.length).toBe(4);
+    await expect(page.locator('#window-status')).toHaveAttribute('data-state', 'ready');
+    expect(requests[3].tracks).toEqual(initial[0].tracks);
+    expect(requests[3].end_ns).not.toBe(initial[0].end_ns);
+    expect(requests[3].start_ns).toBe(selectedStart);
+    expect(requests[3].end_ns).toBe(selectedEnd);
+    fail = true;
+    await scroll.evaluate(element => { element.scrollTop = 2700; });
+    await expect(page.locator('#window-status')).toHaveAttribute('data-state', 'error');
+    const failedCount = requests.length;
+    await scroll.evaluate(element => { element.scrollTop += 10; });
+    await page.waitForTimeout(250);
+    expect(requests).toHaveLength(failedCount);
+    fail = false; limited = true;
+    await page.getByRole('button', { name: 'Retry window' }).click();
+    await expect(page.locator('#window-status')).toHaveAttribute('data-state', 'limited');
+    const limitedCount = requests.length;
+    await page.waitForTimeout(300);
+    expect(requests).toHaveLength(limitedCount);
+    await expect(page.locator('#window-status')).toContainText('test response limit');
+  } finally { release?.(); server.close(); }
+});
+
+test('mouse range selection filters timeline hits, zooms, clears and preserves panning', async ({ page }) => {
+  await loaded(page, injected('range-selection', report => {
+    report.domains[0].origin_ns = '0'; report.domains[0].end_ns = '1000000000';
+    report.shards = [{ ...report.shards[0], origin_ns: '0', end_ns: '1000000000' }];
+    report.tracks = [{ id: 'range-track', shard: report.shards[0].id, parent: null, name: 'Range track', kind: 'thread', rank: null, details: {} }];
+    report.spans = [20, 70].map((percent, id) => ({ id, track: 'range-track', name: id ? 'late selection event' : 'early selection event', category: 'compute',
+      start_ns: String(percent * 10000000), duration_ns: '100000000', correlation: null, incomplete: false, attributes: {} }));
+    report.counters = []; report.dependencies = []; delete report.io_timeline;
+  }));
+  const canvas = page.locator('#timeline-canvas');
+  const rect = (await canvas.boundingBox())!;
+  const width = rect.width - 260;
+  // Find the actual track position from the same public model used by the viewer.
+  const report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!) as Report);
+  const trackRow = timelineRows(report, indexReport(report), report.domains[0]!.id, '', defaultTimelineCollapsed(report)).find(row => row.track?.id === 'range-track')!;
+  const y = trackRow.top + SPAN_TOP + 5;
+  const drag = async (a: number, b: number, shift = false) => {
+    const rect = (await canvas.boundingBox())!;
+    if (shift) await page.keyboard.down('Shift');
+    await page.mouse.move(rect.x + 260 + width * a, rect.y + y);
+    await page.mouse.down(); await page.mouse.move(rect.x + 260 + width * b, rect.y + y, { steps: 8 }); await page.mouse.up();
+    if (shift) await page.keyboard.up('Shift');
+  };
+  await canvas.click({ position: { x: 260 + width * .75, y } });
+  await expect(page.locator('#detail-content')).toContainText('late selection event');
+  const before = await page.locator('#range-label').textContent();
+  await drag(.4, .1, true); // Backwards selection is normalized and does not pan.
+  await expect(page.locator('#range-label')).toHaveText(before!);
+  const selected = page.locator('#selection-range');
+  const start = BigInt((await selected.getAttribute('data-start-ns'))!);
+  const end = BigInt((await selected.getAttribute('data-end-ns'))!);
+  expect(start).toBeLessThan(end);
+  expect(Number(start)).toBeCloseTo(100000000, -7);
+  await page.getByRole('button', { name: 'Filter by selection' }).click();
+  await expect(selected).toHaveAttribute('data-filtered', 'true');
+  await expect(selected).toContainText('summaries remain capture-wide');
+  await canvas.click({ position: { x: 260 + width * .75, y } });
+  await expect(page.locator('#detail-content')).not.toContainText('late selection event');
+  await canvas.click({ position: { x: 260 + width * .25, y } });
+  await expect(page.locator('#detail-content')).toContainText('early selection event');
+  await page.getByRole('button', { name: 'Zoom to selection' }).click();
+  await expect(page.locator('#range-label')).not.toHaveText(before!);
+  await page.getByRole('button', { name: 'Clear range' }).click();
+  await expect(selected).toHaveAttribute('data-filtered', 'false');
+  await expect(page.getByRole('button', { name: 'Zoom to selection' })).toBeDisabled();
+  const zoomed = await page.locator('#range-label').textContent();
+  await drag(.7, .5);
+  await expect(page.locator('#range-label')).not.toHaveText(zoomed!);
+  await page.getByRole('button', { name: 'Select range', exact: true }).click();
+  await drag(.2, .5);
+  await expect(page.getByRole('button', { name: 'Zoom to selection' })).toBeEnabled();
+  await page.locator('#timeline-scroll').focus(); await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Zoom to selection' })).toBeDisabled();
+  await drag(.2, .5);
+  await page.getByRole('button', { name: 'Filter by selection' }).click();
+  await page.getByRole('button', { name: 'Reset zoom' }).click();
+  await expect(selected).toHaveAttribute('data-filtered', 'false');
+  await expect(page.locator('#range-label')).toHaveText(before!);
+});
 
 test('indexed local viewer requests late windows, ignores stale replies and pages files only after expansion', async ({ page }) => {
   const url = injected('indexed-local', report => {

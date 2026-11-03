@@ -20,7 +20,19 @@ SQLite installation or C++ compiler is needed.
 - Zooming and panning request the selected time window. A late training phase can
   load its actual spans even if it is far beyond the old HTML retention cutoff.
 - Only visible track rows and metric scopes are requested. Wheel scrolling remains
-  vertical, and zoom/reset buttons and horizontal dragging control time.
+  vertical, and zoom/reset buttons and horizontal dragging control time. Loaded
+  rows stay cached for the current time window: scrolling back or reopening a group
+  reuses them, and only newly visible rows are fetched. Same-window requests stay
+  in flight when scrolling; their results are merged instead of replacing other rows.
+- **Shift-drag** selects a time range. Alternatively, enable **Select range** and
+  drag normally. **Zoom to selection** fits that interval; **Filter by selection**
+  shows timeline activity only inside it, keeping the current time scale. Middle
+  drag still pans in selection mode. **Clear range** or Escape removes the selection
+  and time filter; Reset/Home and switching clock domains also clear them.
+  The filter clips spans, sampled graphs and their click targets to the range.
+  Inspectors retain the original full event/sample interval and exact values;
+  partially intersecting metric bins are not recomputed or prorated. Overview and
+  summary tables remain capture-wide (or their existing selected-domain scope).
 - CPU/memory queries choose a resolution appropriate for the window. Coarse buckets
   retain original **first, last, minimum and maximum** observations, with source-gap
   information. Zooming retrieves finer samples, never invented intermediate values.
@@ -33,7 +45,8 @@ SQLite installation or C++ compiler is needed.
   pages. File calls are then fetched for the visible time window.
 - A status line shows loading, loaded-window coverage, errors and response limits.
   Stale responses cannot overwrite a newer viewport. A failed request leaves the
-  previous data visibly marked as potentially stale.
+  previous data visibly marked as potentially stale. **Retry window** retries a
+  failed request explicitly; failures and limited responses do not cause fetch loops.
 
 ## Cache and remote usage
 
@@ -75,8 +88,18 @@ selected capture. It does not launch or control remote jobs.
 Each query is limited to 64 raw tracks, 1,024 counter tracks and 32 I/O scopes.
 Raw replies contain at most 20,000 observations, and replies are capped at 16 MiB;
 smaller `--max-events` / `--max-report-mib` values also apply. Dense windows show a
-limit notice: zoom in or expand fewer tracks. The browser replaces window data and
-keeps only two recent responses, rather than accumulating the whole capture.
+limit notice: zoom in or expand fewer tracks. Larger visible row sets are requested
+in successive bounded batches. The browser caches completed batches for one window,
+with budgets of 64 MiB of estimated serialized payload, 100,000 observations/edges/bins,
+and 4,096 requested row scopes. It retains at least the latest bounded reply. Oldest
+unused batches are evicted at these limits, and revisiting evicted rows can reload
+them. JavaScript object/index overhead is additional to the payload budget.
+
+The cache distinguishes raw tracks, counter tracks and I/O scopes. Zooming, horizontal
+panning, changing pixel resolution, clock domain, snapshot or filesystem starts a
+fresh cache. Vertical scrolling and expansion do not change the time-window key.
+Empty replies are cached as empty; limited replies retain their explicit warning.
+Dependency edges and overlapping observations are deduplicated when merging batches.
 
 The index stores sparse metric levels with eightfold coarsening. Raw interval
 queries use a spatial candidate index followed by exact integer timestamp checks,

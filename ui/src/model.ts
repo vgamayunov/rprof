@@ -18,7 +18,7 @@ export interface Report {
   }[];
   tracks: {
     id: string; shard: string; parent: string | null; name: string;
-    kind: 'process' | 'thread' | 'gpu_device' | 'gpu_stream' | 'io' | 'system';
+    kind: 'process' | 'thread' | 'gpu_device' | 'gpu_stream' | 'io' | 'system' | 'storage';
     rank: number | null; details: Record<string, string>;
   }[];
   spans: {
@@ -197,6 +197,200 @@ export interface IoThreadSeries {
 }
 
 export type IoMetric = 'throughput' | 'iops' | 'latency';
+export type StorageBackend = 'block' | 'lustre' | 'nfs';
+export interface StorageGraph {
+  key: string; label: string; search: string; backend: StorageBackend;
+  shard: Shard; track?: Track; children: StorageGraph[]; leaves: Track[];
+}
+export interface StorageBin {
+  start: bigint; duration: bigint; values: [number, number];
+  coverage: [string, string]; gapBefore: boolean; gapBeforeSides: [boolean, boolean]; members: Counter[];
+  windows: [{ start: bigint; duration: bigint } | undefined, { start: bigint; duration: bigint } | undefined];
+}
+export const STORAGE_METRICS: Record<IoMetric, [string, string]> = {
+  throughput: ['storage.read.bytes_per_second', 'storage.write.bytes_per_second'],
+  iops: ['storage.read.operations_per_second', 'storage.write.operations_per_second'],
+  latency: ['storage.read.latency_ms', 'storage.write.latency_ms'],
+};
+const STORAGE_TITLES: Record<StorageBackend, string> = {
+  block: 'Block-device I/O total', lustre: 'Lustre bulk RPC I/O total', nfs: 'NFS server payload I/O total',
+};
+interface StorageCatalog {
+  shards: Map<string, Shard>;
+  observed: Map<string, number>;
+  sources: Map<string, Map<StorageBackend, Map<string, Track[]>>>;
+  graphs: Map<string, StorageGraph[]>;
+}
+const storageCache = new WeakMap<Report, StorageCatalog>();
+export function storageGraphs(report: Report, domain: string): StorageGraph[] {
+  let cached = storageCache.get(report);
+  if (!cached) {
+    const shards = new Map(report.shards.map(shard => [shard.id, shard]));
+    const observed = new Map<string, number>();
+    for (const counter of report.counters) if (counter.name.startsWith('storage.') && !counter.name.startsWith('storage.meta.'))
+      observed.set(counter.track, (observed.get(counter.track) ?? 0) + 1);
+    const sources: StorageCatalog['sources'] = new Map();
+    for (const track of report.tracks) {
+      const backend = track.details['storage.backend'];
+      const shard = shards.get(track.shard);
+      if (track.kind !== 'storage' || !shard || (backend !== 'block' && backend !== 'lustre' && backend !== 'nfs')) continue;
+      if (!sources.has(shard.domain)) sources.set(shard.domain, new Map());
+      const domainSources = sources.get(shard.domain)!;
+      if (!domainSources.has(backend)) domainSources.set(backend, new Map());
+      const group = domainSources.get(backend)!;
+      const identity = JSON.stringify([track.details['storage.host_id'] || shard.hostname || track.shard,
+        backend, track.details.resource || track.id]);
+      if (!group.has(identity)) group.set(identity, []);
+      group.get(identity)!.push(track);
+    }
+    cached = { shards, observed, sources, graphs: new Map() };
+    storageCache.set(report, cached);
+  }
+  if (cached.graphs.has(domain)) return cached.graphs.get(domain)!;
+  const { shards, observed, sources } = cached;
+  const roots: StorageGraph[] = [];
+  for (const backend of ['block', 'lustre', 'nfs'] as const) {
+    const resources = sources.get(domain)?.get(backend);
+    if (!resources?.size) continue;
+    const first = resources.values().next().value![0]!;
+    const root: StorageGraph = { key: `storage:${domain}:${backend}`, label: STORAGE_TITLES[backend], backend,
+      shard: shards.get(first.shard)!, children: [], leaves: [], search: `${backend} storage read write` };
+    const filesystems = new Map<string, StorageGraph>();
+    for (const [identity, tracks] of [...resources].sort(([a], [b]) => a.localeCompare(b))) {
+      // Rank/namespace copies of the same host resource are one contributor.
+      // Pick one observed source, not a union of epochs: different generations
+      // must not double count a host or fabricate continuity across resets.
+      const chosen = tracks.sort((a, b) => {
+        const retained = (track: Track) => Number(track.details['storage.report_samples'] ?? 0);
+        return ((observed.get(b.id) ?? 0) + retained(b)) - ((observed.get(a.id) ?? 0) + retained(a)) || a.id.localeCompare(b.id);
+      })[0]!;
+      const fsName = chosen.details['storage.filesystem'] || 'unknown filesystem';
+      let fs = filesystems.get(fsName);
+      if (!fs) {
+        fs = { key: `${root.key}:fs:${JSON.stringify(fsName)}`, label: fsName, backend, shard: shards.get(chosen.shard)!,
+          search: `${backend} filesystem ${fsName}`, children: [], leaves: [] };
+        filesystems.set(fsName, fs); root.children.push(fs);
+      }
+      const host = chosen.details['storage.host_id'] || shards.get(chosen.shard)?.hostname || chosen.shard;
+      const leaf: StorageGraph = { key: `${fs.key}:resource:${identity}`, label: `${host} · ${chosen.name || chosen.details.resource || 'device'}${tracks.length > 1 ? ` · 1 of ${tracks.length} sources` : ''}`,
+        backend, shard: shards.get(chosen.shard)!, track: chosen, children: [], leaves: [chosen],
+        search: `${host} ${chosen.name} ${chosen.details.resource || ''} ${chosen.details['storage.mount_point'] || ''} ${fsName}` };
+      fs.children.push(leaf); fs.leaves.push(chosen); root.leaves.push(chosen);
+    }
+    roots.push(root);
+  }
+  cached.graphs.set(domain, roots);
+  return roots;
+}
+
+// Compute one metric at a time: an absent read/write series is unknown, not
+// zero. Rates sum across observed resources; latency uses exact operation and
+// latency deltas, never an unweighted mean of per-device averages.
+export function storageBins(graph: StorageGraph, data: Map<string, TrackData>, metric: IoMetric): StorageBin[] {
+  const names = STORAGE_METRICS[metric];
+  const observations = graph.leaves.map(track => {
+    const groups = data.get(track.id)?.counters;
+    const items: { side: number; sample: IndexedCounter }[] = [];
+    for (const [series, samples] of groups ?? []) for (let side = 0; side < 2; side++)
+      if (series.startsWith(`${names[side]} [`)) for (const sample of samples) items.push({ side, sample });
+    return items.sort((a, b) => a.sample.time < b.sample.time ? -1 : a.sample.time > b.sample.time ? 1 : a.side - b.side);
+  });
+  const period = (sample: IndexedCounter): bigint => {
+    const a = sample.counter.attributes;
+    const interval = BigInt(a['storage.interval_ns'] || '0');
+    const lod = BigInt(a['storage.report_interval_ns'] || a['viewer.resolution_ns'] || '0');
+    return interval > lod ? interval : lod;
+  };
+  // Use the actual sampling/LOD period, not a hard-coded one-second floor.
+  const width = observations.reduce((max, list) => list.reduce((current, { sample }) => {
+    const value = period(sample);
+    return value > current ? value : current;
+  }, max), 0n) || 1_000_000_000n;
+  const windowStart = (sample: IndexedCounter): bigint => {
+    const a = sample.counter.attributes;
+    const window = BigInt(a['storage.window_ns'] || a['storage.interval_ns'] || '0');
+    const duration = window > 0n ? window : width;
+    return sample.time > duration ? sample.time - duration : 0n;
+  };
+  type BucketSource = { sides: [IndexedCounter | undefined, IndexedCounter | undefined]; gaps: [boolean, boolean] };
+  const buckets = new Map<bigint, Map<number, BucketSource>>();
+  for (let source = 0; source < observations.length; source++) {
+    const previous: (IndexedCounter | undefined)[] = [undefined, undefined];
+    for (const { side, sample } of observations[source]!) {
+      const { time } = sample;
+      const attrs = sample.counter.attributes;
+      const prior = previous[side];
+      const prevAttrs = prior?.counter.attributes;
+      const gap = attrs['storage.report_gap_before'] !== undefined ? attrs['storage.report_gap_before'] === 'true' :
+        attrs['storage.gap_before'] === 'true' ||
+        (prior !== undefined && ((attrs['storage.sample_index'] !== undefined && prevAttrs?.['storage.sample_index'] !== undefined &&
+          BigInt(attrs['storage.sample_index']) > BigInt(prevAttrs['storage.sample_index']) + 1n) || time - prior.time > width * 2n));
+      // An observation ending exactly on a period boundary belongs to the
+      // interval BEFORE that boundary, never the following unmeasured one.
+      const bucket = (time > 0n ? time - 1n : 0n) / width;
+      if (!buckets.has(bucket)) buckets.set(bucket, new Map());
+      const sources = buckets.get(bucket)!;
+      if (!sources.has(source)) sources.set(source, { sides: [undefined, undefined], gaps: [false, false] });
+      const current = sources.get(source)!;
+      current.gaps[side] ||= gap;
+      // Indexed read/write representatives need not share a timestamp. Merge
+      // by direction and retain the latest per direction, OR-ing earlier gaps.
+      current.sides[side] = sample;
+      previous[side] = sample;
+    }
+  }
+  const previousBucket: (bigint | undefined)[] = [undefined, undefined];
+  const previousSources: (string | undefined)[] = [undefined, undefined];
+  const previousEnd: (bigint | undefined)[] = [undefined, undefined];
+  return [...buckets].sort(([a], [b]) => a < b ? -1 : 1).map(([bucket, observed]) => {
+    const values: [number, number] = [NaN, NaN];
+    const coverage: [string, string] = ['0', '0'];
+    const gapBeforeSides: [boolean, boolean] = [false, false];
+    const windows: StorageBin['windows'] = [undefined, undefined];
+    const members: Counter[] = [];
+    let start: bigint | undefined, end: bigint | undefined;
+    for (let side = 0; side < 2; side++) {
+      let sum = 0, count = 0, ops = 0n, latency = 0n;
+      const contributors: number[] = [];
+      let sideStart: bigint | undefined, sideEnd: bigint | undefined, explicitGap = false;
+      for (const [source, { sides, gaps }] of observed) {
+        const sample = sides[side];
+        if (!sample || !Number.isFinite(Number(sample.counter.value))) continue;
+        const a = sample.counter.attributes;
+        if (metric === 'latency') {
+          const direction = side ? 'write' : 'read';
+          const nOps = a[`storage.${direction}_ops`], nLatency = a[`storage.${direction}_latency_ns`];
+          if (nOps !== undefined && nLatency !== undefined) { ops += BigInt(nOps); latency += BigInt(nLatency); count++; }
+          else if (graph.leaves.length === 1) { sum = Number(sample.counter.value); count++; }
+          else continue;
+        } else { sum += Number(sample.counter.value); count++; }
+        contributors.push(source); explicitGap ||= !!gaps[side];
+        const from = windowStart(sample);
+        if (sideStart === undefined || from < sideStart) sideStart = from;
+        if (sideEnd === undefined || sample.time > sideEnd) sideEnd = sample.time;
+        members.push(sample.counter);
+      }
+      coverage[side] = `${count}/${graph.leaves.length}`;
+      if (metric === 'latency' && ops > 0n) values[side] = Number(latency) / Number(ops) / 1e6;
+      else if (count && (metric !== 'latency' || graph.leaves.length === 1 && ops === 0n)) values[side] = sum;
+      if (metric === 'throughput') values[side] = values[side]! / 1048576;
+      if (sideStart !== undefined && sideEnd !== undefined) {
+        windows[side] = { start: sideStart, duration: sideEnd - sideStart };
+        if (start === undefined || sideStart < start) start = sideStart;
+        if (end === undefined || sideEnd > end) end = sideEnd;
+        const sources = contributors.join(',');
+        gapBeforeSides[side] = previousBucket[side] !== undefined &&
+          (bucket !== previousBucket[side]! + 1n || sources !== previousSources[side] ||
+            sideStart > previousEnd[side]! || explicitGap);
+        previousBucket[side] = bucket;
+        previousSources[side] = sources;
+        previousEnd[side] = sideEnd;
+      }
+    }
+    return { start: start ?? bucket * width, duration: (end ?? (bucket + 1n) * width) - (start ?? bucket * width),
+      values, coverage, gapBefore: gapBeforeSides.some(Boolean), gapBeforeSides, members, windows };
+  });
+}
 export interface IoGraph {
   key: string; label: string; search: string; bins: IoTimeBin[] | null;
   children: IoGraph[]; shard: Shard; track?: Track; files?: Track[];
@@ -358,9 +552,9 @@ export interface SpanIndex { items: IndexedSpan[]; maxEnds: bigint[] }
 export interface TrackData { spans: SpanIndex; counters: Map<string, IndexedCounter[]>; systemGaps?: Map<string, Uint32Array> }
 
 export interface TimelineRow {
-  key: string; kind: 'shard' | 'rank' | 'track' | 'counter' | 'io'; label: string; depth: number;
+  key: string; kind: 'shard' | 'rank' | 'track' | 'counter' | 'io' | 'storage'; label: string; depth: number;
   height: number; top: number; shard: Shard; track?: Track; series?: string; hasChildren: boolean;
-  system?: 'cpu' | 'memory'; capacity?: string; expanded?: boolean; io?: IoGraph;
+  system?: 'cpu' | 'memory'; capacity?: string; expanded?: boolean; io?: IoGraph; storage?: StorageGraph;
 }
 
 // Canvas row geometry (CSS pixels). Span bars start 7px from the top, are 11px
@@ -391,6 +585,10 @@ export function defaultTimelineCollapsed(report: Report): Set<string> {
       keys.add(`io:thread:${thread.domain}:${thread.thread_track}`);
       keys.add(`io:thread:${thread.domain}:${thread.thread_track}:files`);
     }
+  }
+  for (const domain of report.domains) for (const root of storageGraphs(report, domain.id)) {
+    keys.add(root.key);
+    for (const fs of root.children) keys.add(fs.key);
   }
   for (const track of report.tracks) {
     if (track.kind !== 'system' || track.parent || !['cpu', 'memory'].includes(track.details.resource ?? '')) continue;
@@ -608,7 +806,7 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
     for (const track of report.tracks) if (onlyIo(track)) ioOnly.add(track.id);
   }
   for (const track of report.tracks) {
-    if (track.kind === 'system' || ioOnly.has(track.id)) continue;
+    if (track.kind === 'system' || track.kind === 'storage' || ioOnly.has(track.id)) continue;
     const group = track.parent ? byParent : byShard;
     const key = track.parent ?? track.shard;
     if (!group.has(key)) group.set(key, []);
@@ -644,6 +842,19 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
     for (const child of graph.children) addSystem(child, depth + 1);
   };
   if (domainId) for (const graph of system.get(domainId) ?? []) addSystem(graph, 0);
+  if (domainId) for (const root of storageGraphs(report, domainId)) {
+    const addStorage = (graph: StorageGraph, depth: number, inherited = false): void => {
+      const match = !query || matchesFilter(`${graph.label} ${graph.search}`, 'storage', null, query);
+      const descendant = (item: StorageGraph): boolean => item.children.some(child =>
+        matchesFilter(`${child.label} ${child.search}`, 'storage', null, query) || descendant(child));
+      if (!match && !descendant(graph) && !inherited) return;
+      const expanded = !!query || !collapsed.has(graph.key);
+      add({ key: graph.key, kind: 'storage', label: graph.label, depth, height: depth === 2 ? 72 : 96,
+        shard: graph.shard, track: graph.track, storage: graph, hasChildren: !!graph.children.length, expanded });
+      if (expanded) for (const child of graph.children) addStorage(child, depth + 1, inherited || match);
+    };
+    addStorage(root, 0);
+  }
   const io = domainId && ioVisible ? ioGraph(report, domainId, filesystem) : undefined;
   if (io) {
     const matches = new Map<IoGraph, boolean>();
@@ -769,6 +980,9 @@ export function visibleSpans(index: SpanIndex, start: bigint, end: bigint, limit
 }
 
 export function indexReport(report: Report): Map<string, TrackData> {
+  // Incoming indexed windows replace samples on the same mutable report object.
+  // Re-evaluate the best rank/namespace source once, not once per graph redraw.
+  storageCache.delete(report);
   const spans = new Map<string, Span[]>();
   const counters = new Map<string, Map<string, IndexedCounter[]>>();
   for (const span of report.spans) {
@@ -814,7 +1028,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
 }
 
 export function isCollectorHealth(name: string): boolean {
-  if (name.startsWith('system.meta.')) return true;
+  if (name.startsWith('system.meta.') || name.startsWith('storage.meta.')) return true;
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
     name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') || name.startsWith('pmu.meta.') ||
     name.startsWith('python.meta.') || name === 'python.receiver_dropped' || name === 'python.malformed' || name.startsWith('pytorch.import.') ||

@@ -18,7 +18,7 @@ Build only the native adapters you need, on a system compatible with the workloa
 | LLVM/Intel OpenMP | `make ompt PROFILE=release` |
 | GCC 13/libgomp, Linux x86_64 | `make gomp PROFILE=release GOMP_CC=gcc` (matching target runtime) |
 | CUDA 13/CUPTI | `make cuda PROFILE=release CUDA_HOME=/usr/local/cuda` |
-| Process, host system metrics, Python, Linux perf counters, PyTorch import | No native adapter build needed |
+| Process, host system/storage metrics, Python, Linux perf counters, PyTorch import | No native adapter build needed |
 
 Keep the adapter libraries alongside `rprof`. Use fresh output names for each run.
 
@@ -35,6 +35,9 @@ rprof record --collect system -o system.jsonl -- ./app
 
 # Throughput in the timeline; expand rank -> process -> thread -> optional files
 rprof record --collect io -o io.jsonl -- ./app
+
+# Storage-layer monitoring only (no preload); io collection includes this by default
+rprof record --collect storage --storage-interval-ms 1000 -o storage.jsonl -- ./app
 
 # LLVM libomp / Intel libiomp5
 rprof record --collect openmp -o openmp.jsonl -- ./app
@@ -59,6 +62,8 @@ rprof record --collect python,io --python-backend ranges \
 ```
 
 Combine compatible collectors with commas, e.g. `--collect io,openmp,pmu`.
+Use `--no-storage` with `--collect io` for POSIX calls alone. See
+[storage monitoring](storage-profiling.md) for block/NFS/Lustre scope and permissions.
 Add `system` for host graphs; `--system-interval-ms 1000` sets their sample interval.
 See [system metrics](system-profiling.md) for multi-host sampling and clock alignment.
 Python `ranges` records annotations added with `rprof_python.range("name")`;
