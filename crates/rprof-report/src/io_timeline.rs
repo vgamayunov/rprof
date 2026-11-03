@@ -1,20 +1,45 @@
 //! Full-capture I/O rate summaries, independent of raw timeline retention.
 //! Discover bounded filesystem identities on pass one, then bin completions on
 //! pass two using the finalized clock layout and a fixed input snapshot.
-use crate::model::{Domain, IoFilesystem, IoTimeBin, IoTimeline};
+use crate::model::{Domain, IoFilesystem, IoThreadSeries, IoTimeBin, IoTimeline};
 use rprof_core::{
-    Category,
+    Category, Span, TrackKind,
     stream::{Attribute, Payload, Record},
 };
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 const MAX_FILESYSTEMS: usize = 1024;
+const MAX_THREAD_SERIES: usize = 4096;
 const MAX_METADATA: usize = 4 * 1024 * 1024;
 const MAX_TOTAL_BINS: usize = 65_536;
 const MAX_BINS_PER_FILESYSTEM: usize = 512;
 type Host = (String, String);
 type Key = (Host, String, String);
+type ScopeKey = (Uuid, u64, Key);
+struct TrackInfo {
+    parent: Option<u64>,
+    rank: Option<u32>,
+    thread: bool,
+}
+struct ScopeMetadata {
+    rank: Option<u32>,
+    pid: u64,
+    tid: u64,
+    instance: u64,
+}
+
+fn thread_track(tracks: &HashMap<(Uuid, u64), TrackInfo>, shard: Uuid, track: u64) -> Option<u64> {
+    let info = tracks.get(&(shard, track))?;
+    if info.thread {
+        return Some(track);
+    }
+    let parent = info.parent?;
+    tracks
+        .get(&(shard, parent))
+        .filter(|info| info.thread)
+        .map(|_| parent)
+}
 
 fn text<'a>(attrs: &'a BTreeMap<String, Attribute>, key: &str) -> Option<&'a str> {
     match attrs.get(key) {
@@ -53,8 +78,57 @@ pub(crate) struct Discovery {
     bytes: usize,
     omitted: u64,
     seen: bool,
+    tracks: HashMap<(Uuid, u64), TrackInfo>,
+    thread_groups: BTreeMap<ScopeKey, ScopeMetadata>,
+    scope_omitted: u64,
 }
 impl Discovery {
+    fn discover_thread(
+        &mut self,
+        shard: Uuid,
+        track: u64,
+        attrs: &BTreeMap<String, Attribute>,
+        filesystem: Key,
+    ) {
+        let Some(thread) = thread_track(&self.tracks, shard, track) else {
+            self.scope_omitted += 1;
+            return;
+        };
+        let key = (shard, thread, filesystem);
+        if self.thread_groups.contains_key(&key) {
+            return;
+        }
+        let (
+            Some(Attribute::Unsigned(pid)),
+            Some(Attribute::Unsigned(tid)),
+            Some(Attribute::Unsigned(instance)),
+        ) = (
+            attrs.get("pid"),
+            attrs.get("tid"),
+            attrs.get("process_instance"),
+        )
+        else {
+            self.scope_omitted += 1;
+            return;
+        };
+        let bytes = key.2.0.0.len() + key.2.0.1.len() + key.2.1.len() + key.2.2.len() + 64;
+        if self.thread_groups.len() >= MAX_THREAD_SERIES
+            || bytes > MAX_METADATA.saturating_sub(self.bytes)
+        {
+            self.scope_omitted += 1;
+            return;
+        }
+        self.bytes += bytes;
+        self.thread_groups.insert(
+            key,
+            ScopeMetadata {
+                rank: self.tracks[&(shard, thread)].rank,
+                pid: *pid,
+                tid: *tid,
+                instance: *instance,
+            },
+        );
+    }
     pub fn observe(&mut self, record: &Record) {
         match record {
             Record::Shard(shard) => {
@@ -65,10 +139,21 @@ impl Discovery {
                 );
             }
             Record::Chunk(chunk) => {
-                let Some(host) = self.hosts.get(&chunk.shard_id) else {
+                let Some(host) = self.hosts.get(&chunk.shard_id).cloned() else {
                     return;
                 };
                 for event in &chunk.events {
+                    if let Payload::Track(track) = &event.payload {
+                        self.tracks.insert(
+                            (chunk.shard_id, track.id),
+                            TrackInfo {
+                                parent: track.parent_id,
+                                rank: track.rank,
+                                thread: matches!(track.kind, TrackKind::Thread { .. }),
+                            },
+                        );
+                        continue;
+                    }
                     let Payload::Span(span) = &event.payload else {
                         continue;
                     };
@@ -79,7 +164,7 @@ impl Discovery {
                         continue;
                     }
                     self.seen = true;
-                    let key = identity(host, &event.attributes);
+                    let key = identity(&host, &event.attributes);
                     if let Some(previous) = self.groups.get_mut(&key) {
                         if previous.mount_point == "unknown"
                             && let Some(point) =
@@ -96,6 +181,7 @@ impl Discovery {
                                 previous.filesystem_type = filesystem_type.into();
                             }
                         }
+                        self.discover_thread(chunk.shard_id, span.track_id, &event.attributes, key);
                         continue;
                     }
                     let mut metadata = Metadata {
@@ -130,7 +216,8 @@ impl Discovery {
                         continue;
                     }
                     self.bytes += bytes;
-                    self.groups.insert(key, metadata);
+                    self.groups.insert(key.clone(), metadata);
+                    self.discover_thread(chunk.shard_id, span.track_id, &event.attributes, key);
                 }
             }
             _ => (),
@@ -145,11 +232,13 @@ impl Discovery {
         if !self.seen {
             return None;
         }
-        let target = (MAX_TOTAL_BINS / self.groups.len().max(1)).min(MAX_BINS_PER_FILESYSTEM);
-        let groups = self
+        let target = (MAX_TOTAL_BINS / (self.groups.len() + self.thread_groups.len()).max(1))
+            .min(MAX_BINS_PER_FILESYSTEM);
+        let groups: BTreeMap<_, _> = self
             .groups
             .into_iter()
-            .map(|(key, metadata)| {
+            .enumerate()
+            .map(|(id, (key, metadata))| {
                 let domain = lookup[&key.0];
                 let end = domains[domain].end_ns.parse::<u128>().unwrap_or(0).max(1);
                 let width = end.div_ceil(target as u128).max(1_000_000);
@@ -157,6 +246,7 @@ impl Discovery {
                 (
                     key,
                     Group {
+                        id: format!("filesystem:{id}"),
                         domain,
                         metadata,
                         end,
@@ -166,11 +256,23 @@ impl Discovery {
                 )
             })
             .collect();
+        let thread_groups = self
+            .thread_groups
+            .into_iter()
+            .map(|(key, metadata)| {
+                let group = &groups[&key.2];
+                let bins = vec![Bin::default(); group.bins.len()];
+                (key, ScopeGroup { metadata, bins })
+            })
+            .collect();
         Some(Analysis {
             hosts: self.hosts,
             offsets: offsets.clone(),
             groups,
             omitted: self.omitted,
+            tracks: self.tracks,
+            thread_groups,
+            scope_omitted: self.scope_omitted,
         })
     }
 }
@@ -188,11 +290,68 @@ struct Bin {
     other_latency: u128,
     max_latency: u64,
 }
+impl Bin {
+    fn observe(&mut self, span: &Span, attrs: &BTreeMap<String, Attribute>) {
+        let latency = span.duration_ns as u128;
+        let failed =
+            matches!(attrs.get("io.result"), Some(Attribute::Signed(result)) if *result < 0);
+        let bytes = if failed {
+            0
+        } else {
+            unsigned(attrs, "io.completed_bytes") as u128
+        };
+        match text(attrs, "io.operation").unwrap_or(&span.name) {
+            "read" | "pread" => {
+                self.read_ops += 1;
+                self.read_bytes += bytes;
+                self.read_latency += latency;
+            }
+            "write" | "pwrite" => {
+                self.write_ops += 1;
+                self.write_bytes += bytes;
+                self.write_latency += latency;
+            }
+            _ => {
+                self.other_ops += 1;
+                self.other_latency += latency;
+            }
+        }
+        self.errors += u64::from(failed);
+        self.max_latency = self.max_latency.max(span.duration_ns);
+    }
+}
+fn export_bins(bins: Vec<Bin>, width: u128, end: u128) -> Vec<IoTimeBin> {
+    bins.into_iter()
+        .enumerate()
+        .map(|(i, bin)| {
+            let start = i as u128 * width;
+            IoTimeBin {
+                start_ns: start.to_string(),
+                duration_ns: width.min(end - start).to_string(),
+                read_bytes: bin.read_bytes.to_string(),
+                write_bytes: bin.write_bytes.to_string(),
+                read_ops: bin.read_ops.to_string(),
+                write_ops: bin.write_ops.to_string(),
+                other_ops: bin.other_ops.to_string(),
+                errors: bin.errors.to_string(),
+                read_latency_ns: bin.read_latency.to_string(),
+                write_latency_ns: bin.write_latency.to_string(),
+                other_latency_ns: bin.other_latency.to_string(),
+                max_latency_ns: bin.max_latency.to_string(),
+            }
+        })
+        .collect()
+}
 struct Group {
+    id: String,
     domain: usize,
     metadata: Metadata,
     end: u128,
     width: u128,
+    bins: Vec<Bin>,
+}
+struct ScopeGroup {
+    metadata: ScopeMetadata,
     bins: Vec<Bin>,
 }
 pub(crate) struct Analysis {
@@ -200,6 +359,9 @@ pub(crate) struct Analysis {
     offsets: HashMap<Uuid, u128>,
     groups: BTreeMap<Key, Group>,
     omitted: u64,
+    tracks: HashMap<(Uuid, u64), TrackInfo>,
+    thread_groups: BTreeMap<ScopeKey, ScopeGroup>,
+    scope_omitted: u64,
 }
 impl Analysis {
     pub fn observe(&mut self, record: &Record) {
@@ -217,50 +379,51 @@ impl Analysis {
             if text(&event.attributes, "io.operation").is_none() {
                 continue;
             }
-            let Some(group) = self.groups.get_mut(&identity(host, &event.attributes)) else {
+            let key = identity(host, &event.attributes);
+            let Some(group) = self.groups.get_mut(&key) else {
                 continue;
             };
             let end =
                 self.offsets[&chunk.shard_id] + span.start_ns as u128 + span.duration_ns as u128;
             // The final endpoint belongs to the last (right-closed) bin.
             let index = (end.min(group.end - 1) / group.width) as usize;
-            let bin = &mut group.bins[index];
-            let latency = span.duration_ns as u128;
-            let failed = matches!(event.attributes.get("io.result"), Some(Attribute::Signed(result)) if *result < 0);
-            let bytes = if failed {
-                0
-            } else {
-                unsigned(&event.attributes, "io.completed_bytes") as u128
-            };
-            match text(&event.attributes, "io.operation").unwrap_or(&span.name) {
-                "read" | "pread" => {
-                    bin.read_ops += 1;
-                    bin.read_bytes += bytes;
-                    bin.read_latency += latency;
-                }
-                "write" | "pwrite" => {
-                    bin.write_ops += 1;
-                    bin.write_bytes += bytes;
-                    bin.write_latency += latency;
-                }
-                _ => {
-                    bin.other_ops += 1;
-                    bin.other_latency += latency;
-                }
+            group.bins[index].observe(span, &event.attributes);
+            if let Some(thread) = thread_track(&self.tracks, chunk.shard_id, span.track_id)
+                && let Some(scope) = self.thread_groups.get_mut(&(chunk.shard_id, thread, key))
+            {
+                scope.bins[index].observe(span, &event.attributes);
             }
-            bin.errors += u64::from(failed);
-            bin.max_latency = bin.max_latency.max(span.duration_ns);
         }
     }
     pub fn finish(self) -> IoTimeline {
+        let threads = self
+            .thread_groups
+            .into_iter()
+            .map(|((shard, thread, key), scope)| {
+                let group = &self.groups[&key];
+                IoThreadSeries {
+                    filesystem_id: group.id.clone(),
+                    domain: group.domain.to_string(),
+                    shard: shard.to_string(),
+                    rank: scope.metadata.rank,
+                    process_instance: scope.metadata.instance.to_string(),
+                    pid: scope.metadata.pid.to_string(),
+                    tid: scope.metadata.tid.to_string(),
+                    thread_track: format!("{shard}:{thread}"),
+                    bin_width_ns: group.width.to_string(),
+                    bins: export_bins(scope.bins, group.width, group.end),
+                }
+            })
+            .collect();
         IoTimeline {
             omitted_events: self.omitted.to_string(),
+            scope_omitted_events: self.scope_omitted.to_string(),
+            threads,
             filesystems: self
                 .groups
                 .into_iter()
-                .enumerate()
-                .map(|(id, (key, group))| IoFilesystem {
-                    id: format!("filesystem:{id}"),
+                .map(|(key, group)| IoFilesystem {
+                    id: group.id,
                     domain: group.domain.to_string(),
                     host: key.0.0,
                     filesystem_type: group.metadata.filesystem_type,
@@ -268,28 +431,7 @@ impl Analysis {
                     device: group.metadata.device,
                     kind: key.1,
                     bin_width_ns: group.width.to_string(),
-                    bins: group
-                        .bins
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, bin)| {
-                            let start = i as u128 * group.width;
-                            IoTimeBin {
-                                start_ns: start.to_string(),
-                                duration_ns: group.width.min(group.end - start).to_string(),
-                                read_bytes: bin.read_bytes.to_string(),
-                                write_bytes: bin.write_bytes.to_string(),
-                                read_ops: bin.read_ops.to_string(),
-                                write_ops: bin.write_ops.to_string(),
-                                other_ops: bin.other_ops.to_string(),
-                                errors: bin.errors.to_string(),
-                                read_latency_ns: bin.read_latency.to_string(),
-                                write_latency_ns: bin.write_latency.to_string(),
-                                other_latency_ns: bin.other_latency.to_string(),
-                                max_latency_ns: bin.max_latency.to_string(),
-                            }
-                        })
-                        .collect(),
+                    bins: export_bins(group.bins, group.width, group.end),
                 })
                 .collect(),
         }
@@ -300,9 +442,95 @@ impl Analysis {
 mod tests {
     use super::*;
     use rprof_core::{
-        Span,
+        Span, Track,
         stream::{Chunk, Event, Loss},
     };
+    #[test]
+    fn scope_budget_does_not_stop_parent_totals_and_identity_keeps_reused_tids_separate() {
+        let shard = Uuid::new_v4();
+        let host = ("host".into(), "boot".into());
+        let mut discovery = Discovery::default();
+        discovery.hosts.insert(shard, host.clone());
+        let mut events = Vec::new();
+        for id in 0..MAX_THREAD_SERIES + 1 {
+            events.push(Event::new(
+                0,
+                Payload::Track(Track {
+                    id: id as u64,
+                    parent_id: None,
+                    name: "thread".into(),
+                    rank: Some(0),
+                    kind: TrackKind::Thread { tid: 7 },
+                }),
+            ));
+            events.push(Event {
+                timestamp_ns: 1,
+                attributes: BTreeMap::from([
+                    ("io.operation".into(), Attribute::Text("write".into())),
+                    ("io.completed_bytes".into(), Attribute::Unsigned(1)),
+                    ("pid".into(), Attribute::Unsigned(12)),
+                    ("tid".into(), Attribute::Unsigned(7)),
+                    (
+                        "process_instance".into(),
+                        Attribute::Unsigned(id as u64 + 100),
+                    ),
+                ]),
+                payload: Payload::Span(Span {
+                    track_id: id as u64,
+                    name: "write".into(),
+                    category: Category::Io,
+                    start_ns: 0,
+                    duration_ns: 1,
+                    correlation_id: None,
+                }),
+            });
+        }
+        let record = Record::Chunk(Chunk {
+            shard_id: shard,
+            sequence: 0,
+            loss: Loss::default(),
+            events,
+        });
+        discovery.observe(&record);
+        let domains = vec![Domain {
+            id: "0".into(),
+            name: "host".into(),
+            origin_ns: "0".into(),
+            end_ns: "1000000000".into(),
+            calibration: None,
+        }];
+        let mut analysis = discovery
+            .start(
+                &domains,
+                &HashMap::from([(host, 0)]),
+                &HashMap::from([(shard, 0)]),
+            )
+            .unwrap();
+        analysis.observe(&record);
+        let result = analysis.finish();
+        assert_eq!(result.omitted_events, "0");
+        assert_eq!(result.scope_omitted_events, "1");
+        assert_eq!(result.threads.len(), MAX_THREAD_SERIES);
+        assert_eq!(
+            result.filesystems[0].bins[0].write_ops,
+            (MAX_THREAD_SERIES + 1).to_string()
+        );
+        assert_ne!(
+            result.threads[0].process_instance,
+            result.threads[1].process_instance
+        );
+        assert_ne!(
+            result.threads[0].thread_track,
+            result.threads[1].thread_track
+        );
+        let bins = result
+            .filesystems
+            .iter()
+            .map(|f| f.bins.len())
+            .sum::<usize>()
+            + result.threads.iter().map(|t| t.bins.len()).sum::<usize>();
+        assert!(bins <= MAX_TOTAL_BINS);
+    }
     #[test]
     fn filesystem_cardinality_and_bins_are_bounded_without_truncating_existing_groups() {
         let shard = Uuid::new_v4();

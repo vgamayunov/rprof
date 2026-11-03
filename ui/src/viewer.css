@@ -186,3 +186,15 @@
 [data-theme="light"] .io-chart-legend .io-read-key::before { background: #176b61; }
 [data-theme="light"] .io-chart-legend .io-write-key::before { background: #af661c; }
 [data-theme="light"] .io-chart-legend .io-mean-key::before { background: #6743a3; }
+.io-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding-top: 10px; }
+.io-toolbar[hidden] { display: none; }
+.io-toolbar button { border: 1px solid #3c596a; background: #213746; border-radius: 5px; color: #e3eff2; padding: 6px 10px; font-size: 12px; }
+[data-theme="light"] .io-toolbar button { background: #f8fafc; color: #203b4b; border-color: #a6bac9; }
+.io-toolbar .field select { max-width: 420px; min-width: 100px; }
+.io-coverage { flex-basis: 100%; color: var(--muted, #91adba); font-size: 11px; }
+.io-legend { font-size: 11px; white-space: nowrap; }
+.io-legend i { display: inline-block; width: 10px; height: 3px; margin: 0 4px 3px 8px; background: #6bcdb0; }
+.io-legend .io-write-key { background: #e5b46d; }
+[data-theme="light"] .io-legend .io-read-key { background: #176b61; }
+[data-theme="light"] .io-legend .io-write-key { background: #af661c; }
+[data-theme="light"] .io-coverage { color: #526b79; }

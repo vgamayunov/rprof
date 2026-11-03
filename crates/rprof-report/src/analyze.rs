@@ -491,24 +491,28 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             (offsets[track_shards[counter.track.as_str()]] + local as u128).to_string();
     }
     let mut warnings = clock_layout.warnings;
-    let io_timeline =
-        if let Some(mut series) = io_discovery.start(&domains, &lookup, &clock_layout.offsets) {
-            // A fixed snapshot keeps a growing capture from changing the binning window.
-            scan(path, Some(data.source_bytes), |record| {
-                series.observe(&record);
-                Ok(())
-            })?;
-            let series = series.finish();
-            if series.omitted_events != "0" {
-                warnings.push(format!(
+    let io_timeline = if let Some(mut series) =
+        io_discovery.start(&domains, &lookup, &clock_layout.offsets)
+    {
+        // A fixed snapshot keeps a growing capture from changing the binning window.
+        scan(path, Some(data.source_bytes), |record| {
+            series.observe(&record);
+            Ok(())
+        })?;
+        let series = series.finish();
+        if series.omitted_events != "0" {
+            warnings.push(format!(
                 "{} I/O observations omitted from filesystem graphs by identity/metadata limits.",
                 series.omitted_events
             ));
-            }
-            Some(series)
-        } else {
-            None
-        };
+        }
+        if series.scope_omitted_events != "0" {
+            warnings.push(format!("{} I/O observations omitted from rank/process/thread graphs by missing identity or scope limits; filesystem totals are independent.", series.scope_omitted_events));
+        }
+        Some(series)
+    } else {
+        None
+    };
     for (shard, count) in system_errors {
         if count > 0 {
             warnings.push(format!("Host system sampling for shard {shard}: {count} read/parse/topology errors; missing CPU or memory samples are unknown, not zero. Inspect system.meta.read_errors for details."));

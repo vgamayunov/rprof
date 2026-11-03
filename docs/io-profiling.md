@@ -74,21 +74,34 @@ counts, average/max operation latency, and observed-window bandwidth. These are
 latencies can double-count elapsed time. With event loss, byte/count totals describe
 the retained observations and are not extrapolated to the entire workload.
 
-### Default view: filesystem graphs
+### Default view: I/O graphs inside the timeline
 
-New HTML reports and `rprof view` open with the **I/O performance over time** panel
-above the raw timeline. Select all filesystem/unknown groups or a particular host,
-mount point, filesystem type and device. Pipes, sockets and devices are separate
-non-file groups, excluded from the default aggregate but selectable explicitly.
-Per-file and per-operation tables remain available under collapsed **Per-file I/O
-details**.
+New HTML reports and `rprof view` show **I/O throughput as a graph row in the main
+timeline**, sharing its ruler, zoom and pan. The initial I/O view is one aggregate
+read/write graph. Expand it one level at a time:
+
+**All I/O → rank → process image → thread → optional Files group → file calls.**
+
+Unranked captures go directly to processes. Ranks are scoped by shard, processes by
+PID and process instance, and threads by their physical track identity. Reused PIDs
+and TIDs remain separate. File lanes stay hidden when a thread is first opened;
+expand its **Files (N) · optional** group to see them. Searching does not implicitly
+expand file groups. File lanes use retained raw events for that thread, across its
+filesystems, so raw-event retention can limit their detail without limiting the
+aggregate graphs. Other collectors' spans remain available in the same timeline.
+
+Use the timeline's **Filesystem** selector for all filesystem/unknown groups or a
+particular host, mount point, type and device. Pipes, sockets and devices are excluded
+from the default aggregate but selectable explicitly. The **Metric** selector changes
+the graph rows between throughput (default), IOPS and latency. There are no separate
+I/O charts above the timeline.
 
 - **Throughput:** completed read and write bytes divided by each time bin's duration,
   displayed as MiB/s. Short I/O contributes actual bytes, not requested bytes.
 - **IOPS:** observed `read`/`pread` and `write`/`pwrite` calls per second, including
   failed calls. These are POSIX API operations, not storage-device IOPS.
-- **Latency:** mean read/write call duration per bin, plus a combined mean weighted
-  by operation count. A bin without calls has unknown latency, not zero latency.
+- **Latency:** mean read/write call duration per bin; the inspector also shows the
+  combined mean weighted by operation count. A bin without calls has unknown latency.
 - Click a bin for exact bytes/counts/durations, errors, other operations (including
   open/close/fsync), and the maximum latency across all call types.
 
@@ -99,17 +112,21 @@ Loss, partial captures and summary omissions remain explicit. Multi-host rates o
 combine within a common clock domain (including explicitly estimated MPI alignment).
 
 Graphs are computed in Rust from a second streaming pass over the fixed capture
-snapshot, independently of raw HTML event retention. Filesystem identity metadata
-is bounded to 1,024 groups / 4 MiB; time bins are bounded to 65,536 globally and at
-most 512 per group, with at least 1 ms bin width. Resolution adapts to capture
-duration and group count. Canvas charts use these bounded series rather than
-reprocessing individual I/O calls in the browser. Per-file summaries separately
-retain at most 8,192 identities / 16 MiB of file-key metadata.
+snapshot, independently of raw HTML event retention. Metadata is bounded to 1,024
+filesystem groups and 4,096 thread/filesystem series, sharing a 4 MiB metadata budget.
+Time bins are bounded to 65,536 globally across both, at most 512 per series and at
+least 1 ms wide. Resolution adapts to duration and group count. Missing identities
+or scope limits produce explicit thread-graph omissions; filesystem totals continue
+independently. The browser caches scope aggregates and rates and draws only visible
+rows/bins. Expanding one rank does not expand all its processes or files. Per-file
+summaries separately retain at most 8,192 identities / 16 MiB of file-key metadata.
 
 Regenerate HTML to get the new default view for an existing capture. Old captures
 without filesystem attributes retain their recorded byte/latency/count graphs under
 **unknown filesystem**; mount identity cannot be recovered retrospectively. Old
-HTML reports without time-series data retain their per-file table.
+HTML reports without per-thread series retain optional raw thread/file lanes and
+the collapsed per-file table. Regenerating a report adds drill-down when the capture
+contains native process/thread identities; it does not invent missing attribution.
 
 ### Identity and paths
 

@@ -7,6 +7,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, indexReport, integerPlotValues, SPAN_PITCH, SPAN_TOP, timelineRows } from '../../src/model.ts';
 import type { Report } from '../../src/model.ts';
+import { ioFixture } from '../io-fixture.ts';
 
 const root = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
 const binary = join(root, 'target/debug/rprof');
@@ -57,12 +58,12 @@ async function loaded(page: Page, url = html): Promise<void> {
   await expect(page.locator('#range-label')).toContainText('domain-relative');
 }
 
-async function position(page: Page, name: string, kind: 'span' | 'counter', rank?: number, ns?: number): Promise<{ x: number; y: number }> {
+async function position(page: Page, name: string, kind: 'span' | 'counter', rank?: number, ns?: number, collapsed?: Set<string>): Promise<{ x: number; y: number }> {
   const report: Report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!));
   const domainId = await page.locator('#domain-select').inputValue();
   const query = await page.locator('#filter-input').inputValue();
   const data = indexReport(report);
-  const rows = timelineRows(report, data, domainId, query);
+  const rows = timelineRows(report, data, domainId, query, collapsed);
   const track = report.tracks.find(track => report.shards.some(shard => shard.id === track.shard && shard.domain === domainId) &&
     (rank === undefined || track.rank === rank) &&
     (kind === 'span' ? report.spans.some(span => span.track === track.id && span.name === name) :
@@ -447,6 +448,7 @@ test('I/O panel paginates exact values, shows per-operation latency, escapes hos
   });
   await loaded(page, url);
   await expect(page.locator('#io-count')).toHaveText('101 files');
+  await page.locator('#io-per-file summary').click();
   await expect(page.locator('#io-table tbody tr')).toHaveCount(100);
   await expect(page.locator('#io-table')).not.toContainText('other-domain');
   await expect(page.locator('#io-table')).toContainText('9007199254740993 / 9007199254740995 B');
@@ -479,69 +481,76 @@ test('older reports without an io field show an empty I/O panel', async ({ page 
   await expect(page.locator('#pmu-panel')).toHaveCount(0);
 });
 
-test('filesystem I/O graphs lead new reports, inspect exact bins, select host/mount and isolate domains in both themes', async ({ page }) => {
+test('main timeline I/O graph expands rank/process/thread and opt-in files, with shared zoom and filesystem selection', async ({ page }) => {
+  const report = ioFixture(1000), data = indexReport(report), collapsed = defaultTimelineCollapsed(report);
   const hostile = '<img src=x onerror="globalThis.rprofInjected=true">';
-  const url = injected('io-timeline', report => {
-    for (const domain of report.domains) domain.end_ns = '2000000000';
-    const bin = (start: string, duration: string, bytes: string) => ({ start_ns: start, duration_ns: duration,
-      read_bytes: bytes, write_bytes: '0', read_ops: '1', write_ops: '3', other_ops: '2', errors: '1',
-      read_latency_ns: '4000000', write_latency_ns: '6000000', other_latency_ns: '9999999', max_latency_ns: '9999999' });
-    const bins = [bin('0', '1000000000', '1048576'), bin('1000000000', '1000000000', '0')];
-    const fs = (id: string, domain: string, kind: string, mount: string, data = bins) => ({ id, domain,
-      host: hostile, filesystem_type: 'ext4', mount_point: mount, device: '/dev/test', kind,
-      bin_width_ns: '1000000000', bins: data });
-    report.io_timeline = { filesystems: [fs('one', '0', 'filesystem', '/data'), fs('two', '0', 'filesystem', '/scratch'),
-      fs('pipe', '0', 'non_filesystem', 'pipe', [bin('0', '1000000000', '999999'), bin('1000000000', '1000000000', '0')]),
-      fs('foreign', '1', 'filesystem', '/foreign', [bin('0', '1000000000', '9'), bin('1000000000', '1000000000', '0')])], omitted_events: '7' };
-    report.io = [{ domain: '0', host: 'host', file: '/data/a', operations: '1', errors: '0', read_bytes: '1', write_bytes: '0',
-      requested_read_bytes: '1', requested_write_bytes: '0', total_ns: '1', window_ns: '1000000000', by_operation: [] }];
-  });
+  report.io_timeline!.filesystems[0]!.mount_point = hostile;
+  const url = injected('io-timeline', target => Object.assign(target, report));
   await page.emulateMedia({ colorScheme: 'dark' });
   await loaded(page, url);
-  await expect(page.locator('#io-profile')).toBeVisible();
-  await expect(page.locator('#io-per-file')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#io-profile')).toHaveCount(0);
+  await expect(page.locator('[id^="io-chart-"]')).toHaveCount(0);
+  await expect(page.locator('#io-toolbar')).toBeVisible();
+  await expect(page.locator('#io-panel')).toBeHidden();
+  await expect(page.locator('#io-metric-select')).toHaveValue('throughput');
   await expect(page.locator('#io-fs-select option')).toHaveCount(4);
-  await expect(page.locator('#io-fs-coverage')).toContainText('7 I/O timeline events omitted');
-  await expect(page.locator('#io-fs-coverage')).toContainText('Other operations');
-  await expect(page.locator('#io-chart-throughput')).toBeVisible();
-  // Latency values include formatted "ns" in the inspector; verify the graph
-  // actually contains colored measurements, not merely axes/NaN coordinates.
-  await expect.poll(() => page.locator('#io-chart-latency').evaluate(element => {
-    const canvas = element as HTMLCanvasElement;
-    const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
-    let colored = 0;
-    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 107 && pixels[i + 1] === 205 && pixels[i + 2] === 176 && pixels[i + 3]! > 0) colored++;
-    return colored;
-  })).toBeGreaterThan(5);
-  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
-  await expect(page.locator('#io-bin-detail')).toContainText('2097152 completed B');
-  await expect(page.locator('#io-bin-detail')).toContainText('Other ops 4');
-  await expect(page.locator('#io-bin-detail')).toContainText('Combined read/write avg 2500000.000 ns');
-  await page.locator('#io-fs-select').selectOption('0');
-  await page.locator('#io-chart-iops').click({ position: { x: 90, y: 80 } });
-  await expect(page.locator('#io-bin-detail')).toContainText('1048576 completed B');
-  await page.locator('#io-fs-select').selectOption('2');
-  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
-  await expect(page.locator('#io-bin-detail')).toContainText('999999 completed B');
-  await page.locator('#io-per-file summary').click();
-  await expect(page.locator('#io-table')).toContainText('/data/a');
+  const canvas = page.locator('#timeline-canvas');
+  const rows = () => timelineRows(report, data, '0', '', collapsed);
+  const clickLabel = async (key: string) => {
+    const row = rows().find(row => row.key === key)!;
+    await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = Math.max(0, top - 40); }, row.top);
+    const scroll = await page.locator('#timeline-scroll').evaluate(element => element.scrollTop);
+    await canvas.click({ position: { x: 30 + row.depth * 17, y: row.top - scroll + row.height / 2 } });
+    if (collapsed.has(key)) collapsed.delete(key); else collapsed.add(key);
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+  };
+  expect(rows()).toHaveLength(1);
+  await canvas.click({ position: { x: 300, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('105 B / 5');
+  await page.locator('#io-metric-select').selectOption('latency');
+  await canvas.click({ position: { x: 300, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('1000000.000 ns');
+  const before = await page.locator('#range-label').textContent();
+  await page.locator('#zoom-in').click();
+  await expect(page.locator('#range-label')).not.toHaveText(before!);
+  const box = (await canvas.boundingBox())!;
+  await canvas.click({ position: { x: box.width - 20, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('0 B / 0');
+  await page.locator('#fit-view').click();
+  await clickLabel('io:0');
+  expect(rows().filter(row => row.kind === 'io')).toHaveLength(3);
+  await clickLabel(rows()[1]!.key);
+  const process = rows().find(row => row.io?.key.startsWith('io:process:'))!;
+  await clickLabel(process.key);
+  const thread = rows().find(row => row.io?.track?.id === 's0:t0')!;
+  await clickLabel(thread.key);
+  expect(rows().filter(row => row.track?.kind === 'io')).toHaveLength(0);
+  await clickLabel(`${thread.key}:files`);
+  expect(rows().filter(row => row.track?.kind === 'io')).toHaveLength(1000);
+  const point = await position(page, 'pread', 'span', 0, undefined, collapsed);
+  await canvas.click({ position: point });
+  await expect(page.locator('#detail-content')).toContainText('/data/file-0');
+  await clickLabel(`${thread.key}:files`);
+  await page.locator('#timeline-scroll').evaluate(element => { element.scrollTop = 0; });
+  await page.locator('#io-fs-select').selectOption('f2');
+  await canvas.click({ position: { x: 300, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('20 B / 1');
   await page.locator('#domain-select').selectOption('1');
   await expect(page.locator('#io-fs-select option')).toHaveCount(2);
-  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
-  await expect(page.locator('#io-bin-detail')).toContainText('9 completed B');
-  await expect(page.locator('#io-fs-coverage')).not.toContainText('/data');
+  await canvas.click({ position: { x: 300, y: 30 } });
+  await expect(page.locator('#detail-content')).toContainText('999 B / 1');
   await page.getByRole('button', { name: 'Switch to light theme' }).click();
-  await expect(page.locator('#io-profile')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
-  await expect(page.locator('#io-bin-detail')).toContainText('9 completed B');
-  await expect(page.locator('#io-profile img')).toHaveCount(0);
+  await expect(page.locator('#detail-content')).toContainText('999 B / 1');
+  await expect(page.locator('#io-toolbar img')).toHaveCount(0);
   expect(await page.evaluate(() => (globalThis as any).rprofInjected)).toBeUndefined();
 });
 
-test('legacy I/O retains its visible per-file table and does not invent time series', async ({ page }) => {
+test('legacy I/O retains optional per-file details and does not invent time series', async ({ page }) => {
   await loaded(page, injected('io-legacy-message', report => { delete report.io_timeline; }));
   await expect(page.locator('#io-profile')).toHaveCount(0);
   await expect(page.locator('#io-panel')).toContainText('time series unavailable in this older report; regenerate');
-  await expect(page.locator('#io-per-file')).toHaveAttribute('open', '');
+  await expect(page.locator('#io-per-file')).not.toHaveAttribute('open', '');
+  await page.locator('#io-per-file summary').click();
   await expect(page.locator('#io-table')).toBeVisible();
 });
 
@@ -961,7 +970,7 @@ test('estimated clock alignment is labeled with its uncertainty', async ({ page 
   await expect(page.locator('#range-label')).toContainText('estimated ±32 ns');
 });
 
-test('native I/O collection produces inspectable calls and file totals in the browser', async ({ page }) => {
+test('native I/O collection produces timeline graphs and opt-in per-thread file calls', async ({ page }) => {
   execFileSync('make', ['preload'], { cwd: root });
   const workload = join(directory, 'io-workload');
   execFileSync('cc', ['-O2', '-pthread', join(root, 'crates/rprof-cli/tests/fixtures/io_workload.c'), '-o', workload]);
@@ -970,16 +979,22 @@ test('native I/O collection produces inspectable calls and file totals in the br
   execFileSync(binary, ['record', '--collect', 'io', '-o', capture, '--', workload, 'basic', data]);
   await loaded(page, render(capture, 'native-io'));
   await expect(page.locator('#header-meta')).toContainText('MEASURED');
-  await expect(page.locator('#io-profile')).toBeVisible();
-  await expect(page.locator('#io-per-file')).not.toHaveAttribute('open', '');
-  await page.locator('#io-per-file summary').click();
-  await expect(page.locator('#io-table')).toContainText('6 / 17 B');
-  await expect(page.locator('#io-table')).toContainText('8 / 8 B');
-  await page.locator('#io-table .io-file').first().click();
-  await expect(page.locator('#io-operations')).toContainText('fsync');
-  await expect(page.locator('#io-operations')).toContainText('pread');
+  await expect(page.locator('#io-profile')).toHaveCount(0);
+  await expect(page.locator('#io-toolbar')).toBeVisible();
+  await expect(page.locator('#io-panel')).toBeHidden();
+  const report: Report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!));
+  const bins = report.io_timeline!.threads!.flatMap(thread => thread.bins);
+  expect(bins.reduce((sum, bin) => sum + BigInt(bin.read_bytes), 0n)).toBe(6n);
+  expect(bins.reduce((sum, bin) => sum + BigInt(bin.write_bytes), 0n)).toBe(8n);
   await page.locator('#filter-input').fill('pwrite');
-  await clickEvent(page, 'pwrite');
+  const collapsed = defaultTimelineCollapsed(report);
+  const rows = timelineRows(report, indexReport(report), '0', 'pwrite', collapsed);
+  const files = rows.find(row => row.key.endsWith(':files'))!;
+  expect(files).toBeTruthy();
+  await page.locator('#timeline-canvas').click({ position: { x: 120, y: files.top + files.height / 2 } });
+  collapsed.delete(files.key);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await page.locator('#timeline-canvas').click({ position: await position(page, 'pwrite', 'span', undefined, undefined, collapsed) });
   await expect(page.locator('#detail-content h3')).toHaveText('pwrite');
   await expect(page.locator('#detail-content')).toContainText('io.completed_bytes');
   await expect(page.locator('#detail-content')).toContainText(data);

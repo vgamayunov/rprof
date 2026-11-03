@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ioGraph, ioGraphBins, ioMetricValues } from '../src/model.ts';
+import { ioFixture } from './io-fixture.ts';
 import { aggregateIoBins, averageNs, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, indexSpans, integerPlotValues, ioBinMetrics, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, systemGapPrefix, systemPointsConnected, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
 import type { CudaDevice, IoFilesystem, IoTimeBin, OpenmpRegion, Report, Span } from '../src/model.ts';
 
@@ -31,6 +33,62 @@ test('I/O bins use actual short durations, exact counts, weighted latency and un
 const span = (id: number, start_ns: string, duration_ns: string): Span => ({
   id, track: 't', name: `span ${id}`, category: 'compute', start_ns, duration_ns,
   correlation: null, incomplete: false, attributes: {},
+});
+
+test('I/O timeline expands one level at a time; thousands of files require explicit thread-file expansion', () => {
+  const report = ioFixture(2000), data = indexReport(report), collapsed = defaultTimelineCollapsed(report);
+  const rows = () => timelineRows(report, data, '0', '', collapsed);
+  assert.deepEqual(rows().map(row => row.kind), ['io']);
+  const root = rows()[0]!.io!;
+  assert.equal(ioGraphBins(root)![0]!.read_bytes, '105');
+  collapsed.delete(root.key);
+  assert.equal(rows().length, 3); // overview + two ranks, no processes yet
+  const rank = rows()[1]!.io!;
+  assert.equal(ioGraphBins(rank)![0]!.read_bytes, '65');
+  collapsed.delete(rank.key);
+  const processes = rows().filter(row => row.io?.key.startsWith('io:process:'));
+  assert.equal(processes.length, 2, 'reused PID keeps separate process instances');
+  const process = processes[0]!.io!;
+  assert.equal(ioGraphBins(process)![0]!.read_bytes, '60');
+  collapsed.delete(process.key);
+  const thread = rows().find(row => row.io?.track?.id === 's0:t0')!.io!;
+  assert.equal(ioGraphBins(thread)![0]!.read_bytes, '30', 'thread sums multiple filesystems once');
+  collapsed.delete(thread.key);
+  assert.equal(rows().filter(row => row.track?.kind === 'io').length, 0);
+  const files = rows().find(row => row.key === `${thread.key}:files`)!;
+  assert.match(files.label, /2000/);
+  collapsed.delete(files.key);
+  assert.equal(rows().filter(row => row.track?.kind === 'io').length, 2000);
+  collapsed.add(files.key);
+  assert.equal(rows().filter(row => row.track?.kind === 'io').length, 0);
+});
+
+test('I/O graph filters preserve domains, exact source identities, unknown latency and mixed non-I/O tracks', () => {
+  const report = ioFixture();
+  const selected = ioGraph(report, '0', 'f2')!;
+  assert.equal(ioGraphBins(selected)![0]!.read_bytes, '20');
+  assert.equal(selected.children.length, 1);
+  assert.equal(ioGraphBins(ioGraph(report, '1', 'all')!)![0]!.read_bytes, '999');
+  assert.ok(ioMetricValues(ioGraphBins(selected)![1]!, 'latency').every(Number.isNaN));
+  report.spans.push({ id: 100, track: 's0:t0', name: 'MPI_Allreduce', category: 'mpi', start_ns: '100', duration_ns: '100', correlation: null, incomplete: false, attributes: {} });
+  const data = indexReport(report);
+  const rows = timelineRows(report, data, '0', '', defaultTimelineCollapsed(report));
+  assert.ok(rows.some(row => row.track?.id === 's0:t0' && row.kind === 'track'));
+  assert.ok(rows.every(row => row.track?.kind !== 'io'), 'mixed timeline still hides file lanes');
+  const filtered = timelineRows(report, data, '0', 'file-0');
+  assert.ok(filtered.some(row => row.key.endsWith(':files')));
+  assert.ok(filtered.every(row => row.track?.kind !== 'io'), 'search does not implicitly opt into file lanes');
+});
+
+test('legacy raw I/O file lanes are optional under their thread', () => {
+  const report = ioFixture(1000); delete report.io_timeline;
+  const data = indexReport(report), collapsed = defaultTimelineCollapsed(report);
+  let rows = timelineRows(report, data, '0', '', collapsed);
+  assert.ok(rows.some(row => row.track?.kind === 'thread'));
+  assert.ok(rows.every(row => row.track?.kind !== 'io'));
+  collapsed.delete('files:s0:t0');
+  rows = timelineRows(report, data, '0', '', collapsed);
+  assert.equal(rows.filter(row => row.track?.kind === 'io').length, 1000);
 });
 
 function systemFixture(): Report {

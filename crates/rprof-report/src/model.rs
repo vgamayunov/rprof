@@ -39,6 +39,23 @@ pub struct Report {
 pub struct IoTimeline {
     pub filesystems: Vec<IoFilesystem>,
     pub omitted_events: String,
+    #[serde(default)]
+    pub threads: Vec<IoThreadSeries>,
+    #[serde(default)]
+    pub scope_omitted_events: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoThreadSeries {
+    pub filesystem_id: String,
+    pub domain: String,
+    pub shard: String,
+    pub rank: Option<u32>,
+    pub process_instance: String,
+    pub pid: String,
+    pub tid: String,
+    pub thread_track: String,
+    pub bin_width_ns: String,
+    pub bins: Vec<IoTimeBin>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IoFilesystem {

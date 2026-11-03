@@ -51,7 +51,7 @@ Report {
     requested_write_bytes: string, total_ns: string, window_ns: string,
     by_operation: [{ name: string, count: string, errors: string, total_ns: string, max_ns: string }]
   }],
-  io_timeline?: { omitted_events: string, filesystems: [{
+  io_timeline?: { omitted_events: string, scope_omitted_events?: string, filesystems: [{
     id: string, domain: string, host: string, filesystem_type: string,
     mount_point: string, device: string, kind: "filesystem"|"non_filesystem"|"unknown",
     bin_width_ns: string, bins: [{
@@ -60,6 +60,10 @@ Report {
       read_latency_ns: string, write_latency_ns: string, other_latency_ns: string,
       max_latency_ns: string
     }]
+  }], threads?: [{
+    filesystem_id: string, domain: string, shard: string, rank: number|null,
+    process_instance: string, pid: string, tid: string, thread_track: string,
+    bin_width_ns: string, bins: IoTimeBin[] // same fields as filesystem bins above
   }] }
 }
 ```

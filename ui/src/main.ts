@@ -1,5 +1,5 @@
-import { aggregateIoBins, averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoFilesystem, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { ProjectionViewer } from './projection.js';
@@ -8,7 +8,7 @@ import type { Projection } from './projection.js';
 const startingTheme = initialTheme();
 document.documentElement.dataset.theme = startingTheme;
 
-type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter };
+type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter } | { kind: 'io'; bin: IoTimeBin; graph: IoGraph };
 type Hit = { x: number; y: number; width: number; height: number; selection: Selection };
 
 const LABEL_WIDTH = 260;
@@ -80,10 +80,9 @@ class Viewer {
   private operationPage = 0;
   private selectedIo: IoSummary | undefined;
   private ioFilesystem = 'all';
-  private ioBins: IoTimeBin[] = [];
-  private ioChartValues: number[][][] = [];
-  private ioChartTheme: Theme | undefined;
-  private ioChartWidth = 0;
+  private ioMetric: IoMetric = 'throughput';
+  private ioVisible = true;
+  private readonly ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; values: [number, number][]; max: number }>>();
   private regionPage = 0;
   private threadPage = 0;
   private selectedRegion: OpenmpRegion | undefined;
@@ -126,7 +125,7 @@ class Viewer {
     // Only application-owned static markup is used here. All report strings enter via textContent or Canvas.
     root.innerHTML = `<header class="topbar"><div class="brand"><div class="mark">r/</div><div><strong>rprof</strong><small>OFFLINE TIMELINE</small></div></div><div class="header-actions"><div class="header-meta" id="header-meta"></div><button id="theme-toggle" type="button"></button></div></header>
       <section class="overview"><div class="overview-copy"><div class="eyebrow">CAPTURE OVERVIEW</div><h1 id="session-title">Session</h1><p id="overview-subtitle"></p></div><div class="stat-grid" id="stat-grid"></div></section>
-      <div class="workspace"><section class="timeline-section"><div class="toolbar"><div class="toolbar-top"><div class="toolbar-heading"><h2>Timeline</h2><span id="domain-note">CLOCK DOMAINS ARE UNALIGNED</span></div><div class="zoom-controls"><button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button><button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button><button id="fit-view" type="button">Fit all</button></div></div><div class="toolbar-fields"><label class="field">Clock domain <select id="domain-select" aria-label="Clock domain"></select></label><label class="field search">Filter <input id="filter-input" type="search" placeholder="Name, category, rank…" aria-label="Filter tracks and events"></label><span id="range-label" class="range-label"></span></div></div><div class="ruler-wrap"><div class="track-header">TRACKS <span>▾ collapse</span></div><canvas id="time-ruler" aria-label="Timeline time axis"></canvas></div><div class="plot-scroll" id="timeline-scroll" tabindex="0" aria-label="Timeline tracks; scroll vertically, wheel over plot to zoom, drag to pan"><canvas id="timeline-canvas" aria-label="Interactive timeline spans and counters"></canvas><div id="timeline-spacer"></div></div><div class="timeline-footer"><span><i class="legend-swatch span-key"></i> span <i class="legend-swatch counter-key"></i> counter <i class="legend-swatch incomplete-key"></i> incomplete</span><span>Wheel: zoom · Drag: pan · Shift + wheel: scroll</span></div></section><aside class="sidebar"><section class="side-card" id="detail-panel"><div class="side-title">INSPECTOR</div><div id="detail-content" class="detail-content"></div></section><section class="side-card"><div class="side-title">CATEGORY SUMMARY <span>INCLUSIVE TIME</span></div><div class="category-wrap"><table id="category-table"><thead><tr><th>Category</th><th>Spans</th><th>Time</th></tr></thead><tbody></tbody></table></div><p class="footnote">Inclusive durations may overlap and double-count nested work. Counts cover the full capture, not just retained events.</p></section><section class="side-card"><div class="side-title">CAPTURE STATUS</div><div id="capture-status"></div></section></aside></div>`;
+      <div class="workspace"><section class="timeline-section"><div class="toolbar"><div class="toolbar-top"><div class="toolbar-heading"><h2>Timeline</h2><span id="domain-note">CLOCK DOMAINS ARE UNALIGNED</span></div><div class="zoom-controls"><button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button><button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button><button id="fit-view" type="button">Fit all</button></div></div><div class="toolbar-fields"><label class="field">Clock domain <select id="domain-select" aria-label="Clock domain"></select></label><label class="field search">Filter <input id="filter-input" type="search" placeholder="Name, category, rank…" aria-label="Filter tracks and events"></label><span id="range-label" class="range-label"></span></div><div class="io-toolbar" id="io-toolbar" hidden><button type="button" id="io-toggle" aria-label="Toggle I/O graph" aria-pressed="true">I/O ▾</button><label class="field">Filesystem <select id="io-fs-select" aria-label="Filesystem"></select></label><label class="field">Metric <select id="io-metric-select" aria-label="I/O metric"><option value="throughput">Throughput · MiB/s</option><option value="iops">Calls/s (IOPS)</option><option value="latency">Average latency · ms</option></select></label><span class="io-legend"><i class="io-read-key"></i> Read <i class="io-write-key"></i> Write</span><span id="io-coverage" class="io-coverage"></span></div></div><div class="ruler-wrap"><div class="track-header">TRACKS <span>▾ collapse</span></div><canvas id="time-ruler" aria-label="Timeline time axis"></canvas></div><div class="plot-scroll" id="timeline-scroll" tabindex="0" aria-label="Timeline tracks; scroll vertically, wheel over plot to zoom, drag to pan"><canvas id="timeline-canvas" aria-label="Interactive timeline spans and counters"></canvas><div id="timeline-spacer"></div></div><div class="timeline-footer"><span><i class="legend-swatch span-key"></i> span <i class="legend-swatch counter-key"></i> counter <i class="legend-swatch incomplete-key"></i> incomplete</span><span>Wheel: zoom · Drag: pan · Shift + wheel: scroll</span></div></section><aside class="sidebar"><section class="side-card" id="detail-panel"><div class="side-title">INSPECTOR</div><div id="detail-content" class="detail-content"></div></section><section class="side-card"><div class="side-title">CATEGORY SUMMARY <span>INCLUSIVE TIME</span></div><div class="category-wrap"><table id="category-table"><thead><tr><th>Category</th><th>Spans</th><th>Time</th></tr></thead><tbody></tbody></table></div><p class="footnote">Inclusive durations may overlap and double-count nested work. Counts cover the full capture, not just retained events.</p></section><section class="side-card"><div class="side-title">CAPTURE STATUS</div><div id="capture-status"></div></section></aside></div>`;
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
@@ -139,24 +138,23 @@ class Viewer {
     perFile.append(perFileContent);
     if (!report.io_timeline) {
       perFile.prepend(node('p', 'io-note', 'I/O time series unavailable in this older report; regenerate the report from the capture to view filesystem graphs. Per-file details remain available below.'));
-      perFileContent.open = true;
     } else {
-      const panel = node('section', 'io-section io-profile'); panel.id = 'io-profile';
-      panel.innerHTML = `<div class="io-heading"><div><h2>I/O performance over time</h2><p>Filesystem view · full-capture completed POSIX read/write bytes per bin duration, POSIX calls/s (not device IOPS), and call latency. Clock domains are never mixed.</p></div><span id="io-fs-count"></span></div><label class="io-fs-field">Filesystem <select id="io-fs-select" aria-label="Filesystem"></select></label><p class="io-note" id="io-fs-coverage"></p><div class="io-chart-grid"></div><div id="io-bin-detail" class="io-bin-detail" aria-live="polite">Click a bin to inspect exact values and other operations.</div>`;
-      for (const [id, title] of [['throughput', 'Throughput · MiB/s'], ['iops', 'IOPS · read/write calls/s'], ['latency', 'Average read/write call latency · ms']] as const) {
-        const chart = node('div', 'io-chart');
-        const legend = node('p', 'io-chart-legend');
-        legend.append(node('span', 'io-read-key', 'Read'), node('span', 'io-write-key', 'Write'));
-        if (id === 'latency') legend.append(node('span', 'io-mean-key', 'Combined (weighted)'));
-        chart.append(node('h3', '', title), legend);
-        const canvas = node('canvas'); canvas.id = `io-chart-${id}`; canvas.setAttribute('aria-label', `${title} over time; click a bin to inspect`);
-        canvas.addEventListener('click', event => this.inspectIoBin(event, canvas));
-        chart.append(canvas); panel.querySelector('.io-chart-grid')!.append(chart);
-      }
-      this.root.querySelector('.workspace')!.before(panel);
+      perFile.hidden = !!report.io_timeline.threads?.length;
+      this.get('io-toolbar').hidden = false;
+      this.get('io-toggle').addEventListener('click', () => {
+        this.ioVisible = !this.ioVisible;
+        this.get('io-toggle').setAttribute('aria-pressed', String(this.ioVisible));
+        this.get('io-toggle').textContent = this.ioVisible ? 'I/O ▾' : 'I/O ▸';
+        this.buildRows(); this.schedule();
+      });
       this.get('io-fs-select').addEventListener('change', () => {
         this.ioFilesystem = (this.get('io-fs-select') as HTMLSelectElement).value;
-        this.selectIoFilesystem();
+        this.selection = undefined; this.showDetails();
+        this.buildRows(); this.schedule();
+      });
+      this.get('io-metric-select').addEventListener('change', () => {
+        this.ioMetric = (this.get('io-metric-select') as HTMLSelectElement).value as IoMetric;
+        this.schedule();
       });
     }
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p id="openmp-coverage"></p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><div id="gomp-panel" hidden><h3>GNU libgomp observed calls and outlined bodies</h3><p class="io-note" id="gomp-coverage"></p><p class="io-note" id="gomp-tasks"></p><h3>GOMP API calls <span id="gomp-api-count"></span></h3><div class="io-wrap"><table id="gomp-apis"><thead><tr><th>API · image / shard</th><th>Calls</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-api-pager"></div><h3>Outlined body returns <span id="gomp-body-count"></span></h3><div class="io-wrap"><table id="gomp-bodies"><thead><tr><th>Kind · image / shard</th><th>Thread ID</th><th>Opaque code pointer (not source)</th><th>Body spans</th><th>Inclusive wall time</th><th>Max wall time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-body-pager"></div></div><details id="openmp-runtimes"><summary>Runtime and capability details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
@@ -392,6 +390,7 @@ class Viewer {
   }
 
   private renderIo(): void {
+    if (this.report.io_timeline?.threads?.length) return;
     const files = (this.report.io ?? []).filter(file => file.domain === this.domain?.id);
     const tbody = this.get('io-table').querySelector('tbody')!;
     tbody.replaceChildren();
@@ -425,102 +424,9 @@ class Viewer {
     const storage = files.filter(fs => fs.kind !== 'non_filesystem');
     const add = (value: string, label: string): void => { const option = node('option', '', label); option.value = value; select.append(option); };
     add('all', `All filesystem + unknown groups (${storage.length})`);
-    for (const [index, fs] of files.entries()) add(String(index), `${fs.host} · ${fs.mount_point || '(no mount)'} · ${fs.filesystem_type || 'unknown type'} · ${fs.device || 'unknown device'}${fs.kind === 'non_filesystem' ? ' · non-file I/O' : fs.kind === 'unknown' ? ' · unknown' : ''}`);
-    this.get('io-fs-count').textContent = `${storage.length} filesystem / unknown · ${files.length - storage.length} non-file groups`;
-    this.selectIoFilesystem();
-  }
-
-  private selectIoFilesystem(): void {
-    const files = (this.report.io_timeline?.filesystems ?? []).filter(fs => fs.domain === this.domain?.id);
-    const selected = this.ioFilesystem === 'all' ? files.filter(fs => fs.kind !== 'non_filesystem') :
-      files[Number(this.ioFilesystem)] ? [files[Number(this.ioFilesystem)]!] : [];
-    const bins = aggregateIoBins(selected);
-    this.ioBins = bins ?? [];
-    this.ioChartValues = this.ioBins.map(bin => {
-      const m = ioBinMetrics(bin);
-      const n = (value: string, divisor = 1): number => value === '—' ? NaN : Number.parseFloat(value) / divisor;
-      return [[n(m.readBytesPerSec, 1048576), n(m.writeBytesPerSec, 1048576)],
-        [n(m.readOpsPerSec), n(m.writeOpsPerSec)],
-        [n(m.readLatencyNs, 1_000_000), n(m.writeLatencyNs, 1_000_000), n(m.meanLatencyNs, 1_000_000)]];
-    });
-    this.ioChartTheme = undefined;
-    const omitted = this.report.io_timeline?.omitted_events ?? '0';
-    this.get('io-fs-coverage').textContent = bins === null ?
-      'These groups have different time grids; select one filesystem to inspect without mixing bins.' :
-      `${selected.length === 1 ? `${selected[0]!.host} · ${selected[0]!.mount_point} (${selected[0]!.filesystem_type}, ${selected[0]!.device})` : `${selected.length} filesystem / unknown groups across ${new Set(selected.map(fs => fs.host)).size} hosts`} · ${this.ioBins.length} bins · ${omitted} I/O timeline events omitted · ${this.report.summary.dropped} capture events dropped (capture-wide) · ${this.report.summary.complete ? 'finalized capture' : 'partial capture'}. Failed calls count in operations/latency/errors but contribute no completed bytes. Empty bins mean no recorded calls, not proof of idle storage; no calls means latency unknown. Other operations include metadata calls and are not included in read/write IOPS or average latency.`;
-    this.get('io-bin-detail').textContent = 'Click a bin to inspect exact values and other operations.';
-    this.schedule();
-  }
-
-  private inspectIoBin(event: MouseEvent, canvas: HTMLCanvasElement): void {
-    const extent = this.domain ? BigInt(this.domain.end_ns) : 0n;
-    const x = event.clientX - canvas.getBoundingClientRect().left - 60;
-    const width = canvas.clientWidth - 72;
-    if (!extent || !width) return;
-    const time = extent * BigInt(Math.floor(Math.max(0, Math.min(width, x)) * 1_000_000 / width)) / 1_000_000n;
-    const bin = this.ioBins.find(item => BigInt(item.start_ns) <= time && time < BigInt(item.start_ns) + BigInt(item.duration_ns));
-    if (!bin) return;
-    const rates = ioBinMetrics(bin);
-    this.get('io-bin-detail').textContent = `${formatNs(BigInt(bin.start_ns))}–${formatNs(BigInt(bin.start_ns) + BigInt(bin.duration_ns))} (duration ${formatNs(BigInt(bin.duration_ns))}) · Read ${bin.read_bytes} completed B, ${bin.read_ops} calls, ${rates.readBytesPerSec} B/s, ${rates.readOpsPerSec} calls/s, avg ${rates.readLatencyNs} · Write ${bin.write_bytes} completed B, ${bin.write_ops} calls, ${rates.writeBytesPerSec} B/s, ${rates.writeOpsPerSec} calls/s, avg ${rates.writeLatencyNs} · Combined read/write avg ${rates.meanLatencyNs} · Other ops ${bin.other_ops} · Errors ${bin.errors} · Max latency (all calls incl metadata) ${bin.max_latency_ns} ns`;
-  }
-
-  private drawIoCharts(): void {
-    if (!this.report.io_timeline) return;
-    const chartWidth = this.get('io-chart-throughput').clientWidth;
-    if (this.ioChartTheme === this.theme && this.ioChartWidth === chartWidth) return;
-    this.ioChartTheme = this.theme; this.ioChartWidth = chartWidth;
-    const extent = this.domain ? BigInt(this.domain.end_ns) : 0n;
-    const isLight = this.theme === 'light';
-    const palette = isLight ? ['#176b61', '#af661c', '#6743a3'] : ['#6bcdb0', '#e5b46d', '#b29be6'];
-    for (const [chartIndex, kind] of ['throughput', 'iops', 'latency'].entries()) {
-      const canvas = this.get(`io-chart-${kind}`) as HTMLCanvasElement;
-      const width = Math.max(1, canvas.clientWidth), height = 172;
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
-      const ctx = canvas.getContext('2d')!; ctx.scale(dpr, dpr);
-      const left = 60, right = 12, top = 14, bottom = 28, plotWidth = Math.max(1, width - left - right), plotHeight = height - top - bottom;
-      const values = this.ioChartValues.map(row => row[chartIndex]!);
-      let max = 0;
-      for (const row of values) for (const value of row) if (Number.isFinite(value)) max = Math.max(max, value);
-      max ||= 1;
-      ctx.strokeStyle = isLight ? '#cddae3' : '#3c596a'; ctx.fillStyle = isLight ? '#526b79' : '#a9bec9';
-      ctx.font = '11px ui-sans-serif, system-ui';
-      for (let tick = 0; tick <= 2; tick++) {
-        const y = top + plotHeight * tick / 2;
-        ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(width - right, y); ctx.stroke();
-        ctx.fillText((max * (1 - tick / 2)).toLocaleString(undefined, { maximumSignificantDigits: 3 }), 2, y + 3);
-      }
-      ctx.fillText('0', left, height - 7);
-      ctx.textAlign = 'right'; ctx.fillText(extent ? formatNs(extent) : 'no domain', width - right, height - 7); ctx.textAlign = 'left';
-      if (!extent) continue;
-      if (!this.ioBins.length) { ctx.fillText('No filesystem observations in this selection', left + 6, top + 32); continue; }
-      Array.from({ length: kind === 'latency' ? 3 : 2 }).forEach((_, series) => {
-        ctx.strokeStyle = palette[series]!; ctx.lineWidth = 2;
-        let connected = false;
-        for (let i = 0; i < this.ioBins.length; i++) {
-          const bin = this.ioBins[i]!, value = values[i]![series]!;
-          if (!Number.isFinite(value)) { connected = false; continue; }
-          const start = BigInt(bin.start_ns), duration = BigInt(bin.duration_ns);
-          const x = left + Number(start * 1_000_000n / extent) / 1_000_000 * plotWidth;
-          const endX = left + Number((start + duration) * 1_000_000n / extent) / 1_000_000 * plotWidth;
-          const y = top + plotHeight * (1 - Math.min(1, value / max));
-          ctx.beginPath();
-          if (kind === 'latency') {
-            if (connected) ctx.moveTo(left + Number((BigInt(this.ioBins[i - 1]!.start_ns) + BigInt(this.ioBins[i - 1]!.duration_ns) / 2n) * 1_000_000n / extent) / 1_000_000 * plotWidth, top + plotHeight * (1 - Math.min(1, values[i - 1]![series]! / max)));
-            else ctx.moveTo(x + (endX - x) / 2, y);
-            ctx.lineTo(x + (endX - x) / 2, y);
-            ctx.stroke();
-            ctx.fillStyle = palette[series]!; ctx.fillRect(x + (endX - x) / 2 - 2, y - 2, 4, 4);
-          } else {
-            ctx.fillStyle = palette[series]!;
-            ctx.globalAlpha = .8;
-            ctx.fillRect(x + (endX - x) * series / 2, y, Math.max(1, (endX - x) / 2), top + plotHeight - y);
-            ctx.globalAlpha = 1;
-          }
-          connected = true;
-        }
-      });
-    }
+    for (const fs of files) add(fs.id, `${fs.host} · ${fs.mount_point || '(no mount)'} · ${fs.filesystem_type || 'unknown type'} · ${fs.device || 'unknown device'}${fs.kind === 'non_filesystem' ? ' · non-file I/O' : fs.kind === 'unknown' ? ' · unknown' : ''}`);
+    const series = this.report.io_timeline!;
+    this.get('io-coverage').textContent = `Full-capture POSIX rates · ${series.omitted_events} filesystem / ${series.scope_omitted_events || '0'} thread observations omitted · ${this.report.summary.dropped} capture drops${series.threads?.length ? ' · files appear only inside expanded threads' : ' · regenerate report for thread drill-down'} · no calls means latency unknown`;
   }
 
   private renderPager(parent: HTMLElement, total: number, page: number, change: (page: number) => void): void {
@@ -1032,7 +938,7 @@ class Viewer {
     const bounds = this.canvas.getBoundingClientRect();
     const hit = this.hitAt(event.clientX - bounds.left, event.clientY - bounds.top);
     if (!hit) { this.hideTooltip(); return; }
-    const label = hit.selection.kind === 'span' ? hit.selection.item.span.name : hit.selection.item.counter.name;
+    const label = hit.selection.kind === 'span' ? hit.selection.item.span.name : hit.selection.kind === 'io' ? `${hit.selection.graph.label} · ${this.ioMetric}` : hit.selection.item.counter.name;
     this.tooltip.textContent = label;
     this.canvas.title = label;
     this.tooltip.hidden = false;
@@ -1057,7 +963,7 @@ class Viewer {
   }
 
   private buildRows(): void {
-    this.rows = timelineRows(this.report, this.data, this.domain?.id, this.filter.value, this.collapsed);
+    this.rows = timelineRows(this.report, this.data, this.domain?.id, this.filter.value, this.collapsed, this.ioFilesystem, this.ioVisible);
     for (const [kind, button] of this.systemButtons) {
       const key = `system:${this.domain?.id}:${kind}`;
       button.hidden = !this.rows.some(row => row.key === key);
@@ -1092,7 +998,6 @@ class Viewer {
   }
 
   private draw(): void {
-    this.drawIoCharts();
     this.hideTooltip();
     const width = this.scroll.clientWidth;
     const height = this.scroll.clientHeight;
@@ -1114,6 +1019,7 @@ class Viewer {
       ctx.save(); ctx.beginPath(); ctx.rect(LABEL_WIDTH + 1, y, width - LABEL_WIDTH - 1, row.height); ctx.clip();
       if (row.kind === 'track') this.drawSpans(ctx, row, y, viewEnd, anchors);
       if (row.kind === 'counter') this.drawCounter(ctx, row, y, viewEnd);
+      if (row.kind === 'io') this.drawIoGraph(ctx, row, y, viewEnd);
       ctx.restore();
       ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
       ctx.font = row.kind === 'shard' || row.kind === 'rank' ? '600 12px system-ui' : '12px system-ui';
@@ -1238,6 +1144,55 @@ class Viewer {
     ctx.fillText(row.system ? `${points.length} samples · ${row.system === 'cpu' ? '0–100%' : `0–${row.capacity ? (Number(BigInt(row.capacity)) / 2 ** 30).toFixed(1) + ' GiB' : 'observed peak (capacity unknown)'}`} · ${row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not app usage'}` : `${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
   }
 
+  private drawIoGraph(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
+    const graph = row.io!;
+    let cache = this.ioPlots.get(graph);
+    if (!cache) { cache = new Map(); this.ioPlots.set(graph, cache); }
+    let plot = cache.get(this.ioMetric);
+    if (!plot) {
+      const bins = ioGraphBins(graph) ?? [];
+      const values = bins.map(bin => ioMetricValues(bin, this.ioMetric));
+      let max = 0;
+      for (const pair of values) for (const value of pair) if (Number.isFinite(value)) max = Math.max(max, value);
+      plot = { bins, values, max: max || 1 }; cache.set(this.ioMetric, plot);
+    }
+    ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
+    if (!plot.bins.length) { ctx.fillText('No full-capture I/O bins available for this selection', LABEL_WIDTH + 8, y + 32); return; }
+    const first = lowerBound(plot.bins, bin => BigInt(bin.start_ns) + BigInt(bin.duration_ns) > this.start);
+    const last = lowerBound(plot.bins, bin => BigInt(bin.start_ns) >= end);
+    const palette = this.theme === 'light' ? ['#176b61', '#af661c'] : ['#6bcdb0', '#e5b46d'];
+    const top = y + 9, bottom = y + row.height - 19, height = bottom - top;
+    for (let series = 0; series < 2; series++) {
+      ctx.fillStyle = palette[series]!; ctx.strokeStyle = palette[series]!; ctx.lineWidth = 1.5;
+      let previous: { x: number; y: number } | undefined;
+      for (let i = first; i < last; i++) {
+        const bin = plot.bins[i]!, value = plot.values[i]![series]!;
+        if (!Number.isFinite(value)) { previous = undefined; continue; }
+        const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(BigInt(bin.start_ns), this.start, this.nsPerPx));
+        const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(BigInt(bin.start_ns) + BigInt(bin.duration_ns), this.start, this.nsPerPx));
+        const py = bottom - height * value / plot.max;
+        ctx.globalAlpha = .14; ctx.fillRect(left, py, right - left, bottom - py); ctx.globalAlpha = 1;
+        ctx.beginPath();
+        if (previous && Math.abs(previous.x - left) < 1) { ctx.moveTo(left, previous.y); ctx.lineTo(left, py); }
+        else ctx.moveTo(left, py);
+        ctx.lineTo(right, py); ctx.stroke(); previous = { x: right, y: py };
+      }
+    }
+    for (let i = first; i < last; i++) {
+      const bin = plot.bins[i]!;
+      const left = Math.max(LABEL_WIDTH + 1, LABEL_WIDTH + timeToX(BigInt(bin.start_ns), this.start, this.nsPerPx));
+      const right = Math.min(this.scroll.clientWidth, LABEL_WIDTH + timeToX(BigInt(bin.start_ns) + BigInt(bin.duration_ns), this.start, this.nsPerPx));
+      if (right <= left) continue;
+      this.hits.push({ x: left, y: top, width: right - left, height, selection: { kind: 'io', bin, graph } });
+      if (this.selection?.kind === 'io' && this.selection.graph.key === graph.key && this.selection.bin === bin) {
+        ctx.strokeStyle = this.colors.selected; ctx.strokeRect(left, top, right - left, height);
+      }
+    }
+    ctx.lineWidth = 1; ctx.fillStyle = this.colors.muted;
+    const unit = this.ioMetric === 'throughput' ? 'MiB/s' : this.ioMetric === 'iops' ? 'calls/s (POSIX)' : 'ms · no calls = unknown';
+    ctx.fillText(`0–${plot.max.toLocaleString(undefined, { maximumSignificantDigits: 3 })} ${unit} · ${last - first} visible bins`, LABEL_WIDTH + 8, y + row.height - 4);
+  }
+
   private drawLinks(ctx: CanvasRenderingContext2D, anchors: Map<string, { x: number; y: number }>): void {
     if (this.selection?.kind !== 'span' || !this.selection.item.span.correlation) return;
     const selected = this.selection.item.span.correlation;
@@ -1255,7 +1210,7 @@ class Viewer {
     if (x < LABEL_WIDTH) {
       const row = this.rows.find(item => y + this.scroll.scrollTop >= item.top && y + this.scroll.scrollTop < item.top + item.height);
       if (row?.hasChildren) {
-        if (row.system && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
+        if ((row.system || (row.io && row.expanded && this.collapsed.has(row.key))) && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
         else if (this.collapsed.has(row.key)) this.collapsed.delete(row.key); else this.collapsed.add(row.key);
         this.buildRows(); this.schedule();
       } else if (row?.kind === 'shard') this.showShard(row.shard);
@@ -1323,6 +1278,19 @@ class Viewer {
       for (const edge of links) put(dl, 'div', `Dependency · ${edge.relation}`, `${edge.from} → ${edge.to}`);
       if (span.correlation && !links.length) put(dl, 'div', 'Dependency', 'No linked endpoint retained');
       for (const [key, value] of Object.entries(span.attributes)) put(dl, 'div', key, value);
+    } else if (this.selection.kind === 'io') {
+      const { bin, graph } = this.selection;
+      const rates = ioBinMetrics(bin);
+      this.detail.append(node('h3', '', graph.label), node('p', 'muted', 'Full-capture POSIX I/O · calls assigned to completion bins; not physical disk rates.'));
+      put(dl, 'div', 'Window', `${formatNs(BigInt(bin.start_ns))}–${formatNs(BigInt(bin.start_ns) + BigInt(bin.duration_ns))}`);
+      put(dl, 'div', 'Read bytes / calls', `${bin.read_bytes} B / ${bin.read_ops}`);
+      put(dl, 'div', 'Write bytes / calls', `${bin.write_bytes} B / ${bin.write_ops}`);
+      put(dl, 'div', 'Read throughput / IOPS', `${rates.readBytesPerSec} B/s / ${rates.readOpsPerSec} calls/s`);
+      put(dl, 'div', 'Write throughput / IOPS', `${rates.writeBytesPerSec} B/s / ${rates.writeOpsPerSec} calls/s`);
+      put(dl, 'div', 'Mean read / write latency', `${rates.readLatencyNs} / ${rates.writeLatencyNs}`);
+      put(dl, 'div', 'Weighted mean latency', rates.meanLatencyNs);
+      put(dl, 'div', 'Other operations / errors', `${bin.other_ops} / ${bin.errors}`);
+      put(dl, 'div', 'Max latency (all calls)', BigInt(bin.read_ops) + BigInt(bin.write_ops) + BigInt(bin.other_ops) > 0n ? `${bin.max_latency_ns} ns` : '—');
     } else {
       const { counter, time } = this.selection.item;
       this.detail.append(node('h3', '', counter.name));

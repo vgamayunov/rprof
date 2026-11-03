@@ -46,6 +46,29 @@ fn completion_bins_preserve_bytes_errors_latencies_and_survive_raw_retention() {
             }),
         ))
         .unwrap();
+    for (track_id, parent, kind) in [
+        (1, 0, TrackKind::Thread { tid: 9 }),
+        (
+            2,
+            1,
+            TrackKind::Io {
+                resource: "/data/file".into(),
+            },
+        ),
+    ] {
+        recorder
+            .reliable(Event::new(
+                0,
+                Payload::Track(Track {
+                    id: track_id,
+                    parent_id: Some(parent),
+                    name: "detail".into(),
+                    rank: Some(3),
+                    kind,
+                }),
+            ))
+            .unwrap();
+    }
     for (op, end, duration, bytes, result, known) in [
         ("read", 1_500_000, 1_000_000, 40, 40, true),
         (
@@ -65,6 +88,9 @@ fn completion_bins_preserve_bytes_errors_latencies_and_survive_raw_retention() {
             ("io.file".into(), Attribute::Text("/data/file".into())),
             ("io.completed_bytes".into(), Attribute::Unsigned(bytes)),
             ("io.result".into(), Attribute::Signed(result)),
+            ("pid".into(), Attribute::Unsigned(1)),
+            ("tid".into(), Attribute::Unsigned(9)),
+            ("process_instance".into(), Attribute::Unsigned(111)),
         ]);
         if known {
             for (key, value) in [
@@ -90,7 +116,7 @@ fn completion_bins_preserve_bytes_errors_latencies_and_survive_raw_retention() {
                 timestamp_ns: end,
                 attributes,
                 payload: Payload::Span(Span {
-                    track_id: 0,
+                    track_id: 2,
                     name: op.into(),
                     category: Category::Io,
                     start_ns: end - duration,
@@ -128,6 +154,24 @@ fn completion_bins_preserve_bytes_errors_latencies_and_survive_raw_retention() {
     let timeline = full.io_timeline.unwrap();
     assert_eq!(timeline.filesystems.len(), 2);
     assert_eq!(timeline.omitted_events, "0");
+    assert_eq!(timeline.scope_omitted_events, "0");
+    assert_eq!(timeline.threads.len(), 2);
+    for thread in &timeline.threads {
+        assert_eq!(thread.rank, Some(3));
+        assert_eq!(thread.pid, "1");
+        assert_eq!(thread.tid, "9");
+        assert_eq!(thread.process_instance, "111");
+        assert_eq!(thread.thread_track, format!("{id}:1"));
+        let filesystem = timeline
+            .filesystems
+            .iter()
+            .find(|f| f.id == thread.filesystem_id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&filesystem.bins).unwrap(),
+            serde_json::to_value(&thread.bins).unwrap()
+        );
+    }
     let fs = timeline
         .filesystems
         .iter()

@@ -33,7 +33,7 @@ rprof record -o process.jsonl -- ./app
 # Host CPU utilization and memory; expand hosts, logical CPUs and NUMA nodes
 rprof record --collect system -o system.jsonl -- ./app
 
-# Default filesystem graphs: throughput, latency and IOPS over time
+# Throughput in the timeline; expand rank -> process -> thread -> optional files
 rprof record --collect io -o io.jsonl -- ./app
 
 # LLVM libomp / Intel libiomp5

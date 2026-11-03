@@ -44,7 +44,7 @@ read-only feature.
 - Synthetic multitrack fixtures, browser tests, and source/bundle consistency checks.
 - Optional C/Rust POSIX I/O preload collector with process/thread/file attribution.
 - Per-file byte counts, errors, latency summaries, and I/O call timeline spans.
-- Default filesystem I/O dashboard with throughput, IOPS and latency graphs over time.
+- I/O timeline graphs with throughput/IOPS/latency, rank/process/thread drill-down and optional file lanes.
 - Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
 - Optional MPI clock calibration with explicit uncertainty and drift reporting.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.

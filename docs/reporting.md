@@ -48,10 +48,12 @@ the model. The current process collector supplies the real command lifetime;
 `fixtures/multitrack.jsonl` demonstrates the richer track types synthetically.
 
 With `--collect io`, real POSIX operations appear on thread/file lanes. The I/O
-dashboard defaults to filesystem throughput, IOPS and latency graphs over time,
-with host/mount/type/device selection. Full-capture rate bins remain available beyond
-raw timeline retention. Per-file completed/requested bytes, errors, observed-window
-bandwidth and operation latency remain in a collapsed, paginated detail section.
+view defaults to an aggregate throughput graph **inside the main timeline**. Expand
+rank → process → thread, then explicitly open a thread's Files group for raw file
+calls. The shared ruler, zoom and pan apply to graphs and spans. Toolbar selectors
+choose filesystem and throughput/IOPS/latency. Full-capture bins survive raw timeline
+retention; file calls retain the usual raw-event limits. Older reports retain a
+collapsed per-file detail table.
 Counts reflect captured events; see [I/O profiling](io-profiling.md) for loss and
 coverage semantics. MPI calls use a distinct color and full-name hover/inspection;
 actual MPI events are supplied by `--collect mpi`; see [MPI profiling](mpi-profiling.md).
