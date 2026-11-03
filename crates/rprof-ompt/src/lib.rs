@@ -10,6 +10,53 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
 static PID: AtomicI32 = AtomicI32::new(0);
 
+/// Verify the exact target library selected when the GNU adapter was built.
+/// # Safety
+/// Both arguments are valid NUL-terminated strings supplied by the adapter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rprof_omp_runtime_matches(
+    path: *const libc::c_char,
+    expected: *const libc::c_char,
+) -> i32 {
+    use sha2::{Digest, Sha256};
+    use std::{ffi::CStr, io::Read, os::unix::ffi::OsStrExt};
+    let saved = unsafe { *libc::__errno_location() };
+    let result = (|| -> Option<i32> {
+        if path.is_null() || expected.is_null() {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(path) }.to_bytes();
+        let expected = unsafe { CStr::from_ptr(expected) }.to_str().ok()?;
+        if path.len() > 4096 || expected.len() != 64 {
+            return None;
+        }
+        let mut file = std::fs::File::open(std::ffi::OsStr::from_bytes(path)).ok()?;
+        if file.metadata().ok()?.len() > 128 * 1024 * 1024 {
+            return None;
+        }
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 16384];
+        let mut total = 0usize;
+        loop {
+            let n = file.read(&mut buffer).ok()?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+            if total > 128 * 1024 * 1024 {
+                return None;
+            }
+            hash.update(&buffer[..n]);
+        }
+        Some(i32::from(format!("{:x}", hash.finalize()) == expected))
+    })()
+    .unwrap_or(0);
+    unsafe {
+        *libc::__errno_location() = saved;
+    }
+    result
+}
+
 fn now() -> u64 {
     let mut time: libc::timespec = unsafe { std::mem::zeroed() };
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {

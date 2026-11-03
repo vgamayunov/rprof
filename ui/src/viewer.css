@@ -12,6 +12,10 @@
 .openmp-section .io-wrap table{min-width:920px}
 .openmp-section #openmp-threads{min-width:780px}
 .openmp-section #openmp-callbacks{min-width:600px}
+.openmp-section #gomp-panel{border-top:1px solid #324a58;margin-top:16px;padding-top:12px}
+.openmp-section #gomp-panel[hidden]{display:none}
+.openmp-section #gomp-bodies td:nth-child(3),.openmp-section #openmp-callbacks td:last-child{white-space:normal;overflow-wrap:anywhere;max-width:660px}
+.openmp-section h3 span{color:#91adba;font-size:11px;font-weight:400}
 .openmp-section #openmp-detail,.openmp-section #openmp-callback-detail{border-top:1px solid #324a58;margin-top:14px}
 .openmp-section #openmp-detail:empty,.openmp-section #openmp-callback-detail:empty{display:none}
 .openmp-section h3{font-size:14px;overflow-wrap:anywhere}
@@ -117,6 +121,8 @@
 :root[data-theme="light"] #openmp-callback-detail,
 :root[data-theme="light"] .openmp-section details,
 :root[data-theme="light"] .openmp-runtime-row{border-color:#d6e0e8}
+:root[data-theme="light"] .openmp-section #gomp-panel{border-color:#d6e0e8}
+:root[data-theme="light"] .openmp-section h3 span{color:#526b79}
 :root[data-theme="light"] .cuda-section details,
 :root[data-theme="light"] .cuda-section #cuda-device-detail,
 :root[data-theme="light"] .cuda-section #cuda-runtime-detail{border-color:#d6e0e8}

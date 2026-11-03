@@ -93,6 +93,12 @@ pub(crate) struct RecordArgs {
     /// OMPT tool library (default: librprof_ompt.so alongside rprof).
     #[arg(long)]
     openmp_library: Option<PathBuf>,
+    /// OMPT tool or target-built GCC/libgomp ABI adapter; chosen before launch.
+    #[arg(long,value_enum,default_value_t=OpenmpBackend::Ompt)]
+    openmp_backend: OpenmpBackend,
+    /// GNU observation level: regions only (default), plus task bodies, or full API/chunk detail.
+    #[arg(long,value_enum,default_value_t=GompDetail::Regions)]
+    gomp_detail: GompDetail,
     /// Target-built CUPTI injection library (default: librprof_cuda.so alongside rprof).
     #[arg(long)]
     cuda_library: Option<PathBuf>,
@@ -159,6 +165,27 @@ impl PythonBackend {
 pub(crate) enum PmuScope {
     WorkloadTree,
     RootThread,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum OpenmpBackend {
+    Ompt,
+    Gomp,
+}
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum GompDetail {
+    Regions,
+    Bodies,
+    Full,
+}
+impl GompDetail {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Regions => "regions",
+            Self::Bodies => "bodies",
+            Self::Full => "full",
+        }
+    }
 }
 impl PmuScope {
     fn name(self) -> &'static str {

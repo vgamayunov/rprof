@@ -20,6 +20,14 @@ pub const TASK_CREATE: u16 = 15;
 pub const TASK_SCHEDULE: u16 = 16;
 pub const DEPENDENCE: u16 = 17;
 pub const FINALIZE: u16 = 18;
+// GNU ABI observations are intentionally distinct from OMPT scheduling callbacks.
+pub const GOMP_API_BEGIN: u16 = 19;
+pub const GOMP_API_END: u16 = 20;
+pub const GOMP_BODY_BEGIN: u16 = 21;
+pub const GOMP_BODY_END: u16 = 22;
+pub const GOMP_TASK_CREATE: u16 = 23;
+pub const GOMP_BACKEND: u64 = 1 << 63;
+pub const RUNTIME_UNAVAILABLE: u64 = 1 << 62;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

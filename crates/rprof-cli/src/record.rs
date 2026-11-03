@@ -50,6 +50,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let io_enabled = args.collectors.contains(&CollectorKind::Io);
     let mpi_enabled = args.collectors.contains(&CollectorKind::Mpi);
     let openmp_enabled = args.collectors.contains(&CollectorKind::Openmp);
+    ensure!(
+        args.gomp_detail == crate::GompDetail::Regions
+            || (openmp_enabled && args.openmp_backend == crate::OpenmpBackend::Gomp),
+        "--gomp-detail requires --collect openmp --openmp-backend gomp"
+    );
     let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
     let python_enabled = args.collectors.contains(&CollectorKind::Python);
@@ -98,8 +103,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         "--cuda-library requires --collect cuda"
     );
     ensure!(
-        openmp_enabled || args.openmp_library.is_none(),
-        "--openmp-library requires --collect openmp"
+        openmp_enabled
+            || (args.openmp_library.is_none() && args.openmp_backend == crate::OpenmpBackend::Ompt),
+        "OpenMP options require --collect openmp"
     );
     ensure!(
         mpi_enabled || (args.mpi_library.is_none() && !args.mpi_clock_sync),
@@ -126,14 +132,19 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         None
     };
     let mut openmp_prepared = if openmp_enabled {
-        Some(native_collector::Prepared::openmp(
+        let prepare = if args.openmp_backend == crate::OpenmpBackend::Gomp {
+            native_collector::Prepared::gomp
+        } else {
+            native_collector::Prepared::openmp
+        };
+        Some(prepare(
             args.openmp_library.as_deref(),
             args.io_buffer_events as usize,
         )?)
     } else {
         None
     };
-    if openmp_enabled {
+    if openmp_enabled && args.openmp_backend == crate::OpenmpBackend::Ompt {
         ensure!(
             std::env::var_os("OMP_TOOL_LIBRARIES").is_none_or(|value| value.is_empty()),
             "OMP_TOOL_LIBRARIES is already set; unset it before selecting rprof's OMPT collector (only one OMPT tool can own callbacks)"
@@ -246,6 +257,14 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         }
         preload.push(collector.library());
     }
+    if args.openmp_backend == crate::OpenmpBackend::Gomp {
+        if let Some(collector) = &openmp_prepared {
+            if !preload.is_empty() {
+                preload.push(" ");
+            }
+            preload.push(collector.library());
+        }
+    }
     if !preload.is_empty() {
         if let Some(existing) = std::env::var_os("LD_PRELOAD").filter(|s| !s.is_empty()) {
             preload.push(" ");
@@ -261,11 +280,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     }
     if let Some(openmp) = &openmp_prepared {
         environment.extend(openmp.environment());
-        environment.push(("OMP_TOOL".into(), "enabled".into()));
-        environment.push((
-            "OMP_TOOL_LIBRARIES".into(),
-            openmp.library().as_os_str().to_owned(),
-        ));
+        if args.openmp_backend == crate::OpenmpBackend::Gomp {
+            environment.push(("RPROF_GOMP_DETAIL".into(), args.gomp_detail.name().into()));
+        }
+        if args.openmp_backend == crate::OpenmpBackend::Ompt {
+            environment.push(("OMP_TOOL".into(), "enabled".into()));
+            environment.push((
+                "OMP_TOOL_LIBRARIES".into(),
+                openmp.library().as_os_str().to_owned(),
+            ));
+        }
     }
     if let Some(cuda) = &cuda_prepared {
         environment.extend(cuda.environment());
@@ -422,7 +446,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             }
         }
         if let Some(openmp)=openmp_result? {
-            eprintln!("OpenMP: {} attempted, {} received, {} ingress drops; {} OMPT initializations",openmp.attempted,openmp.received,openmp.dropped,openmp.initialized);
+            eprintln!("OpenMP: {} attempted, {} received, {} ingress drops; {} collector initializations",openmp.attempted,openmp.received,openmp.dropped,openmp.initialized);
             let mut out=sink.lock().map_err(|_|anyhow::anyhow!("capture writer lock poisoned"))?;
             let at=elapsed()?;
             for (name,value) in [("openmp.attempted_events",openmp.attempted),("openmp.received_events",openmp.received),("openmp.ingress_dropped_events",openmp.dropped),("openmp.initialized_images",openmp.initialized)]{
@@ -433,7 +457,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                 event.attributes.insert("openmp.role".into(),Attribute::Text("runtime".into()));
                 event.attributes.insert("openmp.runtime_version".into(),Attribute::Text("not observed".into()));
                 event.attributes.insert("openmp.initialized".into(),Attribute::Bool(false));
+                event.attributes.insert("openmp.backend".into(),Attribute::Text(if args.openmp_backend==crate::OpenmpBackend::Gomp{"gomp"}else{"ompt"}.into()));
                 out.reliable(event)?;
+                if args.openmp_backend==crate::OpenmpBackend::Gomp{anyhow::bail!("No GNU/libgomp initialization observed; use the matching target-built adapter and a dynamically linked reviewed GCC runtime. Inspect runtime fingerprint diagnostics in the saved capture.");}
                 anyhow::bail!("No OMPT initialization observed: the runtime may lack OMPT (including current GCC libgomp), or the workload did not initialize OpenMP. See docs/openmp-profiling.md");
             }
         }

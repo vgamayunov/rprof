@@ -1,5 +1,8 @@
 # OpenMP profiling through OMPT
 
+For actual GCC/libgomp, use the separate [GNU backend](gomp-profiling.md).
+This page describes the default OMPT backend for LLVM/Intel.
+
 ## Build and collect
 
 ```sh
@@ -25,9 +28,9 @@ loading, or a program that never initialized OpenMP.
 ## Runtime support
 
 The support goal covers GCC `libgomp`, LLVM `libomp`, and Intel `libiomp5`.
-The initial implementation uses OMPT for LLVM/Intel. GCC's current libgomp lacks
-OMPT; a version-gated GNU-runtime adapter is planned. See
-[runtime support](openmp-runtimes.md) for the full matrix and follow-up scope.
+The default backend uses OMPT for LLVM/Intel. GCC 13/libgomp uses the implemented
+target-fingerprinted GNU adapter (`--openmp-backend gomp`). See
+[runtime support](openmp-runtimes.md) for the full matrix and coverage differences.
 
 Verified during phase 5:
 
@@ -35,7 +38,7 @@ Verified during phase 5:
 | --- | --- | --- |
 | Clang 20.1.8 | LLVM libomp 20.1.8, built with OMPT | Native fixtures and two-node hybrid capture pass |
 | Clang 20.1.8 | Intel libiomp5 from oneAPI 2025.3 | Native fixtures and two-node hybrid capture pass |
-| GCC 13.2 | GCC libgomp 13.2 | Workload passes; OMPT absence is explicitly reported |
+| GCC 13.2 | GCC libgomp 13.2 | OMPT absence is reported; the separate GNU backend passes native and two-node 128-thread/rank hybrid checks |
 | GCC 13.2 GNU ABI | LLVM libomp 20.1.8 | Workload passes, but incomplete single-executor work callbacks are exposed; not GNU-runtime support |
 
 Intel compiler (`icx`) code generation remains a separate validation item because
@@ -111,8 +114,8 @@ limits is a collection error. Report summaries bound runtime/region/thread metad
 and expose any omissions. Event loss or missing runtime endpoints can make summary
 coverage incomplete even when the capture file itself was finalized successfully.
 
-GPU/offload callbacks, source symbolization, exact loop-chunk accounting, mutex/lock
-callbacks, and the GNU libgomp adapter are future work. Multiple OpenMP runtimes in
+GPU/offload callbacks, source symbolization, exact loop-chunk accounting and OMPT
+mutex/lock callbacks remain future work. Multiple OpenMP runtimes in
 one process are not supported by this tool instance; a second initialization is
 rejected. Fork after OpenMP initialization is not a validated collection mode;
 fresh exec/rank-local collection is the supported HPC workflow.

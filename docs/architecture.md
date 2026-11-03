@@ -66,8 +66,8 @@ per-file analysis. Initial PMPI call/request profiling and estimated MPI clock
 alignment are also implemented. OMPT host collection and cross-runtime capability
 reporting are implemented for LLVM/Intel. CUDA 13 CUPTI and Linux perf counting are
 implemented, including hardware PMU validation on HBv4. Initial evidence-aware
-projection models and the WASM scenario editor are implemented; the GNU-runtime
-adapter and broader projection models remain planned.
+projection models and the WASM scenario editor are implemented. The target-built
+GNU-runtime adapter supports GCC 13/libgomp; broader projection models remain planned.
 
 ## Workspace boundaries
 
@@ -82,6 +82,7 @@ adapter and broader projection models remain planned.
 | `crates/rprof-mpi` (exists) | Target-header PMPI wrappers and Rust native transport |
 | `crates/rprof-mpi-protocol` (exists) | Pointer-free MPI wire observations |
 | `crates/rprof-ompt` (exists) | OMPT callbacks and Rust transport; runtime-negotiated capabilities |
+| `crates/rprof-gomp` (exists) | Target-fingerprinted GNU C/assembly ABI adapter; shares the Rust OpenMP transport |
 | `crates/rprof-ompt-protocol` (exists) | Pointer-free host callback observations and per-thread sequences |
 | `python/rprof_python` (exists) | Optional CPython monitoring/profile/range bootstrap and framework-owned Torch scheduling; sampling remains planned |
 | `crates/rprof-pytorch-import` (exists) | SDK-free bounded Kineto/Chrome import, exact source timestamps, memory and flow preservation |
@@ -168,11 +169,12 @@ with bounded correlation reconstruction. See [reporting](reporting.md) and the
 ## OpenMP runtime coverage
 
 GCC libgomp, LLVM libomp, and Intel libiomp5 are explicit support targets. OMPT
-handles LLVM/Intel initially; a GNU ABI backend is planned for libgomp releases
+handles LLVM/Intel; an explicit target-built GNU ABI backend handles GCC 13/libgomp
 without OMPT. Compiler/runtime pairs are validated separately. Registration status,
 received callback counts, unmatched endpoints, and sequence gaps remain visible.
 Task lifetime and scheduled execution are separate, and wait/implicit scopes are
-inclusive rather than estimates of CPU utilization.
+inclusive rather than estimates of CPU utilization. GNU outlined bodies and API
+calls are separately labeled inclusive observations, not scheduler or pure-wait data.
 
 Native collectors share a process-image hash and physical thread registry, with
 collector-specific correlation namespaces. This permits MPI, I/O, and OpenMP events

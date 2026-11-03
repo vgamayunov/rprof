@@ -53,7 +53,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..bytes.iter().position(|v| *v == 0).unwrap_or(bytes.len())])
         .into_owned()
 }
-fn callback(kind: u16) -> &'static str {
+fn ompt_callback(kind: u16) -> &'static str {
     match kind {
         THREAD_BEGIN => "ompt_callback_thread_begin",
         THREAD_END => "ompt_callback_thread_end",
@@ -66,6 +66,30 @@ fn callback(kind: u16) -> &'static str {
         TASK_CREATE => "ompt_callback_task_create",
         TASK_SCHEDULE => "ompt_callback_task_schedule",
         DEPENDENCE => "ompt_callback_task_dependence",
+        _ => "metadata",
+    }
+}
+const GOMP_CALLBACKS: &[&str] = &[
+    "gomp.thread_lifecycle",
+    "gomp.parallel",
+    "gomp.parallel_body",
+    "gomp.loop_chunks",
+    "gomp.api",
+    "gomp.task_body",
+    "gomp.task_to_body_return",
+];
+fn callback(raw: &OmpEvent) -> &'static str {
+    if raw.flags & GOMP_BACKEND == 0 {
+        return ompt_callback(raw.kind);
+    }
+    match raw.kind {
+        THREAD_BEGIN | THREAD_END => "gomp.thread_lifecycle",
+        PARALLEL_BEGIN | PARALLEL_END => "gomp.parallel",
+        WORK_BEGIN | WORK_END => "gomp.loop_chunks",
+        GOMP_API_BEGIN | GOMP_API_END => "gomp.api",
+        GOMP_BODY_BEGIN | GOMP_BODY_END if raw.value == 4 => "gomp.task_body",
+        GOMP_BODY_BEGIN | GOMP_BODY_END => "gomp.parallel_body",
+        GOMP_TASK_CREATE => "gomp.task_to_body_return",
         _ => "metadata",
     }
 }
@@ -94,11 +118,11 @@ fn support(value: i64) -> &'static str {
     }
 }
 fn attrs(raw: &OmpEvent, role: &str) -> BTreeMap<String, Attribute> {
-    BTreeMap::from([
+    let mut result = BTreeMap::from([
         ("openmp.role".into(), Attribute::Text(role.into())),
         (
             "openmp.callback".into(),
-            Attribute::Text(callback(raw.kind).into()),
+            Attribute::Text(callback(raw).into()),
         ),
         ("openmp.thread".into(), Attribute::Unsigned(raw.thread_id)),
         (
@@ -122,7 +146,26 @@ fn attrs(raw: &OmpEvent, role: &str) -> BTreeMap<String, Attribute> {
         ("process_instance".into(), Attribute::Unsigned(raw.instance)),
         ("pid".into(), Attribute::Unsigned(raw.pid as u64)),
         ("tid".into(), Attribute::Unsigned(raw.tid as u64)),
-    ])
+    ]);
+    let gomp = raw.flags & GOMP_BACKEND != 0;
+    result.insert(
+        "openmp.backend".into(),
+        Attribute::Text(if gomp { "gomp" } else { "ompt" }.into()),
+    );
+    if gomp {
+        result.insert(
+            "openmp.context_semantics".into(),
+            Attribute::Text(
+                "nearest observed outlined-body/region context; runtime scheduling is not observed"
+                    .into(),
+            ),
+        );
+    }
+    let detail = text(&raw.detail);
+    if !detail.is_empty() {
+        result.insert("openmp.detail".into(), Attribute::Text(detail));
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -145,6 +188,7 @@ struct ImageCounts {
     gaps: u64,
     unmatched: u64,
     abandoned: u64,
+    backend: &'static str,
 }
 #[derive(Default)]
 struct Decode {
@@ -159,6 +203,7 @@ struct Decode {
     next_scope: u64,
     active: usize,
     seen: u64,
+    gomp_tasks: HashMap<TaskKey, Open>,
 }
 
 impl Decode {
@@ -228,6 +273,9 @@ impl Decode {
         let mut attributes = attrs(&open.raw, open.role);
         attributes.insert("openmp.end_tid".into(), Attribute::Unsigned(raw.tid as u64));
         attributes.insert("openmp.end_reason".into(), Attribute::Text(reason.into()));
+        if raw.kind == GOMP_API_END {
+            attributes.insert("gomp.return_value".into(), Attribute::Unsigned(raw.count));
+        }
         out.emit(Event {
             timestamp_ns: at,
             attributes,
@@ -297,6 +345,22 @@ impl Decode {
             WORK_BEGIN => ("work", text(&raw.name), thread, self.new_scope(out, &raw)?),
             SYNC_BEGIN => ("sync", text(&raw.name), thread, self.new_scope(out, &raw)?),
             WAIT_BEGIN => ("wait", text(&raw.name), thread, self.new_scope(out, &raw)?),
+            GOMP_API_BEGIN => (
+                "gomp_api",
+                text(&raw.name),
+                thread,
+                self.new_scope(out, &raw)?,
+            ),
+            GOMP_BODY_BEGIN => (
+                if raw.value == 4 {
+                    "gomp_task_body"
+                } else {
+                    "gomp_parallel_body"
+                },
+                text(&raw.name),
+                thread,
+                out.correlation("gomp.body", raw.instance, raw.task_id)?,
+            ),
             _ => unreachable!(),
         };
         let key = Self::key(&raw, raw.kind);
@@ -315,6 +379,10 @@ impl Decode {
         if raw.kind == IMPLICIT_BEGIN && raw.parallel_id != 0 {
             let parent = out.correlation("openmp.parallel", raw.instance, raw.parallel_id)?;
             Self::edge(out, at, parent, corr, "parallel team task")?;
+        }
+        if raw.kind == GOMP_BODY_BEGIN && raw.value == 2 && raw.parallel_id != 0 {
+            let parent = out.correlation("openmp.parallel", raw.instance, raw.parallel_id)?;
+            Self::edge(out, at, parent, corr, "parallel includes outlined body")?;
         }
         Ok(())
     }
@@ -335,7 +403,7 @@ impl Decode {
             } else {
                 raw.task_id == 0
             };
-            if unknown {
+            if unknown && raw.flags & GOMP_BACKEND == 0 {
                 let mut candidates = self.scopes.iter().filter(|(k, s)| {
                     k.0 == raw.pid
                         && k.1 == raw.instance
@@ -445,9 +513,14 @@ impl Decode {
         self.last.insert(key, (raw.sequence, raw.thread_id));
         let thread = out.native_thread(at, raw.pid, raw.instance, raw.tid, None)?;
         let counts = self.counts.entry(image).or_default();
+        counts.backend = if raw.flags & GOMP_BACKEND != 0 {
+            "gomp"
+        } else {
+            "ompt"
+        };
         counts.track = thread;
-        if callback(raw.kind) != "metadata" {
-            *counts.callbacks.entry(callback(raw.kind)).or_default() += 1;
+        if callback(&raw) != "metadata" {
+            *counts.callbacks.entry(callback(&raw)).or_default() += 1;
         }
         if raw.kind == CAPABILITY {
             let name = text(&raw.name);
@@ -464,8 +537,15 @@ impl Decode {
                 TASK_SCHEDULE,
                 DEPENDENCE,
             ] {
-                if name == callback(kind) {
-                    counts.callbacks.entry(callback(kind)).or_default();
+                if raw.flags & GOMP_BACKEND == 0 && name == ompt_callback(kind) {
+                    counts.callbacks.entry(ompt_callback(kind)).or_default();
+                }
+            }
+            if raw.flags & GOMP_BACKEND != 0 {
+                for &name_key in GOMP_CALLBACKS {
+                    if name == name_key {
+                        counts.callbacks.entry(name_key).or_default();
+                    }
                 }
             }
         }
@@ -496,7 +576,18 @@ impl Decode {
                         "openmp.runtime_version".into(),
                         Attribute::Text(text(&raw.detail)),
                     );
-                    attributes.insert("openmp.initialized".into(), Attribute::Bool(true));
+                    attributes.insert(
+                        "openmp.initialized".into(),
+                        Attribute::Bool(raw.flags & RUNTIME_UNAVAILABLE == 0),
+                    );
+                    if raw.flags & GOMP_BACKEND != 0 {
+                        attributes.insert(
+                            "openmp.version_origin".into(),
+                            Attribute::Text(
+                                "target compiler OpenMP macro; not runtime conformance".into(),
+                            ),
+                        );
+                    }
                 }
                 if raw.kind == CAPABILITY {
                     attributes.insert("openmp.callback".into(), Attribute::Text(text(&raw.name)));
@@ -520,13 +611,71 @@ impl Decode {
                     self.invalidate_thread(key);
                 }
             }
-            PARALLEL_BEGIN | WORK_BEGIN | SYNC_BEGIN | WAIT_BEGIN => {
-                self.scope_begin(raw, out, origin, at, thread)?
-            }
+            PARALLEL_BEGIN | WORK_BEGIN | SYNC_BEGIN | WAIT_BEGIN | GOMP_API_BEGIN
+            | GOMP_BODY_BEGIN => self.scope_begin(raw, out, origin, at, thread)?,
             PARALLEL_END => self.scope_end(&raw, PARALLEL_BEGIN, out, origin, at)?,
             WORK_END => self.scope_end(&raw, WORK_BEGIN, out, origin, at)?,
             SYNC_END => self.scope_end(&raw, SYNC_BEGIN, out, origin, at)?,
             WAIT_END => self.scope_end(&raw, WAIT_BEGIN, out, origin, at)?,
+            GOMP_API_END => self.scope_end(&raw, GOMP_API_BEGIN, out, origin, at)?,
+            GOMP_TASK_CREATE => {
+                ensure!(
+                    self.gomp_tasks.len() < MAX_ACTIVE,
+                    "GNU active task-lifetime limit exceeded"
+                );
+                let correlation = out.correlation("gomp.task", raw.instance, raw.task_id)?;
+                let lane = self.lane(out, &raw, thread, at, true)?;
+                let open = Open {
+                    raw,
+                    track: lane,
+                    correlation,
+                    role: "gomp_task_lifetime",
+                    name: format!("task {} creation to body return", raw.task_id),
+                };
+                Self::begin(&open, out, origin, at)?;
+                self.gomp_tasks
+                    .insert((raw.pid, raw.instance, raw.task_id), open);
+                if raw.parent_task_id != 0 {
+                    let parent = out.correlation("gomp.body", raw.instance, raw.parent_task_id)?;
+                    Self::edge(
+                        out,
+                        at,
+                        parent,
+                        correlation,
+                        "enclosing observed body creates task",
+                    )?;
+                }
+            }
+            GOMP_BODY_END => {
+                self.scope_end(&raw, GOMP_BODY_BEGIN, out, origin, at)?;
+                if raw.value == 4 {
+                    if let Some(life) =
+                        self.gomp_tasks
+                            .remove(&(raw.pid, raw.instance, raw.task_id))
+                    {
+                        Self::end(life, &raw, out, origin, at, "outlined_body_return")?;
+                        let life = out.correlation("gomp.task", raw.instance, raw.task_id)?;
+                        let body = out.correlation("gomp.body", raw.instance, raw.task_id)?;
+                        Self::edge(out, at, life, body, "created task enters outlined body")?;
+                    }
+                }
+                // A body return bounds missing work endpoints, but is not an
+                // observed work-end callback. Retain starts as incomplete.
+                let mut abandoned = 0u64;
+                self.scopes.retain(|_, stack| {
+                    let before = stack.len();
+                    stack.retain(|s| {
+                        !(s.raw.pid == raw.pid
+                            && s.raw.instance == raw.instance
+                            && s.raw.task_id == raw.task_id
+                            && s.raw.kind == WORK_BEGIN)
+                    });
+                    self.active -= before - stack.len();
+                    abandoned += (before - stack.len()) as u64;
+                    !stack.is_empty()
+                });
+                self.counts.entry(image).or_default().abandoned += abandoned;
+            }
             IMPLICIT_BEGIN => {
                 ensure!(
                     self.tasks.len() < MAX_ACTIVE,
@@ -678,6 +827,12 @@ impl Decode {
                         t.raw.pid == *pid && t.raw.instance == *instance && t.life.is_some()
                     })
                     .count();
+            let pending = pending
+                + self
+                    .gomp_tasks
+                    .values()
+                    .filter(|t| t.raw.pid == *pid && t.raw.instance == *instance)
+                    .count();
             for (name, value) in counts.callbacks.iter().map(|(n, v)| (*n, *v)).chain([
                 ("sequence_gaps", counts.gaps),
                 ("unmatched_endpoints", counts.unmatched),
@@ -692,6 +847,10 @@ impl Decode {
                     ("openmp.observed_complete".into(), Attribute::Bool(complete)),
                     ("process_instance".into(), Attribute::Unsigned(*instance)),
                     ("pid".into(), Attribute::Unsigned(*pid as u64)),
+                    (
+                        "openmp.backend".into(),
+                        Attribute::Text(counts.backend.into()),
+                    ),
                 ]);
                 attributes.insert(
                     "openmp.received_callbacks".into(),
@@ -725,7 +884,8 @@ fn consume(
     for raw in receiver {
         if raw.magic != MAGIC
             || raw.version != VERSION
-            || !(RUNTIME..=FINALIZE).contains(&raw.kind)
+            || !(RUNTIME..=GOMP_TASK_CREATE).contains(&raw.kind)
+            || (raw.kind > FINALIZE && raw.flags & GOMP_BACKEND == 0)
             || raw.timestamp_ns < origin
         {
             continue;

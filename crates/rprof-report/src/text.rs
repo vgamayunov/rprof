@@ -283,10 +283,11 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
         for runtime in &omp.runtimes {
             writeln!(
                 out,
-                "  {} / process {}: {} (OpenMP {}), initialized={}, finalized={}",
+                "  {} / process {}: {} [backend {}] (OpenMP/compiler date {}), initialized={}, finalized={}",
                 runtime.shard,
                 runtime.pid,
                 runtime.version,
+                runtime.backend,
                 runtime.omp_version,
                 runtime.initialized,
                 runtime.finalized
@@ -304,11 +305,14 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
                         " (checkpoint/unknown)"
                     }
                 )?;
+                if !callback.detail.is_empty() {
+                    writeln!(out, "      {}", callback.detail)?;
+                }
             }
         }
         writeln!(
             out,
-            "OpenMP recorded tasks: {} created, {} completed, {} scheduled execution segments",
+            "OMPT recorded tasks: {} created, {} completed, {} scheduled execution segments",
             omp.tasks_created, omp.tasks_completed, omp.execution_segments
         )?;
         for region in &omp.regions {
@@ -329,6 +333,37 @@ pub fn write_text(report: &Report, mut out: impl Write) -> Result<()> {
             out,
             "  Work/sync durations are inclusive observations; scheduled time is not CPU utilization."
         )?;
+        if let Some(gomp) = &omp.gomp {
+            writeln!(
+                out,
+                "GNU ABI observations: {} task creations, {} complete task-body intervals, {} creation-to-body-return intervals",
+                gomp.task_creations, gomp.task_body_spans, gomp.task_lifetimes_to_body_return
+            )?;
+            writeln!(
+                out,
+                "  Outlined bodies and API calls are inclusive wall time, not runtime scheduling, pure waiting, or proof of task completion. Inline/unselected work is unobserved, not zero."
+            )?;
+            for api in &gomp.apis {
+                writeln!(
+                    out,
+                    "  {} / {}: {} calls, total {} ns, max {} ns",
+                    api.shard, api.name, api.calls, api.total_ns, api.max_ns
+                )?;
+            }
+            for body in &gomp.bodies {
+                writeln!(
+                    out,
+                    "  {} / thread {} / {} / {}: {} bodies, total {} ns, max {} ns",
+                    body.shard,
+                    body.tid,
+                    body.kind,
+                    body.codeptr,
+                    body.count,
+                    body.total_ns,
+                    body.max_ns
+                )?;
+            }
+        }
     }
     if !report.mpi.is_empty() {
         writeln!(

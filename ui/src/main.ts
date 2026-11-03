@@ -84,6 +84,8 @@ class Viewer {
   private runtimePage = 0;
   private callbackPage = 0;
   private selectedRuntime: OpenmpRuntime | undefined;
+  private gompApiPage = 0;
+  private gompBodyPage = 0;
   private cudaDevicePage = 0;
   private cudaActivityPage = 0;
   private selectedCudaDevice: CudaDevice | undefined;
@@ -121,7 +123,7 @@ class Viewer {
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
-    if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p>Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only</p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><details id="openmp-runtimes"><summary>Runtime and callback registration details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
+    if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p id="openmp-coverage"></p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><div id="gomp-panel" hidden><h3>GNU libgomp observed calls and outlined bodies</h3><p class="io-note" id="gomp-coverage"></p><p class="io-note" id="gomp-tasks"></p><h3>GOMP API calls <span id="gomp-api-count"></span></h3><div class="io-wrap"><table id="gomp-apis"><thead><tr><th>API · image / shard</th><th>Calls</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-api-pager"></div><h3>Outlined body returns <span id="gomp-body-count"></span></h3><div class="io-wrap"><table id="gomp-bodies"><thead><tr><th>Kind · image / shard</th><th>Thread ID</th><th>Opaque code pointer (not source)</th><th>Body spans</th><th>Inclusive wall time</th><th>Max wall time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-body-pager"></div></div><details id="openmp-runtimes"><summary>Runtime and capability details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
     if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
     if (report.pmu) root.insertAdjacentHTML('beforeend', `<section class="io-section pmu-section" id="pmu-panel"><div class="io-heading"><div><h2>Linux perf counters (PMU)</h2><p>Selected clock domain · workload-tree aggregates or root-thread counts, not per-thread attribution. Hardware, software and raw perf events are distinguished below; software task-clock is not a hardware metric.</p></div><span id="pmu-count"></span></div><p class="io-note">Timeline pmu.EVENT.raw samples are cumulative raw counts, not rates. A missing or failed read is unknown, not zero. Scaled count = raw × enabled / running is an estimate under multiplexing, not an exact count. Events are independently scheduled: IPC and cache-miss ratios are estimates, not jointly scheduled measurements; only valid final pairs yield metrics.</p><div class="io-wrap"><table id="pmu-events"><thead><tr><th>Event / perf type</th><th>PID / shard</th><th>Scope / privilege</th><th>Status / error</th><th>Raw / unit</th><th>Enabled / running (exact ns)</th><th>Running %</th><th>Scaled estimate</th><th>Final read / samples</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-event-pager"></div><h3>Estimated ratios <span id="pmu-metric-count"></span></h3><div class="io-wrap"><table id="pmu-metrics"><thead><tr><th>Shard</th><th>IPC estimate (instructions / cycles)</th><th>Cache-miss estimate (%)</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-metric-pager"></div><details id="pmu-hosts"><summary>Host context at launch (not continuously sampled CPU frequency) <span id="pmu-host-count"></span></summary><p class="io-note">Kernel, CPUID model/vendor, affinity, CPU0 cache, NUMA and frequency context where available. Frequency metadata is launch-time context, not a continuous frequency trace.</p><div id="pmu-host-list"></div><div class="io-pager" id="pmu-host-pager"></div><div id="pmu-host-detail"></div></details></section>`);
     if (report.python) root.insertAdjacentHTML('beforeend', `<section class="io-section python-section" id="python-panel"><div class="io-heading"><div><h2>Python</h2><p>Selected clock domain · instrumented function execution segments, not whole generator/coroutine lifetimes. Yield/resume creates separate segments. Self time subtracts only selected child segments; it includes native calls, GIL waits and instrumentation, not CPU utilization. User ranges are elapsed time and can include suspension; self time is unavailable.</p></div><span id="python-count"></span></div><p class="io-note" id="python-health"></p><details open><summary>Runtime and source health</summary><div id="python-runtimes"></div><div class="io-pager" id="python-runtime-pager"></div><div id="python-runtime-detail"></div></details><h3>Instrumented functions</h3><div class="io-wrap"><table id="python-functions"><thead><tr><th>Function / source</th><th>File : line / kind / symbol</th><th>Segments</th><th>Inclusive</th><th>Selected-child self</th><th>Max</th><th>Yields / unwinds</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="python-function-pager"></div><h3>User ranges (elapsed)</h3><div class="io-wrap"><table id="python-ranges"><thead><tr><th>Range / source</th><th>File : line / kind / symbol</th><th>Segments</th><th>Inclusive elapsed</th><th>Self</th><th>Max</th><th>Yields / unwinds</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="python-range-pager"></div></section>`);
@@ -313,6 +315,7 @@ class Viewer {
     this.selectedRegion = undefined;
     this.runtimePage = 0;
     this.callbackPage = 0;
+    this.gompApiPage = this.gompBodyPage = 0;
     this.selectedRuntime = undefined;
     if (this.report.openmp) this.renderOpenmp();
     this.cudaDevicePage = this.cudaActivityPage = this.cudaApiPage = this.cudaRuntimePage = this.cudaCapabilityPage = this.cudaErrorPage = this.cudaSourcePage = 0;
@@ -521,8 +524,17 @@ class Viewer {
     if (!summary) return;
     const regions = summary.regions.filter(region => region.domain === this.domain?.id);
     const runtimes = summary.runtimes.filter(runtime => runtime.domain === this.domain?.id);
+    const gompRuntimes = runtimes.filter(runtime => runtime.backend === 'gomp');
+    const omptRuntimes = runtimes.filter(runtime => runtime.backend !== 'gomp');
+    const isGompRegion = (region: OpenmpRegion): boolean => runtimes.some(runtime => runtime.backend === 'gomp' &&
+      runtime.shard === region.shard && runtime.instance === region.instance && runtime.pid === region.pid);
     this.get('openmp-count').textContent = `${regions.length} regions`;
-    this.get('openmp-tasks').textContent = `Capture-wide task totals: ${summary.tasks_created} created · ${summary.tasks_completed} completed · ${summary.execution_segments} execution segments (not filtered by domain)`;
+    this.get('openmp-coverage').textContent = gompRuntimes.length ?
+      'Selected clock domain · GNU libgomp observed joined parallel regions and outlined body wall time; GOMP wait / scheduled task time is unobserved (not zero). Work spread covers observed chunks only. Other tasks, pure waits, schedule events, dependence edges and inline static loop chunks are unavailable.' :
+      'Selected clock domain · inclusive recorded work / wait (may overlap) · work spread is observed only';
+    this.get('openmp-tasks').textContent = !summary.gomp || omptRuntimes.length ?
+      `Capture-wide ${summary.gomp ? 'OMPT-only ' : ''}task totals: ${summary.tasks_created} created · ${summary.tasks_completed} completed · ${summary.execution_segments} execution segments (not filtered by domain)` :
+      'OMPT task scheduling and completion are not observed by GNU libgomp; see GOMP task observations below.';
     const body = this.get('openmp-regions').querySelector('tbody')!;
     body.replaceChildren();
     for (const region of regions.slice(this.regionPage * IO_PAGE_SIZE, (this.regionPage + 1) * IO_PAGE_SIZE)) {
@@ -532,9 +544,10 @@ class Viewer {
       button.type = 'button';
       button.addEventListener('click', () => { this.selectedRegion = region; this.threadPage = 0; this.renderOpenmpDetail(); });
       identity.append(button);
+      const gomp = isGompRegion(region);
       row.append(identity, node('td', '', `${region.requested_threads} / ${region.observed_threads}`),
         node('td', '', optionalNs(region.duration_ns)), node('td', '', `${region.work_ns} ns`),
-        node('td', '', `${region.wait_ns} ns`),
+        node('td', '', gomp ? 'Unobserved (GOMP)' : `${region.wait_ns} ns`),
         node('td', '', `${optionalNs(region.work_min_ns)} / ${optionalNs(region.work_max_ns)} / ${optionalNs(region.work_spread_ns)}`));
       body.append(row);
     }
@@ -544,6 +557,7 @@ class Viewer {
     }
     this.renderPager(this.get('openmp-region-pager'), regions.length, this.regionPage, page => { this.regionPage = page; this.renderOpenmp(); });
     this.renderOpenmpDetail();
+    this.renderGomp();
     this.get('openmp-runtime-count').textContent = `· ${runtimes.length} runtimes in this domain`;
     const runtimeList = this.get('openmp-runtime-list'); runtimeList.replaceChildren();
     for (const runtime of runtimes.slice(this.runtimePage * IO_PAGE_SIZE, (this.runtimePage + 1) * IO_PAGE_SIZE)) {
@@ -551,7 +565,7 @@ class Viewer {
       const select = node('button', 'io-file', `PID ${runtime.pid} · ${runtime.instance} · shard ${runtime.shard}`);
       select.type = 'button';
       select.addEventListener('click', () => { this.selectedRuntime = runtime; this.callbackPage = 0; this.renderOpenmpCallbacks(); });
-      line.append(select, node('span', '', `Runtime ${runtime.version} · OpenMP ${runtime.omp_version} · initialized: ${runtime.initialized} · finalized: ${runtime.finalized} · sequence gaps: ${runtime.sequence_gaps} · unmatched endpoints: ${runtime.unmatched_endpoints} · abandoned intervals: ${runtime.abandoned_intervals}`));
+      line.append(select, node('span', '', `${runtime.backend === 'gomp' ? 'GNU libgomp' : 'OMPT'} · Runtime ${runtime.version} · OpenMP ${runtime.omp_version} · initialized: ${runtime.initialized} · finalized: ${runtime.finalized} · sequence gaps: ${runtime.sequence_gaps} · unmatched endpoints: ${runtime.unmatched_endpoints} · abandoned intervals: ${runtime.abandoned_intervals}`));
       runtimeList.append(line);
     }
     if (!runtimes.length) runtimeList.append(node('p', 'io-note', 'No OpenMP runtime recorded in this clock domain; instrumentation may be unsupported or not initialized.'));
@@ -559,13 +573,45 @@ class Viewer {
     this.renderOpenmpCallbacks();
   }
 
+  private renderGomp(): void {
+    const gomp = this.report.openmp?.gomp;
+    const panel = this.get('gomp-panel');
+    panel.hidden = !gomp;
+    if (!gomp) return;
+    const domain = this.domain?.id;
+    const runtimes = this.report.openmp!.runtimes.filter(runtime => runtime.domain === domain && runtime.backend === 'gomp');
+    const apis = gomp.apis.filter(api => api.domain === domain);
+    const bodies = gomp.bodies.filter(body => body.domain === domain);
+    const selected = runtimes.map(runtime => {
+      const mode = runtime.version.match(/detail=(regions|bodies|full)\b/)?.[1] ?? 'unknown';
+      return `image ${runtime.instance} · shard ${runtime.shard}: detail ${mode}`;
+    });
+    this.get('gomp-coverage').textContent = `Selected-domain GNU libgomp runtimes: ${selected.length ? selected.join(' · ') : 'none'}. Detail selection: regions = joined parallel regions and outlined parallel bodies only; bodies adds tied ordinary task bodies; full adds reviewed GOMP API and observable loop chunks. Disabled or unsupported features are listed under runtime capabilities. GOMP calls can execute useful work from other tasks; API time is inclusive host time, not pure wait. Pure wait, OMPT schedule events, dependence edges and compiler-inlined static chunks are unavailable.`;
+    this.get('gomp-tasks').textContent = `Capture-wide GOMP observations (not filtered by domain; do not sum with domain tables): ${gomp.task_creations} task creations · ${gomp.task_body_spans} task body spans · ${gomp.task_lifetimes_to_body_return} creation→body return lifetimes (not runtime task completion).`;
+    this.get('gomp-api-count').textContent = `· ${apis.length} API rows in this domain`;
+    this.tableRows('gomp-apis', apis.slice(this.gompApiPage * IO_PAGE_SIZE, (this.gompApiPage + 1) * IO_PAGE_SIZE).map(api => [
+      `${api.name} · image ${api.instance} · shard ${api.shard}`, api.calls, `${api.total_ns} ns`, `${api.max_ns} ns`,
+    ]), 4, 'No observed GOMP API calls in this clock domain (may be disabled by detail selection or unsupported; not measured zero).');
+    this.renderPager(this.get('gomp-api-pager'), apis.length, this.gompApiPage, page => { this.gompApiPage = page; this.renderGomp(); });
+    this.get('gomp-body-count').textContent = `· ${bodies.length} body rows in this domain`;
+    this.tableRows('gomp-bodies', bodies.slice(this.gompBodyPage * IO_PAGE_SIZE, (this.gompBodyPage + 1) * IO_PAGE_SIZE).map(body => [
+      `${body.kind} · image ${body.instance} · shard ${body.shard}`, body.tid, body.codeptr,
+      body.count, `${body.total_ns} ns`, `${body.max_ns} ns`,
+    ]), 6, 'No observed outlined body returns in this clock domain (not evidence of no work).');
+    this.renderPager(this.get('gomp-body-pager'), bodies.length, this.gompBodyPage, page => { this.gompBodyPage = page; this.renderGomp(); });
+  }
+
   private renderOpenmpDetail(): void {
     const detail = this.get('openmp-detail'); detail.replaceChildren();
     const region = this.selectedRegion;
     if (!region) return;
+    const gomp = this.report.openmp?.runtimes.some(runtime => runtime.domain === region.domain && runtime.shard === region.shard &&
+      runtime.instance === region.instance && runtime.pid === region.pid && runtime.backend === 'gomp');
     const threads = regionThreads(this.report, region);
     detail.append(node('h3', '', `Region ${region.parallel_id} · PID ${region.pid}`),
-      node('p', 'io-note', 'Recorded inclusive intervals; scheduled time includes logical task context (including waits), not CPU utilization or CPU cycles. Unknown durations are shown as —.'));
+      node('p', 'io-note', gomp ?
+        'GNU libgomp: outlined body inclusive wall time can include nested tasks, runtime work and waits; not OMPT scheduled execution or CPU utilization. Only observed chunks contribute to work. Wait, sync, scheduled intervals and execution segments are unobserved, not measured zero.' :
+        'Recorded inclusive intervals; scheduled time includes logical task context (including waits), not CPU utilization or CPU cycles. Unknown durations are shown as —.'));
     const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'openmp-threads';
     const head = node('thead'); const heading = node('tr');
     for (const label of ['Thread ID', 'Team index', 'Work', 'Wait', 'Sync', 'Scheduled interval', 'Execution segments']) heading.append(node('th', '', label));
@@ -574,8 +620,8 @@ class Viewer {
     for (const thread of threads.slice(this.threadPage * IO_PAGE_SIZE, (this.threadPage + 1) * IO_PAGE_SIZE)) {
       const row = node('tr');
       row.append(node('td', '', thread.tid), node('td', '', thread.team_index ?? '—'), node('td', '', `${thread.work_ns} ns`),
-        node('td', '', `${thread.wait_ns} ns`), node('td', '', `${thread.sync_ns} ns`),
-        node('td', '', `${thread.scheduled_ns} ns`), node('td', '', thread.execution_segments));
+        node('td', '', gomp ? 'Unobserved' : `${thread.wait_ns} ns`), node('td', '', gomp ? 'Unobserved' : `${thread.sync_ns} ns`),
+        node('td', '', gomp ? 'Unobserved' : `${thread.scheduled_ns} ns`), node('td', '', gomp ? 'Unobserved' : thread.execution_segments));
       body.append(row);
     }
     if (!threads.length) {
@@ -591,21 +637,24 @@ class Viewer {
     const detail = this.get('openmp-callback-detail'); detail.replaceChildren();
     const runtime = this.selectedRuntime;
     if (!runtime) return;
-    detail.append(node('h3', '', `Callbacks · PID ${runtime.pid} · ${runtime.instance}`),
-      node('p', 'io-note', 'Registration status is not evidence that a callback was received. Unknown observed counts are not zero.'));
+    const gomp = runtime.backend === 'gomp';
+    detail.append(node('h3', '', `${gomp ? 'GNU libgomp capabilities' : 'OMPT callbacks'} · PID ${runtime.pid} · ${runtime.instance}`),
+      node('p', 'io-note', gomp ?
+        'Capability status and detail describe enabled, disabled or unsupported instrumentation; registration alone is not evidence of an observed event. Unknown counts are not zero.' :
+        'Registration status is not evidence that a callback was received. Unknown observed counts are not zero.'));
     const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'openmp-callbacks';
     const head = node('thead'); const heading = node('tr');
-    for (const label of ['Callback', 'Registration status', 'Received callbacks', 'Observation complete']) heading.append(node('th', '', label));
+    for (const label of [gomp ? 'Capability' : 'Callback', 'Registration status', 'Received callbacks', 'Observation complete', 'Detail / coverage']) heading.append(node('th', '', label));
     head.append(heading); table.append(head);
     const body = node('tbody');
     for (const callback of runtime.callbacks.slice(this.callbackPage * IO_PAGE_SIZE, (this.callbackPage + 1) * IO_PAGE_SIZE)) {
       const row = node('tr'); row.append(node('td', '', callback.name), node('td', '', callback.status),
-        node('td', '', callback.observed ?? 'Unknown'), node('td', '', callback.observed_complete ? 'Yes' : 'No'));
+        node('td', '', callback.observed ?? 'Unknown'), node('td', '', callback.observed_complete ? 'Yes' : 'No'), node('td', '', callback.detail || '—'));
       body.append(row);
     }
     if (!runtime.callbacks.length) {
       const row = node('tr'); const cell = node('td', 'empty-table', 'No callback registration data recorded');
-      cell.colSpan = 4; row.append(cell); body.append(row);
+      cell.colSpan = 5; row.append(cell); body.append(row);
     }
     table.append(body); wrap.append(table); detail.append(wrap);
     const pager = node('div', 'io-pager'); pager.id = 'openmp-callback-pager'; detail.append(pager);

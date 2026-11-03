@@ -47,6 +47,7 @@ read-only feature.
 - Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
 - Optional MPI clock calibration with explicit uncertainty and drift reporting.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
+- Target-built GCC 13/libgomp collection, with selectable region/body/API detail and explicit coverage gaps.
 - Optional CUDA 13 CUPTI injection adapter with GPU kernels/copies/memsets, CPU API calls,
   stream tracks, launch correlations, device metadata, and source-health reporting.
 - Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
@@ -58,13 +59,16 @@ read-only feature.
 
 Hardware counters and multiplexing have been checked against `perf stat` on HBv4;
 software events and unsupported-event behavior were also validated on the H100 VM.
-GCC/libgomp support is a planned GNU-runtime
-adapter; the current OpenMP collector requires OMPT.
+GCC/libgomp uses the explicit `--openmp-backend gomp` adapter; LLVM/Intel use OMPT.
+See [current capacity estimates](docs/capacity.md) before scaling up captures.
 The process span covers the supervised workload,
 including launch, wait, and descendant cleanup. Wrapping only `mpirun` measures
 the launcher; use the per-rank launch pattern below for MPI call collection.
 
 ## Quick start
+
+See the [brief profiling quick start](docs/quickstart.md) for collection commands
+covering I/O, MPI, OpenMP, CUDA, counters, Python and PyTorch.
 
 Install a current stable Rust toolchain (edition 2024; minimum declared Rust 1.85).
 
@@ -152,7 +156,18 @@ target/release/rprof view omp.rprof.jsonl --open
 Use the application's intended LLVM `libomp` or Intel `libiomp5` runtime;
 `--collect mpi,openmp,io` combines collectors. The tool records callback support and
 observed coverage, without substituting a runtime. See [OpenMP profiling](docs/openmp-profiling.md)
-and the [GCC/LLVM/Intel support plan](docs/openmp-runtimes.md).
+and the [GCC/LLVM/Intel support matrix](docs/openmp-runtimes.md).
+
+For actual GCC 13/libgomp on Linux x86_64, build on the target runtime image:
+
+```sh
+make gomp PROFILE=release GOMP_CC=gcc
+target/release/rprof record --collect openmp --openmp-backend gomp \
+  --gomp-detail regions -o gomp.rprof.jsonl -- ./gcc-application
+```
+
+See [GNU profiling](docs/gomp-profiling.md) for runtime fingerprint matching,
+`bodies`/`full` detail, and coverage semantics.
 
 ### Collect CUDA activity
 
@@ -198,6 +213,9 @@ confidence intervals. See [projection model](docs/projection-model.md) for scope
 replay, validation, and editor controls.
 
 ### Python and PyTorch
+
+For a real training workload, start with the [Anemoi quick-start guide](docs/quickstart-anemoi.md):
+collect a short PyTorch window together with Python ranges and POSIX I/O, then import/view the results.
 
 ```sh
 target/release/rprof record --collect python -o python.rprof.jsonl -- python3 app.py

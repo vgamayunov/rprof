@@ -1,5 +1,8 @@
 # Python and PyTorch profiling
 
+For a hands-on training workflow, see the [Anemoi quick start](quickstart-anemoi.md),
+including simultaneous framework-owned PyTorch, native Python and I/O collection.
+
 ## First implementation
 
 The first delivery is implemented: selected CPython function execution segments,

@@ -4,6 +4,19 @@ Current remote environments: CPU/MPI/Python validation uses `tst3` / `hbv4` whil
 `tst4` is unavailable; PyTorch GPU checks use `tst9` H100/H200. Earlier `tst4`
 measurements below remain historical validation records.
 
+## GNU OpenMP and capacity validation
+
+Run `bash scripts/test-gomp.sh` with GCC/G++ 13, or set `RPROF_TEST_GOMP_CC`
+and `RPROF_TEST_GOMP_CXX` to versioned compiler executables. It builds against the
+actual target libgomp, checks that the adapter does not link an OpenMP runtime,
+and exercises detail selection, nested work/tasks, firstprivate copying, unsupported
+constructs and mismatched-fingerprint passthrough. CI has a GCC 13 job.
+
+The tst3/HBv4 single-rank and two-node 128-thread/rank checks and MPI environment
+settings are recorded in [GNU profiling](gomp-profiling.md). They establish short-run
+correctness, not sustained throughput. [Capacity planning](capacity.md) separates
+hard capture limits, summary omissions, browser retention and sizing estimates.
+
 ## Local capture-foundation checks
 
 ```sh

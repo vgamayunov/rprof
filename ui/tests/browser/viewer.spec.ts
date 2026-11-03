@@ -752,6 +752,87 @@ test('unsupported OpenMP capabilities display unknown observations rather than z
   expect(await page.locator('img').count()).toBe(0);
 });
 
+test('GNU libgomp regions mode shows partial coverage, disabled capabilities and unobserved timing instead of zero', async ({ page }) => {
+  const hostile = '<img src=x onerror="globalThis.rprofInjected=true">';
+  await loaded(page, injected('gomp-regions', report => {
+    report.openmp = {
+      tasks_created: '0', tasks_completed: '0', execution_segments: '0',
+      runtimes: [{ shard: 's0', domain: '0', instance: 'image', pid: '24', backend: 'gomp',
+        version: 'GCC 13 / libgomp; detail=regions', omp_version: '201511', initialized: true, finalized: true,
+        sequence_gaps: '0', unmatched_endpoints: '0', abandoned_intervals: '0',
+        callbacks: [{ name: 'gomp.parallel_body', status: 'always', observed: '1', observed_complete: true,
+          detail: 'Joined parallel bodies only' },
+        { name: 'gomp.api', status: 'never', observed: null, observed_complete: false,
+          detail: `disabled by detail selection (regions) ${hostile}` },
+        { name: 'gomp.task_body', status: 'never', observed: null, observed_complete: false,
+          detail: 'disabled by detail selection (regions)' }] }],
+      regions: [{ shard: 's0', domain: '0', instance: 'image', pid: '24', parallel_id: '3', requested_threads: '2',
+        observed_threads: '2', duration_ns: '100', work_ns: '0', wait_ns: '0',
+        work_min_ns: null, work_max_ns: null, work_spread_ns: null }],
+      threads: [{ shard: 's0', domain: '0', instance: 'image', pid: '24', parallel_id: '3', tid: '33',
+        team_index: '1', work_ns: '0', wait_ns: '0', sync_ns: '0', scheduled_ns: '0', execution_segments: '0' }],
+      gomp: { apis: [], bodies: [{ shard: 's0', domain: '0', instance: 'image', tid: '33', kind: 'parallel_body',
+        codeptr: '0x1234', count: '1', total_ns: '90', max_ns: '90' }],
+        task_creations: '0', task_body_spans: '0', task_lifetimes_to_body_return: '0' },
+    };
+  }));
+  await expect(page.locator('#gomp-panel')).toBeVisible();
+  await expect(page.locator('#gomp-coverage')).toContainText('detail regions');
+  await expect(page.locator('#openmp-tasks')).not.toContainText('0 completed');
+  await expect(page.locator('#gomp-apis tbody')).toContainText('may be disabled by detail selection');
+  await expect(page.locator('#openmp-regions tbody')).toContainText('Unobserved (GOMP)');
+  await page.locator('#openmp-regions .io-file').click();
+  await expect(page.locator('#openmp-threads tbody tr')).toContainText('Unobserved');
+  await expect(page.locator('#openmp-detail')).toContainText('not OMPT scheduled execution');
+  await expect(page.locator('#gomp-bodies')).toContainText('0x1234');
+  await page.locator('#openmp-runtimes summary').click();
+  await page.locator('#openmp-runtime-list .io-file').click();
+  await expect(page.locator('#openmp-callbacks')).toContainText('disabled by detail selection (regions)');
+  await expect(page.locator('#openmp-callbacks')).toContainText('Unknown');
+  expect(await page.locator('img').count()).toBe(0);
+  expect(await page.evaluate(() => 'rprofInjected' in globalThis)).toBe(false);
+});
+
+test('GOMP full-detail API and body aggregates page exact strings and filter by clock domain', async ({ page }) => {
+  const huge = '90071992547409931234567890';
+  await loaded(page, injected('gomp-full', report => {
+    report.domains.push({ ...report.domains[0], id: 'foreign' });
+    report.openmp = { runtimes: [
+      { shard: 's0', domain: '0', instance: 'image', pid: '9', backend: 'gomp', version: 'GCC 13 detail=full', omp_version: '201511',
+        initialized: true, finalized: true, sequence_gaps: '0', unmatched_endpoints: '0', abandoned_intervals: '0', callbacks: [] },
+      { shard: 's1', domain: 'foreign', instance: 'image', pid: '8', backend: 'gomp', version: 'GCC 13 detail=bodies', omp_version: '201511',
+        initialized: true, finalized: true, sequence_gaps: '0', unmatched_endpoints: '0', abandoned_intervals: '0', callbacks: [] }],
+      regions: [], threads: [], tasks_created: '0', tasks_completed: '0', execution_segments: '0',
+      gomp: { task_creations: huge, task_body_spans: '11', task_lifetimes_to_body_return: '7',
+        apis: [...Array.from({ length: 101 }, (_, i) => ({ shard: 's0', domain: '0', instance: 'image', name: `GOMP_call_${i}`,
+          calls: huge, total_ns: huge, max_ns: huge })),
+          { shard: 's1', domain: 'foreign', instance: 'image', name: 'foreign-api', calls: '1', total_ns: '1', max_ns: '1' }],
+        bodies: [...Array.from({ length: 101 }, (_, i) => ({ shard: 's0', domain: '0', instance: 'image', tid: `${i}`,
+          kind: 'task_body', codeptr: `0x${i.toString(16)}`, count: huge, total_ns: huge, max_ns: huge })),
+          { shard: 's1', domain: 'foreign', instance: 'image', tid: '0', kind: 'task_body', codeptr: 'foreign-ptr',
+            count: '1', total_ns: '1', max_ns: '1' }] },
+    };
+  }));
+  await expect(page.locator('#gomp-api-count')).toContainText('101 API rows');
+  await expect(page.locator('#gomp-apis tbody tr')).toHaveCount(100);
+  await expect(page.locator('#gomp-bodies tbody tr')).toHaveCount(100);
+  await expect(page.locator('#gomp-tasks')).toContainText(`${huge} task creations`);
+  await expect(page.locator('#gomp-tasks')).toContainText('not filtered by domain');
+  await expect(page.locator('#gomp-apis tbody')).toContainText(`${huge} ns`);
+  await expect(page.locator('#gomp-bodies tbody')).toContainText(huge);
+  await expect(page.locator('#gomp-apis tbody')).not.toContainText('foreign-api');
+  await page.locator('#gomp-api-pager button').last().click();
+  await page.locator('#gomp-body-pager button').last().click();
+  await expect(page.locator('#gomp-api-pager')).toContainText('101–101 of 101');
+  await expect(page.locator('#gomp-body-pager')).toContainText('101–101 of 101');
+  await page.locator('#domain-select').selectOption('foreign');
+  await expect(page.locator('#gomp-api-count')).toContainText('1 API rows');
+  await expect(page.locator('#gomp-apis tbody')).toContainText('foreign-api');
+  await expect(page.locator('#gomp-bodies tbody')).toContainText('foreign-ptr');
+  await expect(page.locator('#gomp-api-pager')).toBeEmpty();
+  await expect(page.locator('#gomp-tasks')).toContainText(`${huge} task creations`);
+});
+
 test('estimated clock alignment is labeled with its uncertainty', async ({ page }) => {
   const url = injected('calibrated-clocks', report => {
     report.domains = [{ ...report.domains[0], calibration: { method: 'min-RTT offset', uncertainty_ns: '32', max_drift_ns: '2', complete: true } }];

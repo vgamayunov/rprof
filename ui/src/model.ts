@@ -132,13 +132,27 @@ export interface MpiCallSummary {
 export interface OpenmpSummary {
   runtimes: OpenmpRuntime[]; regions: OpenmpRegion[]; threads: OpenmpThread[];
   tasks_created: string; tasks_completed: string; execution_segments: string;
+  gomp?: GompSummary | null;
+}
+export interface GompSummary {
+  apis: GompApi[]; bodies: GompBody[];
+  task_creations: string; task_body_spans: string; task_lifetimes_to_body_return: string;
+}
+export interface GompApi {
+  shard: string; domain: string; instance: string; name: string;
+  calls: string; total_ns: string; max_ns: string;
+}
+export interface GompBody {
+  shard: string; domain: string; instance: string; tid: string; kind: string; codeptr: string;
+  count: string; total_ns: string; max_ns: string;
 }
 export interface OpenmpRuntime {
   shard: string; domain: string; instance: string; pid: string; version: string; omp_version: string;
+  backend?: string; // Older reports omit this (OMPT).
   initialized: boolean; finalized: boolean; callbacks: OpenmpCallback[];
   sequence_gaps: string; unmatched_endpoints: string; abandoned_intervals: string;
 }
-export interface OpenmpCallback { name: string; status: string; observed: string | null; observed_complete: boolean }
+export interface OpenmpCallback { name: string; status: string; observed: string | null; observed_complete: boolean; detail?: string }
 export interface OpenmpRegion {
   shard: string; domain: string; instance: string; pid: string; parallel_id: string;
   requested_threads: string; observed_threads: string; duration_ns: string | null;

@@ -268,6 +268,39 @@ pub struct OpenmpSummary {
     pub tasks_created: String,
     pub tasks_completed: String,
     pub execution_segments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gomp: Option<GompSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GompSummary {
+    pub apis: Vec<GompApi>,
+    pub bodies: Vec<GompBody>,
+    pub task_creations: String,
+    pub task_body_spans: String,
+    pub task_lifetimes_to_body_return: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GompApi {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub name: String,
+    pub calls: String,
+    pub total_ns: String,
+    pub max_ns: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GompBody {
+    pub shard: String,
+    pub domain: String,
+    pub instance: String,
+    pub tid: String,
+    pub kind: String,
+    pub codeptr: String,
+    pub count: String,
+    pub total_ns: String,
+    pub max_ns: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenmpRuntime {
@@ -275,6 +308,8 @@ pub struct OpenmpRuntime {
     pub domain: String,
     pub instance: String,
     pub pid: String,
+    #[serde(default)]
+    pub backend: String,
     pub version: String,
     pub omp_version: String,
     pub initialized: bool,
@@ -290,6 +325,8 @@ pub struct OpenmpCallback {
     pub status: String,
     pub observed: Option<String>,
     pub observed_complete: bool,
+    #[serde(default)]
+    pub detail: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenmpRegion {

@@ -66,6 +66,19 @@ jobs:
       - run: sudo apt-get install -y clang libomp-dev
       - run: bash scripts/test-openmp.sh
 
+  gomp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y gcc-13 g++-13
+      - run: bash scripts/test-gomp.sh
+        env:
+          RPROF_TEST_GOMP_CC: gcc-13
+          RPROF_TEST_GOMP_CXX: g++-13
+
   python:
     runs-on: ubuntu-latest
     timeout-minutes: 15

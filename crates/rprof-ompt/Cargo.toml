@@ -9,6 +9,7 @@ publish.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+sha2.workspace = true
 libc.workspace = true
 rprof-io-protocol.workspace = true
 rprof-ompt-protocol.workspace = true

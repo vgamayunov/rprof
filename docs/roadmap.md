@@ -108,7 +108,7 @@ Remaining MPI coverage includes persistent requests, Fortran, sessions/RMA/MPI-I
 unlisted calls, complete dynamic-communicator identity, and cross-rank message
 matching. Current request correlations are rank-local and calibration is estimated.
 
-## 5. OpenMP profiling — OMPT implementation complete; GNU adapter planned
+## 5. OpenMP profiling — OMPT and initial GNU adapter implemented
 
 - Integrate OMPT callbacks for threads, parallel regions, tasks, work sharing,
   and synchronization; document supported runtimes.
@@ -138,9 +138,11 @@ Delivered: standard OMPT loading, callback capabilities/observations, parallel a
 worksharing scopes, synchronization/wait intervals, task lifetimes/execution and
 dependencies, sequence-gap handling, shared MPI/I/O/OpenMP thread identities, and
 text/HTML summaries. Clang-generated host and two-node hybrid fixtures passed with
-LLVM libomp 20.1.8 and Intel libiomp5 2025.3. GCC/libgomp 13.2 is explicitly reported
-as lacking OMPT; native GNU-runtime support remains a planned adapter. See
-[OpenMP profiling](openmp-profiling.md).
+LLVM libomp 20.1.8 and Intel libiomp5 2025.3. The explicit GCC 13 GNU backend now
+profiles actual libgomp with runtime fingerprint gating, selectable region/body/API
+detail, and honest coverage gaps. Native fixtures and a two-node 128-thread/rank
+hybrid pass. See [OpenMP profiling](openmp-profiling.md),
+[GNU profiling](gomp-profiling.md), and [capacity estimates](capacity.md).
 
 ## 6. CUDA profiling
 

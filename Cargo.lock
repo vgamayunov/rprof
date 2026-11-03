@@ -427,6 +427,7 @@ dependencies = [
  "libc",
  "rprof-io-protocol",
  "rprof-ompt-protocol",
+ "sha2",
 ]
 
 [[package]]

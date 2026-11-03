@@ -63,6 +63,7 @@ enum Kind {
     Io,
     Mpi,
     Openmp,
+    Gomp,
     Cuda,
 }
 impl Kind {
@@ -71,6 +72,7 @@ impl Kind {
             Self::Io => "RPROF_IO",
             Self::Mpi => "RPROF_MPI",
             Self::Openmp => "RPROF_OMP",
+            Self::Gomp => "RPROF_OMP",
             Self::Cuda => "RPROF_CUDA",
         }
     }
@@ -79,6 +81,7 @@ impl Kind {
             Self::Io => "librprof_io.so",
             Self::Mpi => "librprof_mpi.so",
             Self::Openmp => "librprof_ompt.so",
+            Self::Gomp => "librprof_gomp.so",
             Self::Cuda => "librprof_cuda.so",
         }
     }
@@ -87,6 +90,7 @@ impl Kind {
             Self::Io => "io",
             Self::Mpi => "mpi",
             Self::Openmp => "openmp",
+            Self::Gomp => "openmp",
             Self::Cuda => "cuda",
         }
     }
@@ -112,6 +116,9 @@ impl Prepared {
     pub fn openmp(library: Option<&Path>, buffer_events: usize) -> Result<Self> {
         Self::configured(library, buffer_events, Kind::Openmp)
     }
+    pub fn gomp(library: Option<&Path>, buffer_events: usize) -> Result<Self> {
+        Self::configured(library, buffer_events, Kind::Gomp)
+    }
     pub fn cuda(library: Option<&Path>, buffer_events: usize) -> Result<Self> {
         Self::configured(library, buffer_events, Kind::Cuda)
     }
@@ -125,7 +132,7 @@ impl Prepared {
         };
         let library = library.canonicalize().with_context(|| {
             format!(
-                "finding {}; build the collector with `make preload`, `make mpi`, `make ompt`, or `make cuda`, or set its --*-library path",
+                "finding {}; build the collector with `make preload`, `make mpi`, `make ompt`, `make gomp`, or `make cuda`, or set its --*-library path",
                 library.display()
             )
         })?;
@@ -240,7 +247,7 @@ impl Prepared {
             .spawn(move || {
                 let receive = match self.kind {
                     Kind::Mpi => crate::mpi_collector::receive,
-                    Kind::Openmp => crate::openmp_collector::receive,
+                    Kind::Openmp | Kind::Gomp => crate::openmp_collector::receive,
                     Kind::Cuda => crate::cuda_collector::receive,
                     Kind::Io => receive,
                 };

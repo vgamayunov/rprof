@@ -1,13 +1,14 @@
 CARGO ?= cargo
 CC ?= cc
 MPICC ?= mpicc
+GOMP_CC ?= gcc
 CUDA_HOME ?= /usr/local/cuda
 CXX ?= c++
 PROFILE ?= debug
 CARGO_FLAGS = $(if $(filter release,$(PROFILE)),--release,)
 PRELOAD = target/$(PROFILE)/librprof_io.so
 
-.PHONY: build preload mpi ompt cuda test
+.PHONY: build preload mpi ompt gomp cuda test
 
 build:
 	$(CARGO) build --workspace $(CARGO_FLAGS)
@@ -41,6 +42,21 @@ ompt:
 		crates/rprof-ompt/native/tool.c target/$(PROFILE)/librprof_ompt.a \
 		-Wl,--exclude-libs,ALL -ldl -lpthread -lm -lrt -lutil -o "$$temporary"; \
 		chmod 755 "$$temporary"; mv "$$temporary" "target/$(PROFILE)/librprof_ompt.so"
+
+gomp:
+	$(CARGO) build -p rprof-ompt $(CARGO_FLAGS)
+	@set -eu; version=$$($(GOMP_CC) -dumpfullversion -dumpversion); \
+		case "$$version" in 13.*) ;; *) echo "gomp: GCC 13 is required (found $$version)" >&2; exit 1;; esac; \
+		library=$$(readlink -f "$$($(GOMP_CC) -print-file-name=libgomp.so)"); \
+		test -f "$$library"; hash=$$(sha256sum "$$library"); hash=$${hash%% *}; \
+		temporary=$$(mktemp "target/$(PROFILE)/librprof_gomp.so.XXXXXX"); \
+		trap 'rm -f "$$temporary"' EXIT; \
+		$(GOMP_CC) -std=c11 -O2 -g -fPIC -shared -fexceptions -fcf-protection=branch -Wall -Wextra -Werror \
+		"-DRPROF_GOMP_BUILD_VERSION=\"$$version\"" "-DRPROF_GOMP_BUILD_SHA=\"$$hash\"" \
+		crates/rprof-gomp/native/adapter.c crates/rprof-gomp/native/dispatch.S target/$(PROFILE)/librprof_ompt.a \
+		-Wl,--exclude-libs,ALL -ldl -lpthread -lm -lrt -lutil -o "$$temporary"; \
+		chmod 755 "$$temporary"; mv "$$temporary" "target/$(PROFILE)/librprof_gomp.so"; \
+		printf 'compiler=%s\nruntime=%s\nsha256=%s\n' "$$version" "$$library" "$$hash" > "target/$(PROFILE)/rprof-gomp-build.txt"
 
 cuda:
 	$(CARGO) build -p rprof-cuda $(CARGO_FLAGS)
