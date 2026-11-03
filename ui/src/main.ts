@@ -71,6 +71,7 @@ class Viewer {
   private readonly tooltip: HTMLElement;
   private readonly collapsed: Set<string>;
   private readonly hits: Hit[] = [];
+  private readonly labelCache = new Map<string, string>();
   private rows: TimelineRow[] = [];
   private domain: Domain | undefined;
   private start = 0n;
@@ -130,6 +131,11 @@ class Viewer {
       <section class="overview"><div class="overview-copy"><div class="eyebrow">CAPTURE OVERVIEW</div><h1 id="session-title">Session</h1><p id="overview-subtitle"></p></div><div class="stat-grid" id="stat-grid"></div></section>
       <div class="workspace"><section class="timeline-section"><div class="toolbar"><div class="toolbar-top"><div class="toolbar-heading"><h2>Timeline</h2><span id="domain-note">CLOCK DOMAINS ARE UNALIGNED</span></div><div class="zoom-controls"><button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button><button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button><button id="fit-view" type="button">Fit all</button></div></div><div class="toolbar-fields"><label class="field">Clock domain <select id="domain-select" aria-label="Clock domain"></select></label><label class="field search">Filter <input id="filter-input" type="search" placeholder="Name, category, rank…" aria-label="Filter tracks and events"></label><span id="range-label" class="range-label"></span></div><div class="io-toolbar" id="io-toolbar" hidden><button type="button" id="io-toggle" aria-label="Toggle I/O graph" aria-pressed="true">I/O ▾</button><label class="field">Filesystem <select id="io-fs-select" aria-label="Filesystem"></select></label><label class="field">Metric <select id="io-metric-select" aria-label="I/O metric"><option value="throughput">Throughput · MiB/s</option><option value="iops">Calls/s (IOPS)</option><option value="latency">Average latency · ms</option></select></label><span class="io-legend"><i class="io-read-key"></i> Read <i class="io-write-key"></i> Write</span><span id="io-coverage" class="io-coverage"></span></div></div><div class="ruler-wrap"><div class="track-header">TRACKS <span>▾ collapse</span></div><canvas id="time-ruler" aria-label="Timeline time axis"></canvas></div><div class="plot-scroll" id="timeline-scroll" tabindex="0" aria-label="Timeline tracks; scroll vertically, wheel over plot to zoom, drag to pan"><canvas id="timeline-canvas" aria-label="Interactive timeline spans and counters"></canvas><div id="timeline-spacer"></div></div><div class="timeline-footer"><span><i class="legend-swatch span-key"></i> span <i class="legend-swatch counter-key"></i> counter <i class="legend-swatch incomplete-key"></i> incomplete</span><span>Wheel: zoom · Drag: pan · Shift + wheel: scroll</span></div></section><aside class="sidebar"><section class="side-card" id="detail-panel"><div class="side-title">INSPECTOR</div><div id="detail-content" class="detail-content"></div></section><section class="side-card"><div class="side-title">CATEGORY SUMMARY <span>INCLUSIVE TIME</span></div><div class="category-wrap"><table id="category-table"><thead><tr><th>Category</th><th>Spans</th><th>Time</th></tr></thead><tbody></tbody></table></div><p class="footnote">Inclusive durations may overlap and double-count nested work. Counts cover the full capture, not just retained events.</p></section><section class="side-card"><div class="side-title">CAPTURE STATUS</div><div id="capture-status"></div></section></aside></div>`;
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
+    this.get('fit-view').textContent = 'Reset';
+    this.get('fit-view').title = 'Reset zoom to the full capture (Home)';
+    this.get('fit-view').setAttribute('aria-label', 'Reset zoom');
+    this.get('timeline-scroll').setAttribute('aria-label', 'Timeline tracks; wheel scrolls vertically, drag pans time, buttons zoom and reset');
+    this.root.querySelector('.timeline-footer > span:last-child')!.textContent = 'Wheel: scroll rows · Drag: pan time · Buttons / + −: zoom · Home: reset';
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
     const perFile = this.get('io-panel');
@@ -226,14 +232,8 @@ class Viewer {
         this.schedule(); event.preventDefault();
       }
     });
-    this.canvas.addEventListener('wheel', event => {
-      event.preventDefault();
-      if (event.shiftKey || event.clientX - this.canvas.getBoundingClientRect().left < LABEL_WIDTH) {
-        this.scroll.scrollTop += event.deltaY;
-      } else {
-        this.zoom(Math.exp(clamp(event.deltaY, -500, 500) * 0.0015), event.offsetX - LABEL_WIDTH);
-      }
-    }, { passive: false });
+    // Let the browser handle wheel/trackpad scrolling and delta modes naturally.
+    // Time zoom is explicit (buttons/keyboard), never an accidental wheel gesture.
     this.canvas.addEventListener('pointerdown', event => {
       if (event.button !== 0) return;
       this.canvas.setPointerCapture(event.pointerId);
@@ -939,9 +939,11 @@ class Viewer {
   private hover(event: PointerEvent): void {
     if (this.drag) { this.hideTooltip(); return; }
     const bounds = this.canvas.getBoundingClientRect();
-    const hit = this.hitAt(event.clientX - bounds.left, event.clientY - bounds.top);
-    if (!hit) { this.hideTooltip(); return; }
-    const label = hit.selection.kind === 'span' ? hit.selection.item.span.name : hit.selection.kind === 'io' ? `${hit.selection.graph.label} · ${this.ioMetric}` : hit.selection.item.counter.name;
+    const x = event.clientX - bounds.left, y = event.clientY - bounds.top;
+    const hit = this.hitAt(x, y);
+    const row = x < LABEL_WIDTH ? this.rows[lowerBound(this.rows, row => row.top + row.height > y + this.scroll.scrollTop)] : undefined;
+    if (!hit && !row) { this.hideTooltip(); return; }
+    const label = row ? row.label : hit!.selection.kind === 'span' ? hit!.selection.item.span.name : hit!.selection.kind === 'io' ? `${hit!.selection.graph.label} · ${this.ioMetric}` : hit!.selection.item.counter.name;
     this.tooltip.textContent = label;
     this.canvas.title = label;
     this.tooltip.hidden = false;
@@ -1008,7 +1010,7 @@ class Viewer {
     const ctx = this.resize(this.canvas, width, height);
     this.hits.length = 0;
     ctx.fillStyle = this.colors.background; ctx.fillRect(0, 0, width, height);
-    this.drawRuler(width);
+    const ticks = this.drawRuler(width);
     const from = lowerBound(this.rows, row => row.top + row.height > this.scroll.scrollTop);
     const viewEnd = this.start + this.visibleDuration();
     const anchors = new Map<string, { x: number; y: number }>();
@@ -1018,20 +1020,33 @@ class Viewer {
       if (y >= height) break;
       ctx.fillStyle = row.kind === 'shard' ? this.colors.shard : row.kind === 'rank' ? this.colors.rank : i % 2 ? this.colors.odd : this.colors.even;
       ctx.fillRect(0, y, width, row.height);
+      if (row.kind !== 'rank' && row.kind !== 'shard') {
+        ctx.fillStyle = this.colors.labelBackground; ctx.fillRect(0, y, LABEL_WIDTH - 1, row.height);
+      }
       ctx.strokeStyle = this.colors.border; ctx.beginPath(); ctx.moveTo(0, y + row.height - .5); ctx.lineTo(width, y + row.height - .5); ctx.stroke();
       ctx.save(); ctx.beginPath(); ctx.rect(LABEL_WIDTH + 1, y, width - LABEL_WIDTH - 1, row.height); ctx.clip();
+      if (row.kind !== 'rank' && row.kind !== 'shard') {
+        ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 1; ctx.beginPath();
+        for (const x of ticks) { ctx.moveTo(x + .5, y + 1); ctx.lineTo(x + .5, y + row.height - 1); }
+        ctx.stroke();
+      }
       if (row.kind === 'track') this.drawSpans(ctx, row, y, viewEnd, anchors);
       if (row.kind === 'counter') this.drawCounter(ctx, row, y, viewEnd);
       if (row.kind === 'io') this.drawIoGraph(ctx, row, y, viewEnd);
       ctx.restore();
       ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
-      ctx.font = row.kind === 'shard' || row.kind === 'rank' ? '600 12px system-ui' : '12px system-ui';
+      ctx.font = row.kind === 'shard' || row.kind === 'rank' || row.system && row.depth === 0 ? '600 12px system-ui' : '12px system-ui';
       const indent = Math.min(125, 15 + row.depth * 17);
       if (row.hasChildren) { ctx.fillStyle = this.colors.muted; ctx.fillText((row.expanded ?? !this.collapsed.has(row.key)) ? '▾' : '▸', indent, y + row.height / 2 + 4); }
-      ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
+      ctx.fillStyle = row.system ? this.colors[row.system] : row.kind === 'shard' ? this.colors.heading : this.colors.label;
       const labelX = indent + (row.hasChildren ? 16 : 4);
       const maxWidth = LABEL_WIDTH - labelX - 10;
-      ctx.fillText(row.label, labelX, y + row.height / 2 + 4, maxWidth);
+      ctx.fillText(this.ellipsize(ctx, row.label, maxWidth), labelX, y + row.height / 2 + (row.system ? -3 : 4));
+      if (row.system) {
+        ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
+        const subtitle = row.system === 'cpu' ? 'CPU utilization · 0–100%' : 'Memory used · includes cache';
+        ctx.fillText(this.ellipsize(ctx, subtitle, maxWidth), labelX, y + row.height / 2 + 13);
+      }
       if (row.kind === 'track' && row.track && row.height >= 52) {
         ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
         ctx.fillText(`${row.track.kind.replace('_', ' ')}${row.track.rank === null ? '' : ` · rank ${row.track.rank}`}`, labelX, y + row.height / 2 + 19, maxWidth);
@@ -1049,7 +1064,25 @@ class Viewer {
     this.rangeLabel.textContent = this.domain ? `${formatNs(this.start)} – ${formatNs(this.start + this.visibleDuration())} · domain-relative${this.domain.calibration ? ` · estimated ±${this.domain.calibration.uncertainty_ns} ns` : this.report.domains.length > 1 ? ' · unaligned' : ''}` : 'No clock domain';
   }
 
-  private drawRuler(width: number): void {
+  private ellipsize(ctx: CanvasRenderingContext2D, text: string, width: number): string {
+    const key = `${ctx.font}:${width}:${text}`;
+    const cached = this.labelCache.get(key);
+    if (cached !== undefined) return cached;
+    let result = text;
+    if (ctx.measureText(text).width > width) {
+      let low = 0, high = text.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (ctx.measureText(`${text.slice(0, mid)}…`).width <= width) low = mid; else high = mid - 1;
+      }
+      result = `${text.slice(0, low)}…`;
+    }
+    if (this.labelCache.size >= 2048) this.labelCache.clear();
+    this.labelCache.set(key, result);
+    return result;
+  }
+
+  private drawRuler(width: number): number[] {
     const ctx = this.resize(this.ruler, Math.max(1, width - LABEL_WIDTH), 35);
     const plotWidth = width - LABEL_WIDTH;
     ctx.fillStyle = this.colors.ruler; ctx.fillRect(0, 0, plotWidth, 35);
@@ -1058,12 +1091,15 @@ class Viewer {
     const exponent = 10 ** Math.floor(Math.log10(Math.max(1, duration)));
     const step = BigInt(Math.max(1, Math.round(([1, 2, 5, 10].find(n => n * exponent >= duration) ?? 10) * exponent)));
     const first = (this.start / step) * step;
+    const ticks: number[] = [];
     for (let tick = first, count = 0; count < 150 && tick <= this.start + this.visibleDuration(); tick += step, count++) {
       const x = timeToX(tick, this.start, this.nsPerPx);
       if (x < 0) continue;
+      ticks.push(LABEL_WIDTH + x);
       ctx.beginPath(); ctx.moveTo(x + .5, 26); ctx.lineTo(x + .5, 35); ctx.stroke();
       ctx.fillText(formatNs(tick), x + 5, 20);
     }
+    return ticks;
   }
 
   private highlighted(correlation: string | null): boolean {
@@ -1103,28 +1139,22 @@ class Viewer {
   }
 
   private drawCounter(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
+    if (row.system) { this.drawSystemCounter(ctx, row, y, end); return; }
     const trackData = this.data.get(row.track!.id);
     const samples = trackData?.counters.get(row.series!) ?? [];
-    if (row.system && !samples.length) {
-      ctx.fillStyle = this.colors.muted; ctx.font = '11px system-ui';
-      ctx.fillText(row.depth === 0 ? 'No aligned samples; expand hosts' : 'No retained samples', LABEL_WIDTH + 8, y + 23);
-      return;
-    }
     const first = lowerBound(samples, sample => sample.time >= this.start);
     const last = lowerBound(samples, sample => sample.time > end);
     const count = last - first;
     if (!count) return;
     const stride = Math.max(1, Math.ceil(count / 3000));
     const points: IndexedCounter[] = [];
-    const indices: number[] = [];
-    for (let i = first; i < last; i += stride) { points.push(samples[i]!); indices.push(i); }
+    for (let i = first; i < last; i += stride) points.push(samples[i]!);
     const integer = points.every(point => point.counter.value_type === 'integer');
-    const values = row.system === 'memory' ? points.map(point => Number(BigInt(point.counter.value)) / 2 ** 30) :
-      integer ? integerPlotValues(points.map(point => point.counter.value)) : points.map(point => Number(point.counter.value));
+    const values = integer ? integerPlotValues(points.map(point => point.counter.value)) : points.map(point => Number(point.counter.value));
     const finite = values.filter(Number.isFinite);
     if (!finite.length) return;
-    const min = row.system ? 0 : Math.min(...finite);
-    const max = row.system ? row.system === 'cpu' ? 100 : row.capacity ? Number(BigInt(row.capacity)) / 2 ** 30 : Math.max(...finite) : Math.max(...finite);
+    const min = Math.min(...finite);
+    const max = Math.max(...finite);
     const range = max - min || 1;
     const color = colorFor(row.series!, this.colors.counters);
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
@@ -1134,9 +1164,7 @@ class Viewer {
       if (!Number.isFinite(value)) { started = false; continue; }
       const x = LABEL_WIDTH + timeToX(points[i]!.time, this.start, this.nsPerPx);
       const py = y + COUNTER_PLOT_TOP + COUNTER_PLOT_HEIGHT * (1 - (value - min) / range);
-      const gaps = trackData?.systemGaps?.get(row.series!);
-      const connected = i > 0 && (!row.system || (gaps && systemPointsConnected(gaps, indices[i - 1]!, indices[i]!)));
-      if (!started || !connected) { ctx.moveTo(x, py); started = true; } else ctx.lineTo(x, py);
+      if (!started) { ctx.moveTo(x, py); started = true; } else ctx.lineTo(x, py);
       const selected = this.selection?.kind === 'counter' && this.selection.item === points[i];
       ctx.fillStyle = selected ? this.colors.selected : color;
       ctx.fillRect(x - (selected ? 3 : 2), py - (selected ? 3 : 2), selected ? 6 : 4, selected ? 6 : 4);
@@ -1144,9 +1172,87 @@ class Viewer {
     }
     ctx.stroke(); ctx.lineWidth = 1;
     ctx.fillStyle = this.colors.muted; ctx.font = '10px system-ui';
-    const sourceSamples = samples[0]?.counter.attributes['system.report_samples'];
-    const sampling = sourceSamples && sourceSamples !== String(samples.length) ? `${samples.length}/${sourceSamples} full-run samples` : `${samples.length} samples`;
-    ctx.fillText(row.system ? `${sampling} · ${row.system === 'cpu' ? '0–100%' : `0–${row.capacity ? (Number(BigInt(row.capacity)) / 2 ** 30).toFixed(1) + ' GiB' : 'observed peak (capacity unknown)'}`} · ${row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not app usage'}` : `${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
+    ctx.fillText(`${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
+  }
+
+  private drawSystemCounter(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
+    const data = this.data.get(row.track!.id);
+    const samples = data?.counters.get(row.series!) ?? [];
+    const color = this.colors[row.system!];
+    const top = y + 10, bottom = y + row.height - 22, height = bottom - top;
+    ctx.font = '11px system-ui'; ctx.fillStyle = this.colors.muted;
+    if (!samples.length) {
+      ctx.fillText(row.depth === 0 ? 'No aligned samples; expand hosts' : 'No retained samples', LABEL_WIDTH + 8, y + row.height / 2);
+      return;
+    }
+    // Include neighboring observations so a zoomed viewport between samples
+    // still shows its continuous segment. Never extend beyond measured endpoints.
+    const first = Math.max(0, lowerBound(samples, sample => sample.time >= this.start) - 1);
+    const last = Math.min(samples.length, lowerBound(samples, sample => sample.time > end) + 1);
+    const stride = Math.max(1, Math.ceil((last - first) / 3000));
+    const indices: number[] = [];
+    for (let i = first; i < last; i += stride) indices.push(i);
+    if (last > first && indices.at(-1) !== last - 1) indices.push(last - 1);
+    const values = indices.map(i => Number(samples[i]!.counter.value) / (row.system === 'memory' ? 2 ** 30 : 1));
+    const max = row.system === 'cpu' ? 100 : row.capacity !== undefined ? Number(BigInt(row.capacity)) / 2 ** 30 : Math.max(0, ...values.filter(Number.isFinite));
+    const range = max || 1;
+    ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const fraction of [0, .25, .5, .75, 1]) {
+      const py = bottom - height * fraction;
+      ctx.moveTo(LABEL_WIDTH + 1, py + .5); ctx.lineTo(this.scroll.clientWidth, py + .5);
+    }
+    ctx.stroke();
+    type Point = { x: number; y: number; sample: IndexedCounter };
+    const segments: Point[][] = [];
+    let segment: Point[] | undefined;
+    const gaps = data?.systemGaps?.get(row.series!);
+    for (let i = 0; i < indices.length; i++) {
+      const value = values[i]!;
+      if (!Number.isFinite(value)) { segment = undefined; continue; }
+      const continuous = i > 0 && gaps && systemPointsConnected(gaps, indices[i - 1]!, indices[i]!);
+      if (!segment || !continuous) { segment = []; segments.push(segment); }
+      const sample = samples[indices[i]!]!;
+      segment.push({ x: LABEL_WIDTH + timeToX(sample.time, this.start, this.nsPerPx),
+        y: bottom - height * clamp(value / range, 0, 1), sample });
+    }
+    const fill = ctx.createLinearGradient(0, top, 0, bottom);
+    fill.addColorStop(0, `${color}${this.theme === 'dark' ? '70' : '50'}`);
+    fill.addColorStop(1, `${color}${this.theme === 'dark' ? '28' : '20'}`);
+    for (const segment of segments) {
+      const firstPoint = segment[0]!, lastPoint = segment.at(-1)!;
+      if (segment.length > 1) {
+        ctx.beginPath(); ctx.moveTo(firstPoint.x, bottom);
+        for (const point of segment) ctx.lineTo(point.x, point.y);
+        ctx.lineTo(lastPoint.x, bottom); ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+      }
+      ctx.beginPath(); ctx.moveTo(firstPoint.x, firstPoint.y);
+      for (const point of segment.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.75; ctx.stroke();
+      for (let i = 0; i < segment.length; i++) {
+        const point = segment[i]!;
+        const selected = this.selection?.kind === 'counter' && this.selection.item === point.sample;
+        if (selected || segment.length === 1) {
+          ctx.beginPath(); ctx.arc(point.x, point.y, selected ? 4 : 2, 0, Math.PI * 2);
+          ctx.fillStyle = selected ? this.colors.selected : color; ctx.fill();
+        }
+        const left = Math.max(LABEL_WIDTH + 1, i ? (segment[i - 1]!.x + point.x) / 2 : point.x - (segment.length === 1 ? 4 : 0));
+        const right = Math.min(this.scroll.clientWidth, i + 1 < segment.length ? (point.x + segment[i + 1]!.x) / 2 : point.x + (segment.length === 1 ? 4 : 0));
+        if (right > left) this.hits.push({ x: left, y: top, width: right - left, height, selection: { kind: 'counter', item: point.sample } });
+      }
+    }
+    ctx.lineWidth = 1; ctx.textAlign = 'right'; ctx.font = '600 10px system-ui';
+    for (const fraction of [0, 1]) {
+      const label = row.system === 'cpu' ? `${max * fraction}%` : `${(max * fraction).toLocaleString(undefined, { maximumSignificantDigits: 4 })} GiB`;
+      const py = fraction ? top + 9 : bottom - 3;
+      ctx.strokeStyle = this.colors.background; ctx.lineWidth = 3; ctx.strokeText(label, this.scroll.clientWidth - 8, py);
+      ctx.fillStyle = this.colors.muted; ctx.fillText(label, this.scroll.clientWidth - 8, py);
+    }
+    ctx.lineWidth = 1; ctx.textAlign = 'left'; ctx.font = '10px system-ui';
+    const source = samples[0]!.counter.attributes['system.report_samples'];
+    const count = source && source !== String(samples.length) ? `${samples.length}/${source} full-run samples` : `${samples.length} samples`;
+    const scope = row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not application usage';
+    ctx.fillText(`${count} · ${scope}${row.system === 'memory' && row.capacity === undefined ? ' · capacity unknown' : ''}`, LABEL_WIDTH + 8, y + row.height - 5);
   }
 
   private drawIoGraph(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {

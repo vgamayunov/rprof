@@ -354,6 +354,87 @@ test('offline timeline renders, filters, inspects, zooms, pans, and separates cl
   expect(requests).toEqual([]);
 });
 
+test('wheel scrolls rows over both plots and labels without changing zoom; zoom buttons and reset still work', async ({ page }) => {
+  await loaded(page, injected('wheel-scroll', report => {
+    const process = report.tracks.find((track: any) => track.rank === 0 && track.parent === null);
+    report.tracks.push(...Array.from({ length: 80 }, (_, i) => ({ ...process, id: `scroll-${i}`, name: `process ${i}` })));
+  }));
+  const canvas = page.locator('#timeline-canvas'), scroll = page.locator('#timeline-scroll');
+  const box = (await canvas.boundingBox())!;
+  const original = await page.locator('#range-label').textContent();
+  await page.mouse.move(box.x + 450, box.y + 110);
+  await page.mouse.wheel(0, 360);
+  await expect.poll(() => scroll.evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+  await expect(page.locator('#range-label')).toHaveText(original!);
+  const plotScrolled = await scroll.evaluate(element => element.scrollTop);
+  await page.mouse.move(box.x + 80, box.y + 110);
+  await page.mouse.wheel(0, 200);
+  await expect.poll(() => scroll.evaluate(element => element.scrollTop)).toBeGreaterThan(plotScrolled);
+  await expect(page.locator('#range-label')).toHaveText(original!);
+  await page.locator('#zoom-in').click();
+  await expect(page.locator('#range-label')).not.toHaveText(original!);
+  const zoomed = await page.locator('#range-label').textContent();
+  await page.mouse.move(box.x + 450, box.y + 110);
+  const beforeUp = await scroll.evaluate(element => element.scrollTop);
+  await page.mouse.wheel(0, -180);
+  await expect.poll(() => scroll.evaluate(element => element.scrollTop)).toBeLessThan(beforeUp);
+  await expect(page.locator('#range-label')).toHaveText(zoomed!);
+  await page.locator('#zoom-out').click();
+  await expect(page.locator('#range-label')).not.toHaveText(zoomed!);
+  await page.locator('#zoom-in').click();
+  const vertical = await scroll.evaluate(element => element.scrollTop);
+  await page.getByRole('button', { name: 'Reset zoom', exact: true }).click();
+  await expect(page.locator('#range-label')).toHaveText(original!);
+  expect(await scroll.evaluate(element => element.scrollTop)).toBe(vertical);
+});
+
+test('CPU and memory use distinct filled utilization areas and leave source gaps unpainted in both themes', async ({ page }) => {
+  const url = injected('filled-utilization', report => {
+    const domain = report.domains[0].id, shard = report.shards[0].id;
+    report.domains = [{ ...report.domains[0], end_ns: '6000000000' }];
+    report.shards = [{ ...report.shards[0], domain }];
+    report.tracks = []; report.spans = []; report.counters = [];
+    delete report.io_timeline;
+    for (const resource of ['cpu', 'memory']) {
+      const id = `filled:${resource}`;
+      report.tracks.push({ id, shard, parent: null, name: resource, kind: 'system', rank: null,
+        details: { resource, 'system.host_id': 'host/boot' } });
+      for (const time of [1, 2, 4, 5]) report.counters.push({ track: id, name: resource === 'cpu' ? 'system.cpu.utilization' : 'system.memory.used',
+        timestamp_ns: `${time}000000000`, value: resource === 'cpu' ? '40' : '2147483648', value_type: resource === 'cpu' ? 'float' : 'integer',
+        unit: resource === 'cpu' ? '%' : 'bytes', attributes: { 'system.interval_ns': '1000000000', 'system.sample_index': String(time), 'system.memory.total_bytes': '4294967296' } });
+    }
+  });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loaded(page, url);
+  const report: Report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!));
+  const rows = timelineRows(report, indexReport(report), report.domains[0]!.id, '');
+  const cpu = rows.find(row => row.system === 'cpu')!, memory = rows.find(row => row.system === 'memory')!;
+  const pixel = async (fraction: number, row: typeof cpu) => page.locator('#timeline-canvas').evaluate((element, args) => {
+    const canvas = element as HTMLCanvasElement;
+    const x = 260 + (canvas.clientWidth - 260) * args.fraction;
+    const y = args.top + args.height - 27;
+    return Array.from(canvas.getContext('2d')!.getImageData(Math.round(x * devicePixelRatio), Math.round(y * devicePixelRatio), 1, 1).data);
+  }, { fraction, top: row.top, height: row.height });
+  for (const theme of ['dark', 'light']) {
+    if (theme === 'light') await page.getByRole('button', { name: 'Switch to light theme' }).click();
+    await expect.poll(async () => {
+      const inside = await pixel(.25, cpu), gap = await pixel(.54, cpu);
+      return inside[1]! - inside[0]! - (gap[1]! - gap[0]!);
+    }).toBeGreaterThan(8);
+    const cpuGap = await pixel(.54, cpu), cpuBefore = await pixel(.08, cpu);
+    expect(cpuGap).toEqual(cpuBefore);
+    const memoryInside = await pixel(.25, memory), memoryGap = await pixel(.54, memory);
+    expect(memoryInside[2]! - memoryInside[0]!).toBeGreaterThan(memoryGap[2]! - memoryGap[0]! + 8);
+    expect(memoryGap).toEqual(await pixel(.08, memory));
+  }
+  const canvas = page.locator('#timeline-canvas'), box = (await canvas.boundingBox())!;
+  await canvas.click({ position: { x: 260 + (box.width - 260) * .25, y: cpu.top + cpu.height - 27 } });
+  await expect(page.locator('#detail-content h3')).toHaveText('system.cpu.utilization');
+  await expect(page.locator('#detail-content')).toContainText('40');
+  await canvas.click({ position: { x: 260 + (box.width - 260) * .54, y: cpu.top + cpu.height - 27 } });
+  await expect(page.locator('#detail-content')).toContainText('Select a span or counter');
+});
+
 test('integer counters above 2^53 remain distinct and inspectable', async ({ page }) => {
   await loaded(page);
   await page.locator('#filter-input').fill('cycles rank:0');

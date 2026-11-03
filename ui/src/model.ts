@@ -623,7 +623,7 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
     const descendantMatch = (item: SystemGraph): boolean => item.children.some(child =>
       matchesFilter(`${child.label} ${child.search}`, 'system', null, query) || descendantMatch(child));
     if (!selfMatch && !descendantMatch(graph)) return;
-    add({ key: graph.key, kind: 'counter', label: graph.label, depth, height: ROW_HEIGHT.counter,
+    add({ key: graph.key, kind: 'counter', label: graph.label, depth, height: depth === 0 ? 88 : depth === 1 ? 72 : 52,
       shard: graph.shard, track: graph.track, series: graph.series, hasChildren: graph.children.length > 0,
       system: graph.kind, capacity: graph.capacity, expanded: graph.children.length > 0 && (query ? true : !collapsed.has(graph.key)) });
     if (!query && collapsed.has(graph.key)) return;

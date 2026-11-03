@@ -198,3 +198,18 @@
 [data-theme="light"] .io-legend .io-read-key { background: #176b61; }
 [data-theme="light"] .io-legend .io-write-key { background: #af661c; }
 [data-theme="light"] .io-coverage { color: #526b79; }
+
+/* A compact instrument-panel layout: hierarchy labels, shared ruler and plots. */
+.overview:not(.projection-overview) { min-height: 132px; padding: 20px 28px; }
+.overview:not(.projection-overview) h1 { font-size: clamp(20px, 1.8vw, 27px); }
+.timeline-section { border-radius: 8px; box-shadow: 0 3px 16px #0000000d; }
+.toolbar { padding: 14px 16px 12px; }
+.toolbar-fields { margin-top: 12px; }
+.zoom-controls { display: flex; align-items: center; gap: 5px; }
+.zoom-controls button { min-height: 30px; min-width: 32px; }
+#fit-view { padding-inline: 12px; }
+.plot-scroll { scrollbar-gutter: stable; }
+.track-header { letter-spacing: 1.2px; }
+.timeline-footer { font-size: 10px; }
+.io-toolbar { padding-top: 10px; row-gap: 8px; }
+.detail-row dd { font-variant-numeric: tabular-nums; }

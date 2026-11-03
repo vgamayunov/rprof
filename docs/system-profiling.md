@@ -26,6 +26,14 @@ the overviews. Graphs remain visible when collapsed. Filtering can reveal a part
 host, CPU or NUMA node. Counter points expose exact values and definitions in the
 inspector. Memory is displayed in GiB with exact bytes retained; CPU axes use 0–100%.
 
+CPU and memory use Task-Manager-style filled area graphs, with distinct green/blue
+colors and aligned time grids. Overview rows are larger than individual CPU/NUMA
+rows, so expanded views stay compact. Fills stop at source-data gaps and measured
+endpoints; a missing interval is not painted as utilization. Wheel scrolling moves
+through the hierarchy; zoom/reset buttons and horizontal dragging control time.
+The hierarchy/label/shared-chart arrangement takes cues from
+[Nsight Systems' timeline presentation](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#timeline-view).
+
 System tracks carry a stable `system.host_id` (hostname/boot identity) and a
 `resource` key (`cpu`, `cpu:N`, `memory`, or `node:N`). Overview averages are derived
 in the viewer; original samples remain intact in the capture. Use a current rprof

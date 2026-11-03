@@ -34,10 +34,11 @@ Controls:
   an explicit choice is saved per browser origin when storage is available.
 - **Clock domain:** select a host/boot clock domain; other domains are not overlaid.
 - **Filter:** search names, categories, and rank labels; for example `cuda rank:0`.
-- **Zoom:** wheel over the plot, use `+`/`−`, or click the zoom buttons.
+- **Zoom:** click the `+`/`−` buttons, or use those keys with the timeline focused.
 - **Pan:** drag horizontally; when the plot is focused, use left/right arrows.
-- **Fit:** click *Fit all* or press Home while the plot is focused.
-- **Scroll:** wheel over labels or Shift+wheel over the plot.
+- **Reset zoom:** click *Reset* or press Home while the plot is focused.
+- **Scroll:** the mouse wheel/trackpad scrolls vertically over both labels and plots;
+  it does not change the timeline's zoom. Drag the plot to pan horizontally.
 - **Hierarchy:** click expandable shard/rank/track labels to collapse or expand.
 - **Inspect:** click a span or counter sample for exact values, attributes, and
   correlations. Selecting a correlated span highlights related operations and
