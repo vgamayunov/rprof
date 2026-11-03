@@ -13,6 +13,7 @@ mod pytorch_import;
 mod record;
 mod report;
 mod supervisor;
+mod system_collector;
 mod view;
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
@@ -114,6 +115,9 @@ pub(crate) struct RecordArgs {
     /// Approximate counter-read interval; final counts are always read after cleanup.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(10..=60000))]
     pmu_interval_ms: u64,
+    /// Host CPU/memory sampling interval, including logical CPUs and NUMA nodes.
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
+    system_interval_ms: u64,
     /// Python source roots to instrument (repeatable; default: working directory).
     #[arg(long)]
     python_include: Vec<PathBuf>,
@@ -141,6 +145,7 @@ pub(crate) enum CollectorKind {
     Cuda,
     Pmu,
     Python,
+    System,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

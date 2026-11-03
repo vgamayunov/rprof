@@ -19,6 +19,11 @@ hard capture limits, summary omissions, browser retention and sizing estimates.
 
 ## Local capture-foundation checks
 
+Host CPU/memory collection and multi-node sampler election are covered by
+`cargo test -p rprof-cli --test system` and the `system_collector` unit tests.
+See [system profiling](system-profiling.md) for the two-node/four-rank HBv4 check
+and expandable overview/host/CPU/NUMA UI validation.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

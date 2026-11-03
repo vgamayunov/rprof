@@ -74,10 +74,42 @@ counts, average/max operation latency, and observed-window bandwidth. These are
 latencies can double-count elapsed time. With event loss, byte/count totals describe
 the retained observations and are not extrapolated to the entire workload.
 
-The HTML I/O panel follows the selected clock domain and paginates file/operation
-tables. Full-capture summaries are independent of HTML timeline event retention.
-Summary metadata is bounded to 8,192 identities and 16 MiB of file-key metadata;
-omitted summary events are reported explicitly.
+### Default view: filesystem graphs
+
+New HTML reports and `rprof view` open with the **I/O performance over time** panel
+above the raw timeline. Select all filesystem/unknown groups or a particular host,
+mount point, filesystem type and device. Pipes, sockets and devices are separate
+non-file groups, excluded from the default aggregate but selectable explicitly.
+Per-file and per-operation tables remain available under collapsed **Per-file I/O
+details**.
+
+- **Throughput:** completed read and write bytes divided by each time bin's duration,
+  displayed as MiB/s. Short I/O contributes actual bytes, not requested bytes.
+- **IOPS:** observed `read`/`pread` and `write`/`pwrite` calls per second, including
+  failed calls. These are POSIX API operations, not storage-device IOPS.
+- **Latency:** mean read/write call duration per bin, plus a combined mean weighted
+  by operation count. A bin without calls has unknown latency, not zero latency.
+- Click a bin for exact bytes/counts/durations, errors, other operations (including
+  open/close/fsync), and the maximum latency across all call types.
+
+Calls and completed bytes are assigned to the bin containing the **call completion**;
+a long operation is not spread across earlier bins. Empty bins mean no recorded
+calls, not proof of idle storage. The final shorter bin uses its actual duration.
+Loss, partial captures and summary omissions remain explicit. Multi-host rates only
+combine within a common clock domain (including explicitly estimated MPI alignment).
+
+Graphs are computed in Rust from a second streaming pass over the fixed capture
+snapshot, independently of raw HTML event retention. Filesystem identity metadata
+is bounded to 1,024 groups / 4 MiB; time bins are bounded to 65,536 globally and at
+most 512 per group, with at least 1 ms bin width. Resolution adapts to capture
+duration and group count. Canvas charts use these bounded series rather than
+reprocessing individual I/O calls in the browser. Per-file summaries separately
+retain at most 8,192 identities / 16 MiB of file-key metadata.
+
+Regenerate HTML to get the new default view for an existing capture. Old captures
+without filesystem attributes retain their recorded byte/latency/count graphs under
+**unknown filesystem**; mount identity cannot be recovered retrospectively. Old
+HTML reports without time-series data retain their per-file table.
 
 ### Identity and paths
 
@@ -104,20 +136,33 @@ behavior for invalid pointers. Non-UTF-8 paths retain their raw bytes as hex in
 addition to a display string. Path aggregation does not assert physical inode or
 cross-mount-namespace equivalence.
 
+Filesystem identity is captured from the actual descriptor using `fstat`, `fstatfs`
+and `statx` mount IDs where available, with mount-namespace identity. It shares the
+bounded, generation-checked descriptor cache; metadata queries are outside the
+application call's measured latency but can still add profiling overhead. The
+receiver resolves optional mount labels from the workload's `/proc/PID/mountinfo`,
+checking namespace and device identity. Short-lived processes, inaccessible procfs
+or unsupported kernel fields can leave labels unknown/attribution partial. Failed
+opens are not assigned a filesystem by guessing a path prefix. Mount labels are
+best-effort snapshots, not continuously refreshed mount history.
+
+The native I/O wire is now version 2 (392 bytes). Rebuild both the CLI and preload
+library when updating; the persisted capture schema remains stream v2.
+
 ## Buffering and loss accounting
 
 The injected Rust runtime uses fixed storage and atomics, with no event allocation,
 JSON serialization, capture-file output, or blocking queue submission in callbacks.
-It sends 352-byte observations over a nonblocking inherited Unix datagram socket.
+It sends 392-byte observations over a nonblocking inherited Unix datagram socket.
 An external ingress thread feeds a bounded raw-event queue; a separate thread
 converts observations into the existing capture writer. This decouples short bursts
 from JSON conversion without blocking the workload on capture storage.
 
-- `--io-buffer-events` defaults to 16,384 raw events (about 5.5 MiB payload), with
+- `--io-buffer-events` defaults to 16,384 raw events (about 6.125 MiB payload), with
   a maximum of 262,144. The kernel socket budget is additionally bounded/clamped
   by the OS. Existing `--chunk-events` and `--queue-chunks` control the JSON writer.
 - Descriptor IDs use 512 KiB of fixed storage per image. The atomic path cache
-  reserves roughly 17 MiB of address space; only touched descriptor pages become
+  and filesystem cache reserves roughly 19.5 MiB of address space; only touched descriptor pages become
   resident. Fork invalidation avoids touching every cached-path page.
 - Shared mmap counters survive fork, exec, `_exit`, and fatal workload signals.
   They count logging attempts, accepted native sends, initialization, and ingress

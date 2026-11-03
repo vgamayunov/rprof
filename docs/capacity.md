@@ -45,12 +45,19 @@ It does not keep one file descriptor open per rank.
 | MPI runtime tracking, per process | 8,192 live requests, 2,048 communicators, 4,096 wait/test scratch entries; saturation loses detail, not world-size support |
 | Python instrumentation | 1,024 live instrumented threads, stack depth 128, 65,536 code symbols; omission diagnostics apply |
 
-Raw queue payload capacity at defaults is I/O 5.5 MiB, MPI 7.375 MiB, OpenMP
-5.875 MiB, CUDA 9.5 MiB: **28.25 MiB/rank for all four**, excluding channel,
+Raw queue payload capacity at defaults is I/O 6.125 MiB, MPI 7.375 MiB, OpenMP
+5.875 MiB, CUDA 9.5 MiB: **28.875 MiB/rank for all four**, excluding channel,
 kernel/socket, decoder, writer and metadata memory. CUDA also has an 8 MiB host
 activity pool in the application. This is queue sizing, not measured RSS.
 Each collector adds receiver/ingress threads. Profiler threads inherit rank CPU
 affinity; allow CPU headroom or they compete with application threads.
+
+The optional `system` collector samples on supervisor heartbeats, without an extra
+receiver thread. It elects one concurrent sampler per host/session (shared temp
+directory required). Each interval emits roughly `logical CPUs + NUMA nodes + 3`
+observations per host, with a one-second default. The overview/host/CPU/NUMA tree is
+collapsed initially and canvas rendering is viewport-bounded; expanding fewer rows
+does not reduce capture volume. See [system profiling](system-profiling.md).
 
 Track count includes process/thread lifetimes and synthetic resource/task/region
 lanes, not only concurrently running threads. Repeated thread creation or unique
@@ -73,6 +80,9 @@ native adapters/protocol crates.
 - MPI: 8,192 `(shard, rank, call name)` groups globally; 1,000 ranks with more than
   about eight call names can omit detailed rows while the capture remains intact.
 - I/O: 8,192 per-file summary keys.
+- I/O graphs: 1,024 filesystem groups, 4 MiB identity metadata and 65,536 bins
+  globally (at most 512 per group). A second fixed-snapshot pass derives rates
+  independently of timeline retention; large group counts reduce time resolution.
 - HTML/`view`: first **200,000 observations or 64 MiB** by default, configurable up
   to 2 million/512 MiB. Track metadata has a separate 16 MiB bound. This is not a
   random sample and later phases may be absent from the timeline. Text summaries

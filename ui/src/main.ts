@@ -1,5 +1,5 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoSummary, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
+import { aggregateIoBins, averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoFilesystem, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { ProjectionViewer } from './projection.js';
@@ -64,8 +64,9 @@ class Viewer {
   private readonly ruler: HTMLCanvasElement;
   private readonly detail: HTMLElement;
   private readonly rangeLabel: HTMLElement;
+  private readonly systemButtons = new Map<'cpu' | 'memory', HTMLButtonElement>();
   private readonly tooltip: HTMLElement;
-  private readonly collapsed = new Set<string>();
+  private readonly collapsed: Set<string>;
   private readonly hits: Hit[] = [];
   private rows: TimelineRow[] = [];
   private domain: Domain | undefined;
@@ -78,6 +79,11 @@ class Viewer {
   private ioPage = 0;
   private operationPage = 0;
   private selectedIo: IoSummary | undefined;
+  private ioFilesystem = 'all';
+  private ioBins: IoTimeBin[] = [];
+  private ioChartValues: number[][][] = [];
+  private ioChartTheme: Theme | undefined;
+  private ioChartWidth = 0;
   private regionPage = 0;
   private threadPage = 0;
   private selectedRegion: OpenmpRegion | undefined;
@@ -115,6 +121,7 @@ class Viewer {
   constructor(report: Report, root: HTMLElement) {
     this.report = report;
     this.data = indexReport(report);
+    this.collapsed = defaultTimelineCollapsed(report);
     this.root = root;
     // Only application-owned static markup is used here. All report strings enter via textContent or Canvas.
     root.innerHTML = `<header class="topbar"><div class="brand"><div class="mark">r/</div><div><strong>rprof</strong><small>OFFLINE TIMELINE</small></div></div><div class="header-actions"><div class="header-meta" id="header-meta"></div><button id="theme-toggle" type="button"></button></div></header>
@@ -123,6 +130,35 @@ class Viewer {
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
+    const perFile = this.get('io-panel');
+    const perFileContent = node('details', 'io-per-file');
+    perFileContent.id = 'io-per-file';
+    const summary = node('summary', '', 'Per-file I/O details');
+    for (const child of Array.from(perFile.children).filter(child => !child.classList.contains('io-heading'))) perFileContent.append(child);
+    perFileContent.prepend(summary);
+    perFile.append(perFileContent);
+    if (!report.io_timeline) {
+      perFile.prepend(node('p', 'io-note', 'I/O time series unavailable in this older report; regenerate the report from the capture to view filesystem graphs. Per-file details remain available below.'));
+      perFileContent.open = true;
+    } else {
+      const panel = node('section', 'io-section io-profile'); panel.id = 'io-profile';
+      panel.innerHTML = `<div class="io-heading"><div><h2>I/O performance over time</h2><p>Filesystem view · full-capture completed POSIX read/write bytes per bin duration, POSIX calls/s (not device IOPS), and call latency. Clock domains are never mixed.</p></div><span id="io-fs-count"></span></div><label class="io-fs-field">Filesystem <select id="io-fs-select" aria-label="Filesystem"></select></label><p class="io-note" id="io-fs-coverage"></p><div class="io-chart-grid"></div><div id="io-bin-detail" class="io-bin-detail" aria-live="polite">Click a bin to inspect exact values and other operations.</div>`;
+      for (const [id, title] of [['throughput', 'Throughput · MiB/s'], ['iops', 'IOPS · read/write calls/s'], ['latency', 'Average read/write call latency · ms']] as const) {
+        const chart = node('div', 'io-chart');
+        const legend = node('p', 'io-chart-legend');
+        legend.append(node('span', 'io-read-key', 'Read'), node('span', 'io-write-key', 'Write'));
+        if (id === 'latency') legend.append(node('span', 'io-mean-key', 'Combined (weighted)'));
+        chart.append(node('h3', '', title), legend);
+        const canvas = node('canvas'); canvas.id = `io-chart-${id}`; canvas.setAttribute('aria-label', `${title} over time; click a bin to inspect`);
+        canvas.addEventListener('click', event => this.inspectIoBin(event, canvas));
+        chart.append(canvas); panel.querySelector('.io-chart-grid')!.append(chart);
+      }
+      this.root.querySelector('.workspace')!.before(panel);
+      this.get('io-fs-select').addEventListener('change', () => {
+        this.ioFilesystem = (this.get('io-fs-select') as HTMLSelectElement).value;
+        this.selectIoFilesystem();
+      });
+    }
     if (report.openmp) root.insertAdjacentHTML('beforeend', `<section class="io-section openmp-section" id="openmp-panel"><div class="io-heading"><div><h2>OpenMP</h2><p id="openmp-coverage"></p></div><span id="openmp-count"></span></div><p class="io-note" id="openmp-tasks"></p><div class="io-wrap"><table id="openmp-regions"><thead><tr><th>Region · process</th><th>Threads requested / observed</th><th>Region duration</th><th>Recorded work</th><th>Recorded wait</th><th>Observed work min / max / spread</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="openmp-region-pager"></div><div id="openmp-detail"></div><div id="gomp-panel" hidden><h3>GNU libgomp observed calls and outlined bodies</h3><p class="io-note" id="gomp-coverage"></p><p class="io-note" id="gomp-tasks"></p><h3>GOMP API calls <span id="gomp-api-count"></span></h3><div class="io-wrap"><table id="gomp-apis"><thead><tr><th>API · image / shard</th><th>Calls</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-api-pager"></div><h3>Outlined body returns <span id="gomp-body-count"></span></h3><div class="io-wrap"><table id="gomp-bodies"><thead><tr><th>Kind · image / shard</th><th>Thread ID</th><th>Opaque code pointer (not source)</th><th>Body spans</th><th>Inclusive wall time</th><th>Max wall time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="gomp-body-pager"></div></div><details id="openmp-runtimes"><summary>Runtime and capability details <span id="openmp-runtime-count"></span></summary><div id="openmp-runtime-list"></div><div class="io-pager" id="openmp-runtime-pager"></div><div id="openmp-callback-detail"></div></details></section>`);
     if (report.cuda) root.insertAdjacentHTML('beforeend', `<section class="io-section cuda-section" id="cuda-panel"><div class="io-heading"><div><h2>CUDA</h2><p>Selected clock domain · inclusive timed kernel/copy durations overlap across streams; not GPU utilization or elapsed application time. Host API time is not GPU execution time.</p></div><span id="cuda-count"></span></div><p class="io-note" id="cuda-health"></p><div class="io-wrap"><table id="cuda-devices"><thead><tr><th>GPU device · process</th><th>Visibility</th><th>Memory / compute CC</th><th>Timed kernels / copies / memsets</th><th>Inclusive kernel / copy time</th><th>Copy / memset bytes</th><th>Activity window</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-device-pager"></div><div id="cuda-device-detail"></div><h3>CPU CUDA API calls <span id="cuda-api-count"></span></h3><div class="io-wrap"><table id="cuda-apis"><thead><tr><th>Host API · image</th><th>Runtime / driver</th><th>Calls</th><th>Errors</th><th>Inclusive host time</th><th>Max host time</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-api-pager"></div><details id="cuda-diagnostics"><summary>Capabilities, errors and source health</summary><div id="cuda-runtime-list"></div><div class="io-pager" id="cuda-runtime-pager"></div><div id="cuda-runtime-detail"></div><h3>Capture sources</h3><div class="io-wrap"><table id="cuda-sources"><thead><tr><th>Shard</th><th>Images / finalized</th><th>Native received / attempted</th><th>Native ingress drops</th><th>CUPTI drops</th><th>Source errors</th><th>Invalid timing</th><th>Unattributed</th><th>Unresolved / ambiguous correlations</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="cuda-source-pager"></div></details></section>`);
     if (report.pmu) root.insertAdjacentHTML('beforeend', `<section class="io-section pmu-section" id="pmu-panel"><div class="io-heading"><div><h2>Linux perf counters (PMU)</h2><p>Selected clock domain · workload-tree aggregates or root-thread counts, not per-thread attribution. Hardware, software and raw perf events are distinguished below; software task-clock is not a hardware metric.</p></div><span id="pmu-count"></span></div><p class="io-note">Timeline pmu.EVENT.raw samples are cumulative raw counts, not rates. A missing or failed read is unknown, not zero. Scaled count = raw × enabled / running is an estimate under multiplexing, not an exact count. Events are independently scheduled: IPC and cache-miss ratios are estimates, not jointly scheduled measurements; only valid final pairs yield metrics.</p><div class="io-wrap"><table id="pmu-events"><thead><tr><th>Event / perf type</th><th>PID / shard</th><th>Scope / privilege</th><th>Status / error</th><th>Raw / unit</th><th>Enabled / running (exact ns)</th><th>Running %</th><th>Scaled estimate</th><th>Final read / samples</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-event-pager"></div><h3>Estimated ratios <span id="pmu-metric-count"></span></h3><div class="io-wrap"><table id="pmu-metrics"><thead><tr><th>Shard</th><th>IPC estimate (instructions / cycles)</th><th>Cache-miss estimate (%)</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="pmu-metric-pager"></div><details id="pmu-hosts"><summary>Host context at launch (not continuously sampled CPU frequency) <span id="pmu-host-count"></span></summary><p class="io-note">Kernel, CPUID model/vendor, affinity, CPU0 cache, NUMA and frequency context where available. Frequency metadata is launch-time context, not a continuous frequency trace.</p><div id="pmu-host-list"></div><div class="io-pager" id="pmu-host-pager"></div><div id="pmu-host-detail"></div></details></section>`);
@@ -146,6 +182,20 @@ class Viewer {
     this.ruler = this.get('time-ruler') as HTMLCanvasElement;
     this.detail = this.get('detail-content');
     this.rangeLabel = this.get('range-label');
+    if (report.tracks.some(track => track.kind === 'system')) for (const [kind, label] of [['cpu', 'CPU ▸'], ['memory', 'Memory ▸']] as const) {
+      const button = node('button', '', label);
+      button.type = 'button'; button.setAttribute('aria-label', `Expand ${kind} system graphs`);
+      button.addEventListener('click', () => {
+        const key = `system:${this.domain?.id}:${kind}`;
+        // Search temporarily reveals children: clicking while filtered clears
+        // search and collapses the visible group rather than appearing to do nothing.
+        if (this.filter.value) { this.filter.value = ''; this.collapsed.add(key); }
+        else if (this.collapsed.has(key)) this.collapsed.delete(key); else this.collapsed.add(key);
+        this.buildRows(); this.schedule();
+      });
+      this.systemButtons.set(kind, button);
+      this.get('fit-view').before(button);
+    }
     this.setupOverview();
     this.get('theme-toggle').addEventListener('click', () => {
       this.setTheme(this.theme === 'dark' ? 'light' : 'dark');
@@ -309,6 +359,7 @@ class Viewer {
     this.hideTooltip();
     this.ioPage = 0;
     this.selectedIo = undefined;
+    if (this.report.io_timeline) this.renderIoProfile();
     this.renderIo();
     this.regionPage = 0;
     this.threadPage = 0;
@@ -364,6 +415,112 @@ class Viewer {
     }
     this.renderPager(this.get('io-pager'), files.length, this.ioPage, page => { this.ioPage = page; this.renderIo(); });
     this.renderIoDetail();
+  }
+
+  private renderIoProfile(): void {
+    this.ioFilesystem = 'all';
+    const select = this.get('io-fs-select') as HTMLSelectElement;
+    select.replaceChildren();
+    const files = (this.report.io_timeline?.filesystems ?? []).filter(fs => fs.domain === this.domain?.id);
+    const storage = files.filter(fs => fs.kind !== 'non_filesystem');
+    const add = (value: string, label: string): void => { const option = node('option', '', label); option.value = value; select.append(option); };
+    add('all', `All filesystem + unknown groups (${storage.length})`);
+    for (const [index, fs] of files.entries()) add(String(index), `${fs.host} · ${fs.mount_point || '(no mount)'} · ${fs.filesystem_type || 'unknown type'} · ${fs.device || 'unknown device'}${fs.kind === 'non_filesystem' ? ' · non-file I/O' : fs.kind === 'unknown' ? ' · unknown' : ''}`);
+    this.get('io-fs-count').textContent = `${storage.length} filesystem / unknown · ${files.length - storage.length} non-file groups`;
+    this.selectIoFilesystem();
+  }
+
+  private selectIoFilesystem(): void {
+    const files = (this.report.io_timeline?.filesystems ?? []).filter(fs => fs.domain === this.domain?.id);
+    const selected = this.ioFilesystem === 'all' ? files.filter(fs => fs.kind !== 'non_filesystem') :
+      files[Number(this.ioFilesystem)] ? [files[Number(this.ioFilesystem)]!] : [];
+    const bins = aggregateIoBins(selected);
+    this.ioBins = bins ?? [];
+    this.ioChartValues = this.ioBins.map(bin => {
+      const m = ioBinMetrics(bin);
+      const n = (value: string, divisor = 1): number => value === '—' ? NaN : Number.parseFloat(value) / divisor;
+      return [[n(m.readBytesPerSec, 1048576), n(m.writeBytesPerSec, 1048576)],
+        [n(m.readOpsPerSec), n(m.writeOpsPerSec)],
+        [n(m.readLatencyNs, 1_000_000), n(m.writeLatencyNs, 1_000_000), n(m.meanLatencyNs, 1_000_000)]];
+    });
+    this.ioChartTheme = undefined;
+    const omitted = this.report.io_timeline?.omitted_events ?? '0';
+    this.get('io-fs-coverage').textContent = bins === null ?
+      'These groups have different time grids; select one filesystem to inspect without mixing bins.' :
+      `${selected.length === 1 ? `${selected[0]!.host} · ${selected[0]!.mount_point} (${selected[0]!.filesystem_type}, ${selected[0]!.device})` : `${selected.length} filesystem / unknown groups across ${new Set(selected.map(fs => fs.host)).size} hosts`} · ${this.ioBins.length} bins · ${omitted} I/O timeline events omitted · ${this.report.summary.dropped} capture events dropped (capture-wide) · ${this.report.summary.complete ? 'finalized capture' : 'partial capture'}. Failed calls count in operations/latency/errors but contribute no completed bytes. Empty bins mean no recorded calls, not proof of idle storage; no calls means latency unknown. Other operations include metadata calls and are not included in read/write IOPS or average latency.`;
+    this.get('io-bin-detail').textContent = 'Click a bin to inspect exact values and other operations.';
+    this.schedule();
+  }
+
+  private inspectIoBin(event: MouseEvent, canvas: HTMLCanvasElement): void {
+    const extent = this.domain ? BigInt(this.domain.end_ns) : 0n;
+    const x = event.clientX - canvas.getBoundingClientRect().left - 60;
+    const width = canvas.clientWidth - 72;
+    if (!extent || !width) return;
+    const time = extent * BigInt(Math.floor(Math.max(0, Math.min(width, x)) * 1_000_000 / width)) / 1_000_000n;
+    const bin = this.ioBins.find(item => BigInt(item.start_ns) <= time && time < BigInt(item.start_ns) + BigInt(item.duration_ns));
+    if (!bin) return;
+    const rates = ioBinMetrics(bin);
+    this.get('io-bin-detail').textContent = `${formatNs(BigInt(bin.start_ns))}–${formatNs(BigInt(bin.start_ns) + BigInt(bin.duration_ns))} (duration ${formatNs(BigInt(bin.duration_ns))}) · Read ${bin.read_bytes} completed B, ${bin.read_ops} calls, ${rates.readBytesPerSec} B/s, ${rates.readOpsPerSec} calls/s, avg ${rates.readLatencyNs} · Write ${bin.write_bytes} completed B, ${bin.write_ops} calls, ${rates.writeBytesPerSec} B/s, ${rates.writeOpsPerSec} calls/s, avg ${rates.writeLatencyNs} · Combined read/write avg ${rates.meanLatencyNs} · Other ops ${bin.other_ops} · Errors ${bin.errors} · Max latency (all calls incl metadata) ${bin.max_latency_ns} ns`;
+  }
+
+  private drawIoCharts(): void {
+    if (!this.report.io_timeline) return;
+    const chartWidth = this.get('io-chart-throughput').clientWidth;
+    if (this.ioChartTheme === this.theme && this.ioChartWidth === chartWidth) return;
+    this.ioChartTheme = this.theme; this.ioChartWidth = chartWidth;
+    const extent = this.domain ? BigInt(this.domain.end_ns) : 0n;
+    const isLight = this.theme === 'light';
+    const palette = isLight ? ['#176b61', '#af661c', '#6743a3'] : ['#6bcdb0', '#e5b46d', '#b29be6'];
+    for (const [chartIndex, kind] of ['throughput', 'iops', 'latency'].entries()) {
+      const canvas = this.get(`io-chart-${kind}`) as HTMLCanvasElement;
+      const width = Math.max(1, canvas.clientWidth), height = 172;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+      const ctx = canvas.getContext('2d')!; ctx.scale(dpr, dpr);
+      const left = 60, right = 12, top = 14, bottom = 28, plotWidth = Math.max(1, width - left - right), plotHeight = height - top - bottom;
+      const values = this.ioChartValues.map(row => row[chartIndex]!);
+      let max = 0;
+      for (const row of values) for (const value of row) if (Number.isFinite(value)) max = Math.max(max, value);
+      max ||= 1;
+      ctx.strokeStyle = isLight ? '#cddae3' : '#3c596a'; ctx.fillStyle = isLight ? '#526b79' : '#a9bec9';
+      ctx.font = '11px ui-sans-serif, system-ui';
+      for (let tick = 0; tick <= 2; tick++) {
+        const y = top + plotHeight * tick / 2;
+        ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(width - right, y); ctx.stroke();
+        ctx.fillText((max * (1 - tick / 2)).toLocaleString(undefined, { maximumSignificantDigits: 3 }), 2, y + 3);
+      }
+      ctx.fillText('0', left, height - 7);
+      ctx.textAlign = 'right'; ctx.fillText(extent ? formatNs(extent) : 'no domain', width - right, height - 7); ctx.textAlign = 'left';
+      if (!extent) continue;
+      if (!this.ioBins.length) { ctx.fillText('No filesystem observations in this selection', left + 6, top + 32); continue; }
+      Array.from({ length: kind === 'latency' ? 3 : 2 }).forEach((_, series) => {
+        ctx.strokeStyle = palette[series]!; ctx.lineWidth = 2;
+        let connected = false;
+        for (let i = 0; i < this.ioBins.length; i++) {
+          const bin = this.ioBins[i]!, value = values[i]![series]!;
+          if (!Number.isFinite(value)) { connected = false; continue; }
+          const start = BigInt(bin.start_ns), duration = BigInt(bin.duration_ns);
+          const x = left + Number(start * 1_000_000n / extent) / 1_000_000 * plotWidth;
+          const endX = left + Number((start + duration) * 1_000_000n / extent) / 1_000_000 * plotWidth;
+          const y = top + plotHeight * (1 - Math.min(1, value / max));
+          ctx.beginPath();
+          if (kind === 'latency') {
+            if (connected) ctx.moveTo(left + Number((BigInt(this.ioBins[i - 1]!.start_ns) + BigInt(this.ioBins[i - 1]!.duration_ns) / 2n) * 1_000_000n / extent) / 1_000_000 * plotWidth, top + plotHeight * (1 - Math.min(1, values[i - 1]![series]! / max)));
+            else ctx.moveTo(x + (endX - x) / 2, y);
+            ctx.lineTo(x + (endX - x) / 2, y);
+            ctx.stroke();
+            ctx.fillStyle = palette[series]!; ctx.fillRect(x + (endX - x) / 2 - 2, y - 2, 4, 4);
+          } else {
+            ctx.fillStyle = palette[series]!;
+            ctx.globalAlpha = .8;
+            ctx.fillRect(x + (endX - x) * series / 2, y, Math.max(1, (endX - x) / 2), top + plotHeight - y);
+            ctx.globalAlpha = 1;
+          }
+          connected = true;
+        }
+      });
+    }
   }
 
   private renderPager(parent: HTMLElement, total: number, page: number, change: (page: number) => void): void {
@@ -901,6 +1058,14 @@ class Viewer {
 
   private buildRows(): void {
     this.rows = timelineRows(this.report, this.data, this.domain?.id, this.filter.value, this.collapsed);
+    for (const [kind, button] of this.systemButtons) {
+      const key = `system:${this.domain?.id}:${kind}`;
+      button.hidden = !this.rows.some(row => row.key === key);
+      const expanded = this.rows.find(row => row.key === key)?.expanded ?? false;
+      button.textContent = `${kind === 'cpu' ? 'CPU' : 'Memory'} ${expanded ? '▾' : '▸'}`;
+      button.setAttribute('aria-expanded', String(expanded));
+      button.setAttribute('aria-label', `${expanded ? 'Collapse' : 'Expand'} ${kind} system graphs`);
+    }
     const top = this.rows.at(-1)?.top ?? 0;
     const height = this.rows.at(-1)?.height ?? 0;
     this.scroll.style.height = `${Math.min(Math.max(260, Math.min(640, window.innerHeight * 0.64)), Math.max(260, top + height))}px`;
@@ -927,6 +1092,7 @@ class Viewer {
   }
 
   private draw(): void {
+    this.drawIoCharts();
     this.hideTooltip();
     const width = this.scroll.clientWidth;
     const height = this.scroll.clientHeight;
@@ -952,7 +1118,7 @@ class Viewer {
       ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
       ctx.font = row.kind === 'shard' || row.kind === 'rank' ? '600 12px system-ui' : '12px system-ui';
       const indent = Math.min(125, 15 + row.depth * 17);
-      if (row.hasChildren) { ctx.fillStyle = this.colors.muted; ctx.fillText(this.collapsed.has(row.key) ? '▸' : '▾', indent, y + row.height / 2 + 4); }
+      if (row.hasChildren) { ctx.fillStyle = this.colors.muted; ctx.fillText((row.expanded ?? !this.collapsed.has(row.key)) ? '▾' : '▸', indent, y + row.height / 2 + 4); }
       ctx.fillStyle = row.kind === 'shard' ? this.colors.heading : this.colors.label;
       const labelX = indent + (row.hasChildren ? 16 : 4);
       const maxWidth = LABEL_WIDTH - labelX - 10;
@@ -1028,20 +1194,28 @@ class Viewer {
   }
 
   private drawCounter(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {
-    const samples = this.data.get(row.track!.id)?.counters.get(row.series!) ?? [];
+    const trackData = this.data.get(row.track!.id);
+    const samples = trackData?.counters.get(row.series!) ?? [];
+    if (row.system && !samples.length) {
+      ctx.fillStyle = this.colors.muted; ctx.font = '11px system-ui';
+      ctx.fillText(row.depth === 0 ? 'No aligned samples; expand hosts' : 'No retained samples', LABEL_WIDTH + 8, y + 23);
+      return;
+    }
     const first = lowerBound(samples, sample => sample.time >= this.start);
     const last = lowerBound(samples, sample => sample.time > end);
     const count = last - first;
     if (!count) return;
     const stride = Math.max(1, Math.ceil(count / 3000));
     const points: IndexedCounter[] = [];
-    for (let i = first; i < last; i += stride) points.push(samples[i]!);
+    const indices: number[] = [];
+    for (let i = first; i < last; i += stride) { points.push(samples[i]!); indices.push(i); }
     const integer = points.every(point => point.counter.value_type === 'integer');
-    const values = integer ? integerPlotValues(points.map(point => point.counter.value)) : points.map(point => Number(point.counter.value));
+    const values = row.system === 'memory' ? points.map(point => Number(BigInt(point.counter.value)) / 2 ** 30) :
+      integer ? integerPlotValues(points.map(point => point.counter.value)) : points.map(point => Number(point.counter.value));
     const finite = values.filter(Number.isFinite);
     if (!finite.length) return;
-    const min = Math.min(...finite);
-    const max = Math.max(...finite);
+    const min = row.system ? 0 : Math.min(...finite);
+    const max = row.system ? row.system === 'cpu' ? 100 : row.capacity ? Number(BigInt(row.capacity)) / 2 ** 30 : Math.max(...finite) : Math.max(...finite);
     const range = max - min || 1;
     const color = colorFor(row.series!, this.colors.counters);
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
@@ -1051,7 +1225,9 @@ class Viewer {
       if (!Number.isFinite(value)) { started = false; continue; }
       const x = LABEL_WIDTH + timeToX(points[i]!.time, this.start, this.nsPerPx);
       const py = y + COUNTER_PLOT_TOP + COUNTER_PLOT_HEIGHT * (1 - (value - min) / range);
-      if (!started) { ctx.moveTo(x, py); started = true; } else ctx.lineTo(x, py);
+      const gaps = trackData?.systemGaps?.get(row.series!);
+      const connected = i > 0 && (!row.system || (gaps && systemPointsConnected(gaps, indices[i - 1]!, indices[i]!)));
+      if (!started || !connected) { ctx.moveTo(x, py); started = true; } else ctx.lineTo(x, py);
       const selected = this.selection?.kind === 'counter' && this.selection.item === points[i];
       ctx.fillStyle = selected ? this.colors.selected : color;
       ctx.fillRect(x - (selected ? 3 : 2), py - (selected ? 3 : 2), selected ? 6 : 4, selected ? 6 : 4);
@@ -1059,7 +1235,7 @@ class Viewer {
     }
     ctx.stroke(); ctx.lineWidth = 1;
     ctx.fillStyle = this.colors.muted; ctx.font = '10px system-ui';
-    ctx.fillText(`${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
+    ctx.fillText(row.system ? `${points.length} samples · ${row.system === 'cpu' ? '0–100%' : `0–${row.capacity ? (Number(BigInt(row.capacity)) / 2 ** 30).toFixed(1) + ' GiB' : 'observed peak (capacity unknown)'}`} · ${row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not app usage'}` : `${points.length} samples · ${row.series}`, LABEL_WIDTH + 8, y + row.height - 4);
   }
 
   private drawLinks(ctx: CanvasRenderingContext2D, anchors: Map<string, { x: number; y: number }>): void {
@@ -1079,7 +1255,8 @@ class Viewer {
     if (x < LABEL_WIDTH) {
       const row = this.rows.find(item => y + this.scroll.scrollTop >= item.top && y + this.scroll.scrollTop < item.top + item.height);
       if (row?.hasChildren) {
-        if (this.collapsed.has(row.key)) this.collapsed.delete(row.key); else this.collapsed.add(row.key);
+        if (row.system && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
+        else if (this.collapsed.has(row.key)) this.collapsed.delete(row.key); else this.collapsed.add(row.key);
         this.buildRows(); this.schedule();
       } else if (row?.kind === 'shard') this.showShard(row.shard);
       else if (row?.track) this.showTrack(row.track);
@@ -1150,7 +1327,7 @@ class Viewer {
       const { counter, time } = this.selection.item;
       this.detail.append(node('h3', '', counter.name));
       put(dl, 'div', 'Timestamp', `${time} ns`);
-      put(dl, 'div', 'Exact value', counter.value);
+      put(dl, 'div', counter.attributes['system.aggregate'] ? 'Sampled aggregate estimate' : 'Exact value', counter.value);
       put(dl, 'div', 'Type / unit', `${counter.value_type} · ${counter.unit}`);
       if (counter.unit === 'marker') put(dl, 'div', 'Interpretation', 'Trace instant marker sample; not an execution span or duration.');
       put(dl, 'div', 'Track', counter.track);

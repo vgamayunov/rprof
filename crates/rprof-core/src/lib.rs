@@ -42,11 +42,26 @@ pub struct Track {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TrackKind {
-    Process { pid: u32 },
-    Thread { tid: u64 },
-    GpuDevice { device: u32 },
-    GpuStream { stream: u64 },
-    Io { resource: String },
+    Process {
+        pid: u32,
+    },
+    Thread {
+        tid: u64,
+    },
+    GpuDevice {
+        device: u32,
+    },
+    GpuStream {
+        stream: u64,
+    },
+    Io {
+        resource: String,
+    },
+    /// Host-wide sampled metrics, not a process/thread or a hardware counter.
+    System {
+        resource: String,
+        host_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

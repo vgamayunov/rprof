@@ -30,6 +30,9 @@ use rprof_io_protocol::{
 
 use crate::{capture_sink::CaptureSink, record::monotonic_ns};
 
+#[path = "io_filesystem.rs"]
+mod io_filesystem;
+
 pub(crate) struct Mapping(NonNull<Stats>);
 // The mapping lives until all receiver/supervisor references are dropped. The
 // immutable magic and atomic counters are the only fields shared across threads.
@@ -411,6 +414,7 @@ fn consume(
     origin: u64,
 ) -> Result<Outcome> {
     let mut files = HashMap::<(u64, Vec<u8>, u16), u64>::new();
+    let mut filesystem = io_filesystem::Resolver::new();
     let mut received = 0u64;
     for raw in receiver {
         let Some(operation) = op::name(raw.operation) else {
@@ -513,6 +517,7 @@ fn consume(
             ("ppid".into(), Attribute::Unsigned(raw.ppid as u64)),
             ("process_instance".into(), Attribute::Unsigned(raw.instance)),
         ]);
+        attrs.extend(filesystem.attributes(&raw));
         if std::str::from_utf8(path_bytes).is_err() {
             attrs.insert(
                 "io.path_raw_hex".into(),

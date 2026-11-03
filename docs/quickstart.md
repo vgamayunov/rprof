@@ -18,7 +18,7 @@ Build only the native adapters you need, on a system compatible with the workloa
 | LLVM/Intel OpenMP | `make ompt PROFILE=release` |
 | GCC 13/libgomp, Linux x86_64 | `make gomp PROFILE=release GOMP_CC=gcc` (matching target runtime) |
 | CUDA 13/CUPTI | `make cuda PROFILE=release CUDA_HOME=/usr/local/cuda` |
-| Process, Python, Linux perf counters, PyTorch import | No native adapter build needed |
+| Process, host system metrics, Python, Linux perf counters, PyTorch import | No native adapter build needed |
 
 Keep the adapter libraries alongside `rprof`. Use fresh output names for each run.
 
@@ -30,7 +30,10 @@ Replace `./app` and its arguments with your workload. Choose a command below:
 # Process lifetime and exit status (default)
 rprof record -o process.jsonl -- ./app
 
-# File operations, bytes, errors and latency
+# Host CPU utilization and memory; expand hosts, logical CPUs and NUMA nodes
+rprof record --collect system -o system.jsonl -- ./app
+
+# Default filesystem graphs: throughput, latency and IOPS over time
 rprof record --collect io -o io.jsonl -- ./app
 
 # LLVM libomp / Intel libiomp5
@@ -56,6 +59,8 @@ rprof record --collect python,io --python-backend ranges \
 ```
 
 Combine compatible collectors with commas, e.g. `--collect io,openmp,pmu`.
+Add `system` for host graphs; `--system-interval-ms 1000` sets their sample interval.
+See [system metrics](system-profiling.md) for multi-host sampling and clock alignment.
 Python `ranges` records annotations added with `rprof_python.range("name")`;
 without annotations it provides interpreter diagnostics, not function spans.
 GNU OpenMP `bodies` adds task bodies; `full` adds API/chunk detail and more traffic.

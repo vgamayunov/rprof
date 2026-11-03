@@ -223,6 +223,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut omitted = 0u64;
     let mut metadata_bytes = 0;
     let mut io = crate::io_summary::IoAnalysis::default();
+    let mut io_discovery = crate::io_timeline::Discovery::default();
     let mut clocks = crate::clock::Clocks::default();
     let mut mpi = crate::mpi_summary::MpiAnalysis::default();
     let mut openmp = crate::openmp_summary::OpenmpAnalysis::default();
@@ -230,8 +231,12 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut pmu = crate::pmu_summary::PmuAnalysis::default();
     let mut python = crate::python_summary::PythonAnalysis::default();
     let mut pytorch = crate::pytorch_summary::PytorchAnalysis::default();
+    let mut system_errors = BTreeMap::<Uuid, u64>::new();
     let data = scan(path, None, |record| {
         io.observe(&record);
+        if limits.retain_timeline {
+            io_discovery.observe(&record);
+        }
         clocks.observe(&record);
         mpi.observe(&record);
         openmp.observe(&record);
@@ -241,6 +246,13 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         pytorch.observe(&record);
         if let Record::Chunk(chunk) = record {
             for (event_index, event) in chunk.events.into_iter().enumerate() {
+                if let Payload::Counter(sample) = &event.payload
+                    && sample.name == "system.meta.read_errors"
+                    && let rprof_core::CounterValue::Integer(count) = sample.value
+                {
+                    let previous = system_errors.entry(chunk.shard_id).or_default();
+                    *previous = (*previous).max(count);
+                }
                 if let Payload::Span(span) = &event.payload {
                     let stats = categories
                         .entry(category(&span.category).into())
@@ -276,7 +288,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                     retained += 1;
                     used_bytes += cost;
                 }
-                let attrs = attributes(event.attributes);
+                let mut attrs = attributes(event.attributes);
                 match event.payload {
                     Payload::Track(track) => {
                         let (kind, details) = match track.kind {
@@ -293,6 +305,10 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                                 ("gpu_stream", [("stream".into(), stream.to_string())])
                             }
                             TrackKind::Io { resource } => ("io", [("resource".into(), resource)]),
+                            TrackKind::System { resource, host_id } => {
+                                attrs.insert("system.host_id".into(), host_id);
+                                ("system", [("resource".into(), resource)])
+                            }
                         };
                         tracks.push(ReportTrack {
                             id: key(chunk.shard_id, track.id),
@@ -475,6 +491,29 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
             (offsets[track_shards[counter.track.as_str()]] + local as u128).to_string();
     }
     let mut warnings = clock_layout.warnings;
+    let io_timeline =
+        if let Some(mut series) = io_discovery.start(&domains, &lookup, &clock_layout.offsets) {
+            // A fixed snapshot keeps a growing capture from changing the binning window.
+            scan(path, Some(data.source_bytes), |record| {
+                series.observe(&record);
+                Ok(())
+            })?;
+            let series = series.finish();
+            if series.omitted_events != "0" {
+                warnings.push(format!(
+                "{} I/O observations omitted from filesystem graphs by identity/metadata limits.",
+                series.omitted_events
+            ));
+            }
+            Some(series)
+        } else {
+            None
+        };
+    for (shard, count) in system_errors {
+        if count > 0 {
+            warnings.push(format!("Host system sampling for shard {shard}: {count} read/parse/topology errors; missing CPU or memory samples are unknown, not zero. Inspect system.meta.read_errors for details."));
+        }
+    }
     if mpi.omitted > 0 {
         warnings.push(format!(
             "{} MPI call summaries omitted by summary limits.",
@@ -608,6 +647,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         counters,
         dependencies,
         io,
+        io_timeline,
         mpi,
         openmp,
         cuda,

@@ -19,6 +19,8 @@ pub struct Report {
     pub dependencies: Vec<Dependency>,
     #[serde(default)]
     pub io: Vec<IoSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_timeline: Option<IoTimeline>,
     #[serde(default)]
     pub mpi: Vec<MpiCallSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,6 +33,39 @@ pub struct Report {
     pub python: Option<PythonSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pytorch: Option<PytorchSummary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoTimeline {
+    pub filesystems: Vec<IoFilesystem>,
+    pub omitted_events: String,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoFilesystem {
+    pub id: String,
+    pub domain: String,
+    pub host: String,
+    pub filesystem_type: String,
+    pub mount_point: String,
+    pub device: String,
+    pub kind: String,
+    pub bin_width_ns: String,
+    pub bins: Vec<IoTimeBin>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IoTimeBin {
+    pub start_ns: String,
+    pub duration_ns: String,
+    pub read_bytes: String,
+    pub write_bytes: String,
+    pub read_ops: String,
+    pub write_ops: String,
+    pub other_ops: String,
+    pub errors: String,
+    pub read_latency_ns: String,
+    pub write_latency_ns: String,
+    pub other_latency_ns: String,
+    pub max_latency_ns: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

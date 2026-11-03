@@ -129,6 +129,16 @@ impl CaptureSink {
         kind: TrackKind,
         rank: Option<u32>,
     ) -> Result<u64> {
+        self.track_with_parent(at, Some(parent), name, kind, rank)
+    }
+    pub fn track_with_parent(
+        &mut self,
+        at: u64,
+        parent: Option<u64>,
+        name: String,
+        kind: TrackKind,
+        rank: Option<u32>,
+    ) -> Result<u64> {
         ensure!(
             self.next_track < rprof_capture::MAX_TRACKS as u64,
             "capture track limit exceeded; reduce I/O file/thread cardinality"
@@ -142,7 +152,7 @@ impl CaptureSink {
             at,
             Payload::Track(Track {
                 id,
-                parent_id: Some(parent),
+                parent_id: parent,
                 name,
                 rank,
                 kind,

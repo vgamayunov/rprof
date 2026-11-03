@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, indexReport, integerPlotValues, SPAN_PITCH, SPAN_TOP, timelineRows } from '../../src/model.ts';
+import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, indexReport, integerPlotValues, SPAN_PITCH, SPAN_TOP, timelineRows } from '../../src/model.ts';
 import type { Report } from '../../src/model.ts';
 
 const root = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
@@ -104,6 +104,58 @@ async function canvasCorner(page: Page): Promise<number[]> {
 test('optional language panels remain absent on old reports', async ({ page }) => {
   await loaded(page);
   await expect(page.locator('#python-panel, #pytorch-panel')).toHaveCount(0);
+});
+
+test('system graphs drill into hosts and logical CPUs / NUMA nodes in both themes; filter reveals collapsed descendants', async ({ page }) => {
+  const url = injected('system-graphs', report => {
+    const domain = report.shards[0].domain;
+    report.domains.find((item: any) => item.id === domain).end_ns = '4000000000';
+    for (const [index, hostname] of ['alpha', 'beta'].entries()) {
+      const shard = `system-host-${index}`;
+      report.shards.push({ ...report.shards[0], id: shard, domain, name: shard, hostname });
+      for (const resource of ['cpu', 'memory']) {
+        const id = `${shard}:${resource}`;
+        report.tracks.push({ id, shard, parent: null, name: resource, kind: 'system', rank: null,
+          details: { resource, 'system.host_id': `${hostname}:boot` } });
+        const child = `${id}:child`;
+        report.tracks.push({ id: child, shard, parent: id, name: child, kind: 'system', rank: null,
+          details: { resource: resource === 'cpu' ? 'cpu:7' : 'node:1' } });
+        for (const time of [1, 2]) for (const track of [id, child]) report.counters.push({ track,
+          name: resource === 'cpu' ? 'system.cpu.utilization' : 'system.memory.used', timestamp_ns: `${time}000000000`,
+          value: resource === 'cpu' ? index ? '80' : '20' : `${(index + 1) * 1073741824}`, value_type: resource === 'cpu' ? 'float' : 'integer',
+          unit: resource === 'cpu' ? '%' : 'bytes', attributes: { 'system.interval_ns': '1000000000', 'system.sample_index': String(time),
+            'system.memory.total_bytes': `${(index + 1) * 2147483648}` } });
+      }
+    }
+  });
+  await loaded(page, url);
+  const report: Report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!));
+  const domain = report.shards[0]!.domain;
+  const collapsed = defaultTimelineCollapsed(report);
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.locator('#theme-toggle').click();
+    await page.locator('#filter-input').fill('cpu:7');
+    expect(timelineRows(report, indexReport(report), domain, 'cpu:7', collapsed).some(row => row.key.endsWith('cpu:7'))).toBeTruthy();
+    await expect(page.locator('#timeline-canvas')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Collapse cpu system graphs' })).toHaveAttribute('aria-expanded', 'true');
+    await page.getByRole('button', { name: 'Collapse cpu system graphs' }).click();
+    await expect(page.locator('#filter-input')).toHaveValue('');
+    await expect(page.getByRole('button', { name: 'Expand cpu system graphs' })).toHaveAttribute('aria-expanded', 'false');
+    await page.locator('#filter-input').fill('node:1');
+    expect(timelineRows(report, indexReport(report), domain, 'node:1', collapsed).some(row => row.key.endsWith('node:1'))).toBeTruthy();
+    await expect(page.getByRole('button', { name: 'Collapse memory system graphs' })).toHaveAttribute('aria-expanded', 'true');
+    await page.locator('#filter-input').fill('');
+    expect(timelineRows(report, indexReport(report), domain, '', collapsed)[0]?.key).toBe(`system:${domain}:cpu`);
+    const cpu = page.getByRole('button', { name: 'Expand cpu system graphs' });
+    await expect(cpu).toHaveAttribute('aria-expanded', 'false');
+    await cpu.click();
+    await expect(page.getByRole('button', { name: 'Collapse cpu system graphs' })).toHaveAttribute('aria-expanded', 'true');
+    await page.getByRole('button', { name: 'Collapse cpu system graphs' }).click();
+    await expect(page.getByRole('button', { name: 'Expand memory system graphs' })).toBeVisible();
+  }
+  await page.locator('#filter-input').fill('node:1');
+  await expect(page.locator('#timeline-canvas')).toBeVisible();
+  expect(timelineRows(report, indexReport(report), domain, 'node:1', collapsed).some(row => row.key.endsWith('node:1'))).toBeTruthy();
 });
 
 test('Python and PyTorch panels filter by domain, page exact string counts, preserve null self and hostile metadata in both themes', async ({ page }) => {
@@ -425,6 +477,72 @@ test('older reports without an io field show an empty I/O panel', async ({ page 
   await expect(page.locator('#openmp-panel')).toHaveCount(0);
   await expect(page.locator('#cuda-panel')).toHaveCount(0);
   await expect(page.locator('#pmu-panel')).toHaveCount(0);
+});
+
+test('filesystem I/O graphs lead new reports, inspect exact bins, select host/mount and isolate domains in both themes', async ({ page }) => {
+  const hostile = '<img src=x onerror="globalThis.rprofInjected=true">';
+  const url = injected('io-timeline', report => {
+    for (const domain of report.domains) domain.end_ns = '2000000000';
+    const bin = (start: string, duration: string, bytes: string) => ({ start_ns: start, duration_ns: duration,
+      read_bytes: bytes, write_bytes: '0', read_ops: '1', write_ops: '3', other_ops: '2', errors: '1',
+      read_latency_ns: '4000000', write_latency_ns: '6000000', other_latency_ns: '9999999', max_latency_ns: '9999999' });
+    const bins = [bin('0', '1000000000', '1048576'), bin('1000000000', '1000000000', '0')];
+    const fs = (id: string, domain: string, kind: string, mount: string, data = bins) => ({ id, domain,
+      host: hostile, filesystem_type: 'ext4', mount_point: mount, device: '/dev/test', kind,
+      bin_width_ns: '1000000000', bins: data });
+    report.io_timeline = { filesystems: [fs('one', '0', 'filesystem', '/data'), fs('two', '0', 'filesystem', '/scratch'),
+      fs('pipe', '0', 'non_filesystem', 'pipe', [bin('0', '1000000000', '999999'), bin('1000000000', '1000000000', '0')]),
+      fs('foreign', '1', 'filesystem', '/foreign', [bin('0', '1000000000', '9'), bin('1000000000', '1000000000', '0')])], omitted_events: '7' };
+    report.io = [{ domain: '0', host: 'host', file: '/data/a', operations: '1', errors: '0', read_bytes: '1', write_bytes: '0',
+      requested_read_bytes: '1', requested_write_bytes: '0', total_ns: '1', window_ns: '1000000000', by_operation: [] }];
+  });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loaded(page, url);
+  await expect(page.locator('#io-profile')).toBeVisible();
+  await expect(page.locator('#io-per-file')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#io-fs-select option')).toHaveCount(4);
+  await expect(page.locator('#io-fs-coverage')).toContainText('7 I/O timeline events omitted');
+  await expect(page.locator('#io-fs-coverage')).toContainText('Other operations');
+  await expect(page.locator('#io-chart-throughput')).toBeVisible();
+  // Latency values include formatted "ns" in the inspector; verify the graph
+  // actually contains colored measurements, not merely axes/NaN coordinates.
+  await expect.poll(() => page.locator('#io-chart-latency').evaluate(element => {
+    const canvas = element as HTMLCanvasElement;
+    const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+    let colored = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] === 107 && pixels[i + 1] === 205 && pixels[i + 2] === 176 && pixels[i + 3]! > 0) colored++;
+    return colored;
+  })).toBeGreaterThan(5);
+  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
+  await expect(page.locator('#io-bin-detail')).toContainText('2097152 completed B');
+  await expect(page.locator('#io-bin-detail')).toContainText('Other ops 4');
+  await expect(page.locator('#io-bin-detail')).toContainText('Combined read/write avg 2500000.000 ns');
+  await page.locator('#io-fs-select').selectOption('0');
+  await page.locator('#io-chart-iops').click({ position: { x: 90, y: 80 } });
+  await expect(page.locator('#io-bin-detail')).toContainText('1048576 completed B');
+  await page.locator('#io-fs-select').selectOption('2');
+  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
+  await expect(page.locator('#io-bin-detail')).toContainText('999999 completed B');
+  await page.locator('#io-per-file summary').click();
+  await expect(page.locator('#io-table')).toContainText('/data/a');
+  await page.locator('#domain-select').selectOption('1');
+  await expect(page.locator('#io-fs-select option')).toHaveCount(2);
+  await page.locator('#io-chart-throughput').click({ position: { x: 90, y: 80 } });
+  await expect(page.locator('#io-bin-detail')).toContainText('9 completed B');
+  await expect(page.locator('#io-fs-coverage')).not.toContainText('/data');
+  await page.getByRole('button', { name: 'Switch to light theme' }).click();
+  await expect(page.locator('#io-profile')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await expect(page.locator('#io-bin-detail')).toContainText('9 completed B');
+  await expect(page.locator('#io-profile img')).toHaveCount(0);
+  expect(await page.evaluate(() => (globalThis as any).rprofInjected)).toBeUndefined();
+});
+
+test('legacy I/O retains its visible per-file table and does not invent time series', async ({ page }) => {
+  await loaded(page, injected('io-legacy-message', report => { delete report.io_timeline; }));
+  await expect(page.locator('#io-profile')).toHaveCount(0);
+  await expect(page.locator('#io-panel')).toContainText('time series unavailable in this older report; regenerate');
+  await expect(page.locator('#io-per-file')).toHaveAttribute('open', '');
+  await expect(page.locator('#io-table')).toBeVisible();
 });
 
 test('PMU panel preserves exact counts, unavailable reads, final state and multiplex context in dark and light modes', async ({ page }) => {
@@ -852,6 +970,9 @@ test('native I/O collection produces inspectable calls and file totals in the br
   execFileSync(binary, ['record', '--collect', 'io', '-o', capture, '--', workload, 'basic', data]);
   await loaded(page, render(capture, 'native-io'));
   await expect(page.locator('#header-meta')).toContainText('MEASURED');
+  await expect(page.locator('#io-profile')).toBeVisible();
+  await expect(page.locator('#io-per-file')).not.toHaveAttribute('open', '');
+  await page.locator('#io-per-file summary').click();
   await expect(page.locator('#io-table')).toContainText('6 / 17 B');
   await expect(page.locator('#io-table')).toContainText('8 / 8 B');
   await page.locator('#io-table .io-file').first().click();

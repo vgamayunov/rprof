@@ -23,12 +23,19 @@ pub fn process_instance() -> u64 {
 }
 
 pub const MAGIC: u32 = 0x5250494f;
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const STATS_MAGIC: u64 = 0x5250524f46494f31;
 pub const PATH_CAPACITY: usize = 256;
 pub const PATH_TRUNCATED: u16 = 1;
 pub const PATH_UNAVAILABLE: u16 = 2;
 pub const PATH_ARGUMENT: u16 = 4;
+/// Zero values are not sentinels: only the corresponding validity bit makes a
+/// kernel-supplied value usable.
+pub const FS_MAGIC_VALID: u32 = 1;
+pub const FS_DEVICE_VALID: u32 = 2;
+pub const FS_MODE_VALID: u32 = 4;
+pub const FS_MOUNT_ID_VALID: u32 = 8;
+pub const FS_NAMESPACE_VALID: u32 = 16;
 
 pub mod op {
     pub const OPEN: u16 = 1;
@@ -90,9 +97,16 @@ pub struct IoEvent {
     pub path_len: u16,
     pub path_flags: u16,
     pub path: [u8; PATH_CAPACITY],
+    pub fs_magic: u64,
+    pub mount_namespace: u64,
+    pub dev_major: u32,
+    pub dev_minor: u32,
+    pub mount_id: u32,
+    pub file_mode: u32,
+    pub fs_valid: u32,
 }
 
-pub const EVENT_SIZE: usize = 352;
+pub const EVENT_SIZE: usize = 392;
 const _: () = assert!(std::mem::size_of::<IoEvent>() == EVENT_SIZE);
 
 /// Shared mmap counters survive fork/exec, _exit and fatal signals. The CLI owns

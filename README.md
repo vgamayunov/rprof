@@ -44,10 +44,12 @@ read-only feature.
 - Synthetic multitrack fixtures, browser tests, and source/bundle consistency checks.
 - Optional C/Rust POSIX I/O preload collector with process/thread/file attribution.
 - Per-file byte counts, errors, latency summaries, and I/O call timeline spans.
+- Default filesystem I/O dashboard with throughput, IOPS and latency graphs over time.
 - Target-built PMPI adapter with named calls, request lifetimes, and rank/thread identity.
 - Optional MPI clock calibration with explicit uncertainty and drift reporting.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
 - Target-built GCC 13/libgomp collection, with selectable region/body/API detail and explicit coverage gaps.
+- Sampled host CPU/memory timelines, expandable from overview to hosts, logical CPUs and NUMA nodes.
 - Optional CUDA 13 CUPTI injection adapter with GPU kernels/copies/memsets, CPU API calls,
   stream tracks, launch correlations, device metadata, and source-health reporting.
 - Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
@@ -186,6 +188,10 @@ and CPU–GPU correlations are preserved. See [CUDA profiling](docs/cuda-profili
 for SDK compatibility, clock normalization, buffer losses, and validation.
 
 ### Collect Linux perf counters
+
+For host CPU utilization and memory graphs, use `--collect system` (optionally
+`--system-interval-ms 1000`). The timeline expands overview → host → logical CPU/NUMA
+node. See [system profiling](docs/system-profiling.md) for definitions and multi-host collection.
 
 ```sh
 target/release/rprof record --collect pmu -o counters.rprof.jsonl -- ./application

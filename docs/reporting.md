@@ -48,8 +48,10 @@ the model. The current process collector supplies the real command lifetime;
 `fixtures/multitrack.jsonl` demonstrates the richer track types synthetically.
 
 With `--collect io`, real POSIX operations appear on thread/file lanes. The I/O
-panel shows per-file completed/requested bytes, errors, observed-window bandwidth,
-and per-operation average/max latency, with pagination and clock-domain selection.
+dashboard defaults to filesystem throughput, IOPS and latency graphs over time,
+with host/mount/type/device selection. Full-capture rate bins remain available beyond
+raw timeline retention. Per-file completed/requested bytes, errors, observed-window
+bandwidth and operation latency remain in a collapsed, paginated detail section.
 Counts reflect captured events; see [I/O profiling](io-profiling.md) for loss and
 coverage semantics. MPI calls use a distinct color and full-name hover/inspection;
 actual MPI events are supplied by `--collect mpi`; see [MPI profiling](mpi-profiling.md).

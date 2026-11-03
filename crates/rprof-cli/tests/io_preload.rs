@@ -181,6 +181,15 @@ fn real_calls_preserve_data_errno_modes_and_report_exact_bytes() {
     assert_eq!(attempted, 9);
     assert_eq!(received, 9);
     assert_eq!(calls.len(), 9);
+    let filesystem = text(&calls[0], "io.filesystem.id");
+    assert!(filesystem.contains(":dev:") && filesystem.contains(":magic:"));
+    assert!(
+        calls
+            .iter()
+            .all(|c| text(c, "io.filesystem.kind") == "filesystem"
+                && text(c, "io.filesystem.id") == filesystem
+                && text(c, "io.filesystem.device") != "unknown")
+    );
     assert_eq!(summary.shards.values().next().unwrap().loss.total(), 0);
     assert!(
         calls
@@ -215,6 +224,20 @@ fn real_calls_preserve_data_errno_modes_and_report_exact_bytes() {
 fn invalid_pointers_and_failed_calls_do_not_crash_or_change_errno() {
     let run = run("errors");
     let (calls, _, _, _) = read(&run.capture);
+    assert!(
+        calls
+            .iter()
+            .filter(|c| c.span.name == "open" && int(c, "io.result") < 0)
+            .all(|c| text(c, "io.filesystem.kind") == "unknown"
+                && text(c, "io.filesystem.id") == "unknown"
+                && text(c, "io.filesystem.mount_point") == "unknown")
+    );
+    assert!(
+        calls
+            .iter()
+            .filter(|c| text(c, "io.file") == "/dev/zero")
+            .all(|c| text(c, "io.filesystem.kind") == "non_filesystem")
+    );
     assert!(
         calls
             .iter()
@@ -262,6 +285,11 @@ fn descriptor_reuse_and_duplication_keep_resource_identity() {
     for name in ["dup", "dup2", "dup3"] {
         assert!(calls.iter().any(|c| c.span.name == name));
     }
+    assert!(
+        writes
+            .iter()
+            .all(|c| text(c, "io.filesystem.id") == text(writes[0], "io.filesystem.id"))
+    );
 }
 
 #[test]
@@ -281,9 +309,76 @@ fn large_file_aliases_and_fortified_calls_are_interposed() {
 fn short_io_reports_actual_not_requested_byte_counts() {
     let run = run("partial");
     let (calls, _, _, _) = read(&run.capture);
+    assert!(
+        calls
+            .iter()
+            .all(|c| text(c, "io.filesystem.kind") == "non_filesystem"
+                && text(c, "io.filesystem.id") == "unknown")
+    );
     assert!(calls.iter().any(|c| c.span.name == "write"
         && uint(c, "io.requested_bytes") == 8192
         && uint(c, "io.completed_bytes") == 4096));
+}
+
+#[test]
+fn uncached_descriptor_first_use_queries_kernel_identity() {
+    let run = run("untracked");
+    let (calls, _, _, _) = read(&run.capture);
+    assert!(
+        calls
+            .iter()
+            .filter(|c| c.span.name == "write" || c.span.name == "close")
+            .all(|c| text(c, "io.filesystem.kind") == "filesystem"
+                && text(c, "io.filesystem.device") != "unknown")
+    );
+}
+
+#[test]
+fn tmpfs_identity_is_distinct_from_regular_file_mount_when_available() {
+    let Ok(shm) = tempfile::Builder::new()
+        .prefix("rprof-fs-")
+        .tempdir_in("/dev/shm")
+    else {
+        return;
+    };
+    let regular = run("basic");
+    let (regular_calls, _, _, _) = read(&regular.capture);
+    // /dev/shm is commonly noexec; only the data and capture need to be on tmpfs.
+    let binary = regular._directory.path().join("io-workload");
+    let path = shm.path().join("data");
+    let capture = shm.path().join("capture");
+    let result = command(&capture)
+        .arg("--")
+        .arg(binary)
+        .arg("basic")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (calls, _, _, _) = read(&capture);
+    assert!(
+        calls
+            .iter()
+            .all(|c| text(c, "io.filesystem.kind") == "filesystem"
+                && text(c, "io.filesystem.type") == "tmpfs")
+    );
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let mut fs_info: libc::statfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::statfs(c_path.as_ptr(), &mut fs_info) }, 0);
+    assert!(
+        text(&calls[0], "io.filesystem.id")
+            .ends_with(&format!(":magic:{:016x}", fs_info.f_type as u64))
+    );
+    if text(&regular_calls[0], "io.filesystem.type") != "tmpfs" {
+        assert_ne!(
+            text(&calls[0], "io.filesystem.id"),
+            text(&regular_calls[0], "io.filesystem.id")
+        );
+    }
 }
 
 #[test]
@@ -315,6 +410,16 @@ fn fork_and_exec_use_distinct_process_image_namespaces() {
         let pids: HashSet<_> = calls.iter().map(|c| uint(c, "pid")).collect();
         assert_eq!(images.len(), 2, "{mode}");
         assert_eq!(pids.len(), if same_pid { 1 } else { 2 });
+        let identities: HashSet<_> = calls
+            .iter()
+            .filter(|c| text(c, "io.filesystem.kind") == "filesystem")
+            .map(|c| text(c, "io.filesystem.id"))
+            .collect();
+        assert_eq!(
+            identities.len(),
+            1,
+            "{mode}: filesystem identity must survive fork/exec"
+        );
         assert!(summary.is_complete());
     }
 }

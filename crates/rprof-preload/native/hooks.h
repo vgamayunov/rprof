@@ -19,8 +19,10 @@ struct rprof_io_event {
     int32_t fd, other_fd, error;
     uint16_t path_len, path_flags;
     uint8_t path[256];
+    uint64_t fs_magic, mount_namespace;
+    uint32_t dev_major, dev_minor, mount_id, file_mode, fs_valid;
 };
-_Static_assert(sizeof(struct rprof_io_event) == 352, "Rust/C event ABI mismatch");
+_Static_assert(sizeof(struct rprof_io_event) == 392, "Rust/C event ABI mismatch");
 
 void rprof_io_init(void);
 void rprof_io_after_fork(void);

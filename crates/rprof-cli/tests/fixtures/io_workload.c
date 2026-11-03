@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -99,6 +100,10 @@ int main(int argc, char **argv) {
         ssize_t count = write(pipes[1], buffer, 8192);
         assert(count > 0 && count < 8192);
         assert(close(pipes[0]) == 0 && close(pipes[1]) == 0);
+    } else if (!strcmp(mode, "untracked")) {
+        /* Simulates an inherited descriptor: no interposed open established a cache. */
+        int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        assert(fd >= 0 && write(fd, "x", 1) == 1 && close(fd) == 0);
     } else if (!strcmp(mode, "threads")) {
         pthread_t threads[4]; struct thread_args args[4];
         for (unsigned i = 0; i < 4; i++) { args[i] = (struct thread_args){path, i}; assert(pthread_create(&threads[i], NULL, thread_run, &args[i]) == 0); }

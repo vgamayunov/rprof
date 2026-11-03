@@ -29,7 +29,7 @@ Report {
   }],
   tracks: [{
     id: string, shard: string, parent: string|null, name: string,
-    kind: "process"|"thread"|"gpu_device"|"gpu_stream"|"io",
+    kind: "process"|"thread"|"gpu_device"|"gpu_stream"|"io"|"system",
     rank: number|null, details: { [key: string]: string }
   }],
   spans: [{
@@ -50,7 +50,17 @@ Report {
     read_bytes: string, write_bytes: string, requested_read_bytes: string,
     requested_write_bytes: string, total_ns: string, window_ns: string,
     by_operation: [{ name: string, count: string, errors: string, total_ns: string, max_ns: string }]
-  }]
+  }],
+  io_timeline?: { omitted_events: string, filesystems: [{
+    id: string, domain: string, host: string, filesystem_type: string,
+    mount_point: string, device: string, kind: "filesystem"|"non_filesystem"|"unknown",
+    bin_width_ns: string, bins: [{
+      start_ns: string, duration_ns: string, read_bytes: string, write_bytes: string,
+      read_ops: string, write_ops: string, other_ops: string, errors: string,
+      read_latency_ns: string, write_latency_ns: string, other_latency_ns: string,
+      max_latency_ns: string
+    }]
+  }] }
 }
 ```
 

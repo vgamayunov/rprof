@@ -5,6 +5,7 @@ mod clock;
 mod cuda_summary;
 mod html;
 mod io_summary;
+mod io_timeline;
 mod model;
 mod mpi_summary;
 mod openmp_summary;

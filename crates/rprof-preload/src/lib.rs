@@ -9,8 +9,9 @@ compile_error!("the initial I/O preload collector requires 64-bit Linux");
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use rprof_io_protocol::{
-    EVENT_SIZE, IoEvent, MAGIC, PATH_ARGUMENT, PATH_CAPACITY, PATH_TRUNCATED, PATH_UNAVAILABLE,
-    STATS_MAGIC, Stats, VERSION, op,
+    EVENT_SIZE, FS_DEVICE_VALID, FS_MAGIC_VALID, FS_MODE_VALID, FS_MOUNT_ID_VALID,
+    FS_NAMESPACE_VALID, IoEvent, MAGIC, PATH_ARGUMENT, PATH_CAPACITY, PATH_TRUNCATED,
+    PATH_UNAVAILABLE, STATS_MAGIC, Stats, VERSION, op,
 };
 
 const FD_SLOTS: usize = 65_536;
@@ -25,12 +26,22 @@ struct CachedPath {
     generation: AtomicU64,
     metadata: AtomicU64,
     words: [AtomicU64; PATH_CAPACITY / 8],
+    fs_magic: AtomicU64,
+    mount_namespace: AtomicU64,
+    device: AtomicU64,
+    mount_mode: AtomicU64,
+    fs_valid: AtomicU32,
 }
 static PATHS: [CachedPath; FD_SLOTS] = [const {
     CachedPath {
         generation: AtomicU64::new(0),
         metadata: AtomicU64::new(0),
         words: [const { AtomicU64::new(0) }; PATH_CAPACITY / 8],
+        fs_magic: AtomicU64::new(0),
+        mount_namespace: AtomicU64::new(0),
+        device: AtomicU64::new(0),
+        mount_mode: AtomicU64::new(0),
+        fs_valid: AtomicU32::new(0),
     }
 }; FD_SLOTS];
 const CACHE_BUSY: u64 = u64::MAX;
@@ -183,6 +194,73 @@ fn new_resource(fd: i32) -> u64 {
     value
 }
 
+fn fd_filesystem(event: &mut IoEvent, fd: i32) {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::syscall(libc::SYS_fstat, fd, &mut stat) } == 0 {
+        event.file_mode = stat.st_mode;
+        event.fs_valid |= FS_MODE_VALID;
+        let device = stat.st_dev as u64;
+        event.dev_major = libc::major(device) as u32;
+        event.dev_minor = libc::minor(device) as u32;
+        event.fs_valid |= FS_DEVICE_VALID;
+    }
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::syscall(libc::SYS_fstatfs, fd, &mut fs) } == 0 {
+        event.fs_magic = fs.f_type as u64;
+        event.fs_valid |= FS_MAGIC_VALID;
+    }
+    let mut statx: libc::statx = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            fd,
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_MNT_ID,
+            &mut statx,
+        )
+    } == 0
+        && statx.stx_mask & libc::STATX_MNT_ID != 0
+        && statx.stx_mnt_id <= u32::MAX as u64
+    {
+        event.mount_id = statx.stx_mnt_id as u32;
+        event.fs_valid |= FS_MOUNT_ID_VALID;
+    }
+    let mut namespace: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(c"/proc/self/ns/mnt".as_ptr(), &mut namespace) } == 0 {
+        event.mount_namespace = namespace.st_ino;
+        event.fs_valid |= FS_NAMESPACE_VALID;
+    }
+}
+
+fn cached_filesystem(event: &mut IoEvent, cache: &CachedPath) {
+    event.fs_magic = cache.fs_magic.load(Ordering::Relaxed);
+    event.mount_namespace = cache.mount_namespace.load(Ordering::Relaxed);
+    let device = cache.device.load(Ordering::Relaxed);
+    event.dev_major = device as u32;
+    event.dev_minor = (device >> 32) as u32;
+    let mount_mode = cache.mount_mode.load(Ordering::Relaxed);
+    event.mount_id = mount_mode as u32;
+    event.file_mode = (mount_mode >> 32) as u32;
+    event.fs_valid = cache.fs_valid.load(Ordering::Relaxed);
+}
+
+fn store_filesystem(event: &IoEvent, cache: &CachedPath) {
+    cache.fs_magic.store(event.fs_magic, Ordering::Relaxed);
+    cache
+        .mount_namespace
+        .store(event.mount_namespace, Ordering::Relaxed);
+    cache.device.store(
+        event.dev_major as u64 | (event.dev_minor as u64) << 32,
+        Ordering::Relaxed,
+    );
+    cache.mount_mode.store(
+        event.mount_id as u64 | (event.file_mode as u64) << 32,
+        Ordering::Relaxed,
+    );
+    cache.fs_valid.store(event.fs_valid, Ordering::Relaxed);
+}
+
 fn fd_path(event: &mut IoEvent, fd: i32) {
     event.path_len = 0;
     event.path.fill(0);
@@ -195,6 +273,7 @@ fn fd_path(event: &mut IoEvent, fd: i32) {
         let generation = cache.generation.load(Ordering::Acquire);
         if generation == event.resource && generation != CACHE_BUSY {
             let metadata = cache.metadata.load(Ordering::Relaxed);
+            cached_filesystem(event, cache);
             for (word, bytes) in cache.words.iter().zip(event.path.chunks_exact_mut(8)) {
                 bytes.copy_from_slice(&word.load(Ordering::Relaxed).to_ne_bytes());
             }
@@ -205,8 +284,10 @@ fn fd_path(event: &mut IoEvent, fd: i32) {
                 return;
             }
             event.path.fill(0);
+            event.fs_valid = 0;
         }
     }
+    fd_filesystem(event, fd);
     let mut proc = [0u8; 40];
     let prefix = b"/proc/self/fd/";
     proc[..prefix.len()].copy_from_slice(prefix);
@@ -240,29 +321,30 @@ fn fd_path(event: &mut IoEvent, fd: i32) {
         } else {
             0
         };
-        if (fd as usize) < FD_SLOTS && event.resource != 0 {
-            let cache = &PATHS[fd as usize];
-            let previous = cache.generation.load(Ordering::Acquire);
-            if previous < event.resource
-                && RESOURCES[fd as usize].load(Ordering::Acquire) == event.resource
-                && cache
-                    .generation
-                    .compare_exchange(previous, CACHE_BUSY, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                // Atomic words make concurrent cache snapshots data-race-free,
-                // even when a descriptor is being closed/reused by another thread.
-                for (word, bytes) in cache.words.iter().zip(event.path.chunks_exact(8)) {
-                    let mut value = [0u8; 8];
-                    value.copy_from_slice(bytes);
-                    word.store(u64::from_ne_bytes(value), Ordering::Relaxed);
-                }
-                cache.metadata.store(
-                    event.path_len as u64 | ((event.path_flags as u64) << 16),
-                    Ordering::Relaxed,
-                );
-                cache.generation.store(event.resource, Ordering::Release);
+    }
+    if (fd as usize) < FD_SLOTS && event.resource != 0 {
+        let cache = &PATHS[fd as usize];
+        let previous = cache.generation.load(Ordering::Acquire);
+        if previous < event.resource
+            && RESOURCES[fd as usize].load(Ordering::Acquire) == event.resource
+            && cache
+                .generation
+                .compare_exchange(previous, CACHE_BUSY, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            // Atomic words make concurrent cache snapshots data-race-free,
+            // even when a descriptor is being closed/reused by another thread.
+            for (word, bytes) in cache.words.iter().zip(event.path.chunks_exact(8)) {
+                let mut value = [0u8; 8];
+                value.copy_from_slice(bytes);
+                word.store(u64::from_ne_bytes(value), Ordering::Relaxed);
             }
+            cache.metadata.store(
+                event.path_len as u64 | ((event.path_flags as u64) << 16),
+                Ordering::Relaxed,
+            );
+            store_filesystem(event, cache);
+            cache.generation.store(event.resource, Ordering::Release);
         }
     }
 }

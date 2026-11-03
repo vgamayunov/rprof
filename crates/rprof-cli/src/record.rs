@@ -58,6 +58,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
     let python_enabled = args.collectors.contains(&CollectorKind::Python);
+    let system_enabled = args.collectors.contains(&CollectorKind::System);
+    ensure!(
+        system_enabled || args.system_interval_ms == 1000,
+        "--system-interval-ms requires --collect system"
+    );
     ensure!(
         python_enabled
             || (args.python_include.is_empty()
@@ -211,6 +216,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             cuda_enabled.then_some("cuda"),
             pmu_enabled.then_some("pmu"),
             python_enabled.then_some("python"),
+            system_enabled.then_some("system"),
         ]
         .into_iter()
         .flatten()
@@ -234,6 +240,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut cuda_running = None;
     let mut pmu_running = None;
     let mut python_running = None;
+    let mut system_running = None;
     let mut environment = vec![
         (
             OsString::from("RPROF_SESSION_ID"),
@@ -306,11 +313,19 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         &args.command,
         supervisor::Config {
             grace: Duration::from_millis(args.grace_ms),
-            heartbeat_interval: Duration::from_millis(if pmu_enabled {
-                args.flush_interval_ms.min(args.pmu_interval_ms)
-            } else {
+            heartbeat_interval: Duration::from_millis(
                 args.flush_interval_ms
-            }),
+                    .min(if pmu_enabled {
+                        args.pmu_interval_ms
+                    } else {
+                        u64::MAX
+                    })
+                    .min(if system_enabled {
+                        args.system_interval_ms
+                    } else {
+                        u64::MAX
+                    }),
+            ),
             perf: pmu_prepared.as_ref().map(|p| p.child.clone()),
             environment,
             ..Default::default()
@@ -352,6 +367,14 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                             now,
                         )?);
                     }
+                    if system_enabled {
+                        system_running = crate::system_collector::Running::start(
+                            &mut out,
+                            now,
+                            args.system_interval_ms,
+                            session_id,
+                        )?;
+                    }
                     drop(out);
                     if let Some(prepared) = io_prepared.take() {
                         io_running = Some(prepared.start(Arc::clone(&sink), origin)?);
@@ -370,6 +393,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     }
                 }
                 supervisor::Event::Heartbeat { .. } => {
+                    if let Some(system) = &mut system_running {
+                        system.sample(&mut out, now, false)?;
+                    }
                     if let Some(pmu) = &mut pmu_running {
                         pmu.sample(&mut out, now, false)?;
                     }
@@ -397,6 +423,14 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     );
     let workload_end_ns = elapsed()?;
     let workload_status = result.as_ref().ok().copied();
+    let system_result = system_running
+        .map(|mut system| {
+            let mut out = sink
+                .lock()
+                .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+            system.sample(&mut out, elapsed()?, true)
+        })
+        .transpose();
     let io_result = io_running
         .map(native_collector::Running::finish)
         .transpose();
@@ -421,6 +455,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         .map(crate::python_collector::Running::finish)
         .transpose();
     let result = result.and_then(|outcome| {
+        system_result?;
         pmu_result?;
         if let Some(python)=python_result?{
             eprintln!("Python: {} packets received; {} observed drops/omitted callbacks; {} initialized interpreters",python.received,python.dropped,python.initialized);

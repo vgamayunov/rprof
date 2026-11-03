@@ -180,6 +180,7 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
                                 TrackKind::GpuDevice { .. } => "GPU",
                                 TrackKind::GpuStream { .. } => "GPU stream",
                                 TrackKind::Io { .. } => "I/O",
+                                TrackKind::System { .. } => "Host system metrics",
                             };
                             let name = format!(
                                 "{} [{}{}]",
