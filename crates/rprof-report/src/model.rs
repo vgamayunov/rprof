@@ -33,6 +33,15 @@ pub struct Report {
     pub python: Option<PythonSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pytorch: Option<PytorchSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<IndexedViewer>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedViewer {
+    pub endpoint: String,
+    pub files_endpoint: String,
+    pub snapshot: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +77,8 @@ pub struct IoFilesystem {
     pub kind: String,
     pub bin_width_ns: String,
     pub bins: Vec<IoTimeBin>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub capture_identity: String,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IoTimeBin {

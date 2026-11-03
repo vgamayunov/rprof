@@ -134,12 +134,27 @@ fn request(address: &str, method: &str, route: &str) -> String {
     response
 }
 
+fn post(address: &str, route: &str, body: &serde_json::Value) -> String {
+    let body = serde_json::to_string(body).unwrap();
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(stream, "POST {route} HTTP/1.0\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
 #[test]
-fn local_viewer_serves_same_artifact_and_exits_on_signal() {
+fn local_viewer_serves_indexed_metadata_and_window_queries_and_exits_on_signal() {
+    let cache = tempfile::tempdir().unwrap();
     let mut server = Server(
         cli()
             .arg("view")
             .arg(fixture())
+            .arg("--index-dir")
+            .arg(cache.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -168,9 +183,44 @@ fn local_viewer_serves_same_artifact_and_exits_on_signal() {
         .output()
         .unwrap();
     assert!(direct.status.success());
+    let embedded = body
+        .split("id=\"rprof-data\">")
+        .nth(1)
+        .unwrap()
+        .split("</script>")
+        .next()
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(embedded).unwrap();
+    assert!(metadata["spans"].as_array().unwrap().is_empty());
+    assert_eq!(metadata["viewer"]["endpoint"], "/api/window");
+    assert_eq!(metadata["summary"]["omitted_events"], "0");
+    assert!(!String::from_utf8_lossy(&direct.stdout).contains("\"endpoint\":\"/api/window\""));
+    let query = serde_json::json!({"snapshot": metadata["viewer"]["snapshot"], "domain": "0", "start_ns": "8000000", "end_ns": "12000000", "pixels": 800,
+        "tracks": [metadata["tracks"][0]["id"]], "systems": [], "io_scopes": [], "filesystem": "all"});
+    let response = post(address, "/api/window", &query);
+    assert_eq!(response.split_whitespace().nth(1), Some("200"));
+    let window: serde_json::Value =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert!(
-        body.as_bytes() == direct.stdout,
-        "served artifact differs from offline export"
+        window["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["name"] == "solver step")
+    );
+    assert_eq!(
+        request(address, "GET", "/api/window")
+            .split_whitespace()
+            .nth(1),
+        Some("405")
+    );
+    let mut invalid = query;
+    invalid["snapshot"] = "stale".into();
+    assert_eq!(
+        post(address, "/api/window", &invalid)
+            .split_whitespace()
+            .nth(1),
+        Some("400")
     );
     let head = request(address, "HEAD", "/");
     assert_eq!(head.split_whitespace().nth(1), Some("200"));

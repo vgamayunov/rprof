@@ -30,6 +30,7 @@ signal-hook = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 tiny_http = "0.12"
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 
 [profile.projection]
 inherits = "release"

@@ -69,6 +69,14 @@ fn identity(host: &Host, attrs: &BTreeMap<String, Attribute>) -> Key {
     )
 }
 
+pub(crate) fn capture_identity(
+    host: &str,
+    boot: &str,
+    attrs: &BTreeMap<String, Attribute>,
+) -> String {
+    serde_json::to_string(&identity(&(host.into(), boot.into()), attrs)).expect("string identity")
+}
+
 struct Metadata {
     filesystem_type: String,
     mount_point: String,
@@ -86,6 +94,54 @@ pub(crate) struct Discovery {
     scope_omitted: u64,
 }
 impl Discovery {
+    pub fn metadata(self, lookup: &HashMap<Host, usize>) -> Option<IoTimeline> {
+        if !self.seen {
+            return None;
+        }
+        let ids: BTreeMap<_, _> = self
+            .groups
+            .keys()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), format!("filesystem:{i}")))
+            .collect();
+        let threads = self
+            .thread_groups
+            .into_iter()
+            .map(|((shard, thread, key), metadata)| IoThreadSeries {
+                filesystem_id: ids[&key].clone(),
+                domain: lookup[&key.0].to_string(),
+                shard: shard.to_string(),
+                rank: metadata.rank,
+                process_instance: metadata.instance.to_string(),
+                pid: metadata.pid.to_string(),
+                tid: metadata.tid.to_string(),
+                thread_track: format!("{shard}:{thread}"),
+                bin_width_ns: "0".into(),
+                bins: vec![],
+            })
+            .collect();
+        Some(IoTimeline {
+            omitted_events: self.omitted.to_string(),
+            scope_omitted_events: self.scope_omitted.to_string(),
+            threads,
+            filesystems: self
+                .groups
+                .into_iter()
+                .map(|(key, metadata)| IoFilesystem {
+                    id: ids[&key].clone(),
+                    domain: lookup[&key.0].to_string(),
+                    capture_identity: serde_json::to_string(&key).expect("string identity"),
+                    host: key.0.0,
+                    kind: key.1,
+                    filesystem_type: metadata.filesystem_type,
+                    mount_point: metadata.mount_point,
+                    device: metadata.device,
+                    bin_width_ns: "0".into(),
+                    bins: vec![],
+                })
+                .collect(),
+        })
+    }
     fn discover_thread(
         &mut self,
         shard: Uuid,
@@ -439,6 +495,7 @@ impl Analysis {
                 .groups
                 .into_iter()
                 .map(|(key, group)| IoFilesystem {
+                    capture_identity: serde_json::to_string(&key).expect("string identity"),
                     id: group.id,
                     domain: group.domain.to_string(),
                     host: key.0.0,

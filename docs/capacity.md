@@ -10,7 +10,7 @@ storage bandwidth, profiler overhead and the part of the trace you need to view.
 | Hundreds of threads? | 128/rank passed with actual GCC/libgomp, including 2 ranks on 2 HBv4 nodes. Busy fine-grained workloads may overwhelm ingress; 256+ threads remain unvalidated. |
 | Thousands of ranks? | Rank-local collection avoids a central writer, but one merged capture is limited to 4,096 shards and **65,536 total tracks**. 1,000 ranks × 100 threads already exceeds the latter. No thousand-rank validation yet. |
 | One-hour runs? | No elapsed-time cap. A low-rate run is plausible; event volume, repeated regions, live tasks and tracks can become the limits. No one-hour validation yet. |
-| Browse an entire large run? | The viewer is a bounded snapshot of the first observations, not an indexed full-capture browser. Summaries scan the capture but have their own row limits. |
+| Browse an entire large run? | `rprof view` indexes the saved capture and loads visible windows with multi-resolution graphs. Standalone HTML retains a bounded snapshot. Summary/identity catalogs still have limits. |
 
 ## Storage estimate
 
@@ -89,10 +89,14 @@ native adapters/protocol crates.
 - System CPU/memory graphs: a separate 65,536-point full-run budget across up to
   16,384 series, prioritizing host overviews. First/last values and source gaps are
   preserved when downsampling. These points are additional to raw event retention.
-- HTML/`view` raw timeline: first **200,000 observations or 64 MiB** by default, configurable up
+- Standalone HTML raw timeline: first **200,000 observations or 64 MiB** by default, configurable up
   to 2 million/512 MiB. Track metadata has a separate 16 MiB bound. This is not a
   random sample and later phases may be absent from the timeline. Text summaries
   stream the capture; HTML summary computation also scans beyond timeline retention.
+- Indexed `view`: windowed raw queries (20,000 observations / 16 MiB reply maximum),
+  zoom-dependent metric levels, and 100-file pages. It replaces prefix retention
+  with bounded requests and a persistent sidecar; allow disk space and initial
+  construction time for the index. See [indexed viewing](indexed-viewer.md).
 - Trace export streams selected-domain spans independently of HTML retention;
   flow reconstruction and simultaneously open activities have 200,000-item bounds.
 
@@ -118,6 +122,7 @@ health and report retention. See `crates/rprof-report/src/` for the precise budg
    hour-long capture. The existing synthetic writer benchmark is not a native
    callback or distributed-filesystem capacity guarantee.
 
-Likely next scaling work is selectable capture windows/event filtering, indexed
-timeline access, and revised global track/summary cardinality limits. Simply raising
-queue sizes does not solve sustained overload or browser retention.
+Indexed timeline access is implemented. Further scaling work includes selectable
+collection windows/event filtering, compressed binary storage, disk-backed per-file
+aggregate tables, and revised global track/summary cardinality limits. Simply raising
+queue sizes does not solve sustained overload.

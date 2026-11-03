@@ -1,5 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,6 +53,157 @@ test.beforeAll(() => {
 });
 
 test.afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
+
+test('indexed local viewer requests late windows, ignores stale replies and pages files only after expansion', async ({ page }) => {
+  const url = injected('indexed-local', report => {
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', snapshot: 'snapshot-test' };
+    const domain = report.domains[0].id;
+    report.domains[0].end_ns = '4000000000';
+    report.spans = [];
+    report.counters = [];
+    report.dependencies = [];
+    const thread = report.tracks.find((track: any) => track.kind === 'thread');
+    if (!thread) throw new Error('Fixture needs a thread');
+    thread.details['viewer.file_count'] = '150';
+    thread.details['viewer.has_non_io'] = 'true';
+    report.io_timeline = { omitted_events: '0', filesystems: [{ id: 'fs', domain, host: 'host', filesystem_type: 'ext4',
+      mount_point: '/', device: 'disk', kind: 'filesystem', bin_width_ns: '1000000', bins: [] }],
+    threads: [{ filesystem_id: 'fs', domain, shard: thread.shard, rank: thread.rank, process_instance: 'instance',
+      pid: '42', tid: '7', thread_track: thread.id, bin_width_ns: '1000000', bins: [] }] };
+  });
+  const source = readFileSync(fileURLToPath(url), 'utf8');
+  const server = createServer((request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(source);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const report: Report = JSON.parse(source.match(/<script type="application\/json" id="rprof-data">([\s\S]*?)<\/script>/)![1]!);
+    const thread = report.tracks.find(track => track.kind === 'thread')!;
+    const late = { id: 987654, source_id: 'late-source', track: thread.id, name: 'late phase event', category: 'compute',
+      start_ns: '3100000000', duration_ns: '100000000', correlation: 'correlation-1', incomplete: false, attributes: { exact: 'yes' } };
+    const windows: any[] = [];
+    let delayed: (() => void) | undefined;
+    await page.route('**/api/window', async route => {
+      const request = route.request().postDataJSON(); windows.push(request);
+      if (windows.length === 2) await new Promise<void>(resolve => { delayed = resolve; });
+      await route.fulfill({ json: { snapshot: request.snapshot, domain: request.domain, start_ns: request.start_ns,
+        end_ns: request.end_ns, spans: BigInt(request.start_ns) > 0n && BigInt(request.end_ns) >= 3100000000n ? [late] : [], counters: [],
+        dependencies: BigInt(request.start_ns) > 0n && BigInt(request.end_ns) >= 3100000000n ?
+          [{ from: 'correlation-1', to: 'correlation-2', relation: 'launches' }] : [],
+        io: Object.fromEntries(request.io_scopes.map((key: string) => [key, []])), limited: false, warnings: [] } });
+    });
+    const fileRequests: any[] = [];
+    await page.route('**/api/files', async route => {
+      const request = route.request().postDataJSON(); fileRequests.push(request);
+      await route.fulfill({ json: { snapshot: request.snapshot, offset: request.offset, total: 150,
+        next_offset: request.offset + 100 < 150 ? request.offset + 100 : null,
+        tracks: Array.from({ length: Math.min(100, 150 - request.offset) }, (_, index) => ({
+          id: `file-${request.offset + index}`, shard: thread.shard, parent: thread.id, name: `File ${request.offset + index}`,
+          kind: 'io', rank: thread.rank, details: {} })) } });
+    });
+    await loaded(page, `http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    await expect.poll(() => windows.length).toBeGreaterThan(0);
+    expect(fileRequests).toHaveLength(0);
+    expect(windows[0].snapshot).toBe('snapshot-test');
+    expect(windows[0].tracks).not.toContain('file-0');
+    expect(windows[0].io_scopes).toContain(`io:${report.domains[0]!.id}`);
+    // A previous response held in flight must not replace the new viewport.
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await expect.poll(() => windows.length).toBeGreaterThanOrEqual(2);
+    await page.getByRole('button', { name: 'Reset zoom' }).click();
+    delayed?.();
+    await expect(page.locator('#window-status')).toContainText('Loaded');
+    await page.locator('#timeline-scroll').focus();
+    await page.keyboard.press('ArrowRight');
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await page.locator('#timeline-scroll').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(() => windows.some(request => BigInt(request.start_ns) > 0n && BigInt(request.end_ns) >= 3100000000n)).toBeTruthy();
+    await expect(page.locator('#window-status')).toContainText('Loaded');
+    const active = windows.findLast(request => BigInt(request.start_ns) > 0n && BigInt(request.end_ns) >= 3100000000n);
+    const row = timelineRows({ ...report, spans: [late] }, indexReport({ ...report, spans: [late] }),
+      report.domains[0]!.id, '', defaultTimelineCollapsed(report)).find(row => row.kind === 'track' && row.track?.id === thread.id)!;
+    const scrollTop = await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = top; return element.scrollTop; }, row.top);
+    const width = await page.locator('#timeline-canvas').evaluate(element => element.clientWidth);
+    const x = 260 + Number(3150000000n - BigInt(active.start_ns)) * (width - 260) / Number(BigInt(active.end_ns) - BigInt(active.start_ns));
+    await page.locator('#timeline-canvas').click({ position: { x, y: row.top - scrollTop + SPAN_TOP + 5 } });
+    await expect(page.locator('#detail-content')).toContainText('late phase event');
+    await expect(page.locator('#detail-content')).toContainText('late-source');
+    await expect(page.locator('#detail-content')).toContainText('correlation-1 → correlation-2');
+    await page.getByRole('button', { name: 'Reset zoom' }).click();
+    await expect(page.locator('#detail-content')).not.toContainText('correlation-1 → correlation-2');
+    const collapsed = defaultTimelineCollapsed(report);
+    const clickGroup = async (key: string) => {
+      const rows = timelineRows(report, indexReport(report), report.domains[0]!.id, '', collapsed);
+      const row = rows.find(candidate => candidate.key === key);
+      expect(row, key).toBeDefined();
+      const scrollTop = await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = top; return element.scrollTop; }, row!.top);
+      await page.locator('#timeline-canvas').click({ position: { x: 25, y: row!.top - scrollTop + row!.height / 2 } });
+      collapsed.delete(key);
+    };
+    const series = report.io_timeline!.threads![0]!;
+    await clickGroup(`io:${series.domain}`);
+    if (series.rank !== null) await clickGroup(`io:rank:${series.domain}:${JSON.stringify([series.shard, series.rank])}`);
+    await clickGroup(`io:process:${series.domain}:${JSON.stringify([series.shard, series.pid, series.process_instance])}`);
+    await clickGroup(`io:thread:${series.domain}:${series.thread_track}`);
+    expect(fileRequests).toHaveLength(0);
+    await clickGroup(`io:thread:${series.domain}:${series.thread_track}:files`);
+    await expect.poll(() => fileRequests.length).toBe(1);
+    await expect(page.locator('#file-controls')).toContainText('rows 1–100 of 150');
+    await page.getByRole('button', { name: 'Next files' }).click();
+    await expect(page.locator('#file-controls')).toContainText('rows 101–150 of 150');
+    expect(fileRequests.map(request => request.offset)).toEqual([0, 100]);
+    expect(fileRequests.every(request => request.limit === 100 && request.thread === thread.id)).toBeTruthy();
+    await page.unroute('**/api/window');
+    await page.route('**/api/window', route => route.fulfill({ status: 400, body: 'bad window' }));
+    await page.getByRole('button', { name: 'Zoom in' }).click();
+    await expect(page.locator('#window-status')).toContainText('Window failed (HTTP 400) · previous data may be stale');
+  } finally { server.close(); }
+});
+
+test('standalone HTML never requests indexed APIs', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/api/**', route => { requests++; return route.abort(); });
+  await loaded(page);
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await page.locator('#timeline-scroll').focus();
+  await page.keyboard.press('ArrowRight');
+  expect(requests).toBe(0);
+  await expect(page.locator('#window-status')).toHaveCount(0);
+});
+
+test('indexed legacy threads expose file counts before any file metadata is fetched', async ({ page }) => {
+  const url = injected('indexed-legacy-files', report => {
+    delete report.io_timeline;
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', snapshot: 'local-only' };
+    report.io = [];
+    report.spans = [];
+    report.counters = [];
+    const thread = report.tracks.find((track: any) => track.kind === 'thread');
+    thread.details['viewer.file_count'] = '125';
+    thread.details['viewer.has_non_io'] = 'true';
+  });
+  await loaded(page, url);
+  const report: Report = await page.locator('#rprof-data').evaluate(element => JSON.parse(element.textContent!));
+  const thread = report.tracks.find(track => track.kind === 'thread')!;
+  const collapsed = defaultTimelineCollapsed(report);
+  expect(collapsed.has(`files:${thread.id}`)).toBeTruthy();
+  const row = timelineRows(report, indexReport(report), report.domains[0]!.id, '', collapsed)
+    .find(row => row.key === `files:${thread.id}`)!;
+  expect(row.label).toContain('Files (125)');
+  const capped: Report = { ...report, tracks: report.tracks.map(track => track.id === thread.id ?
+    { ...track, details: { 'viewer.file_count': '125' } } : track), io_timeline: {
+    omitted_events: '0', filesystems: [{ id: 'fs', domain: report.domains[0]!.id, host: '', filesystem_type: '',
+      mount_point: '', device: '', kind: 'filesystem', bin_width_ns: '1000000', bins: [] }],
+    threads: [{ filesystem_id: 'fs', domain: report.domains[0]!.id, shard: thread.shard, rank: thread.rank,
+      process_instance: '', pid: '999', tid: '999', thread_track: 'another-thread', bin_width_ns: '1000000', bins: [] }],
+  } };
+  expect(timelineRows(capped, indexReport(capped), capped.domains[0]!.id, '', defaultTimelineCollapsed(capped))
+    .some(row => row.key === `files:${thread.id}`)).toBeTruthy();
+  const scrollTop = await page.locator('#timeline-scroll').evaluate((element, top) => { element.scrollTop = top; return element.scrollTop; }, row.top);
+  await page.locator('#timeline-canvas').click({ position: { x: 25, y: row.top - scrollTop + row.height / 2 } });
+  await expect(page.locator('#file-controls')).toContainText('invalid local endpoint');
+});
 
 async function loaded(page: Page, url = html): Promise<void> {
   await page.goto(url);

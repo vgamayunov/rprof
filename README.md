@@ -72,7 +72,8 @@ the launcher; use the per-rank launch pattern below for MPI call collection.
 See the [brief profiling quick start](docs/quickstart.md) for collection commands
 covering I/O, MPI, OpenMP, CUDA, counters, Python and PyTorch.
 
-Install a current stable Rust toolchain (edition 2024; minimum declared Rust 1.85).
+Install a current stable Rust toolchain (edition 2024; minimum declared Rust 1.85)
+and a C compiler for the bundled SQLite viewer index.
 
 ```sh
 cargo build --workspace
@@ -98,7 +99,9 @@ child; non-UTF-8 bytes in the JSON command description are replaced for display.
 
 Open an exported HTML file directly in a modern browser; it works offline. The
 same UI is served by `rprof view`, which prints a `127.0.0.1` URL and accepts a
-fixed `--port` when desired. It serves a snapshot, not live capture updates.
+fixed `--port` when desired. It builds/reuses a persistent index and loads the visible
+time window and expanded file pages on demand. See [indexed viewing](docs/indexed-viewer.md).
+It serves a fixed capture snapshot, not live capture updates.
 
 ```sh
 target/debug/rprof report fixtures/multitrack.jsonl --format html -o multitrack.html
@@ -107,7 +110,8 @@ target/debug/rprof report fixtures/multitrack.jsonl --format trace --domain 0 -o
 
 The checked-in fixture demonstrates ranks, OpenMP threads, GPUs, I/O, counters, and
 dependencies without requiring those collectors or hardware. Use the domain
-selector, name/category/rank filter, wheel zoom, drag pan, and clickable bars/points.
+selector, name/category/rank filter, vertical wheel scrolling, zoom/reset buttons,
+drag pan, and clickable bars/points.
 See [reporting](docs/reporting.md) for controls, retention limits, clock handling,
 and reference-viewer compatibility.
 

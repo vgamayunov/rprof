@@ -1,4 +1,9 @@
-# Offline timeline viewer
+# Timeline viewer
+
+Standalone HTML remains offline. In `rprof view`, a `viewer` descriptor enables
+same-origin window and file-page queries. Loading is debounced, stale responses are
+discarded, and only two window responses/eight file pages are cached. See
+[indexed viewing](../docs/indexed-viewer.md) for the backend and query budgets.
 
 The shared viewer supports dark/light themes, including Canvas colors. The toggle
 uses the system preference initially and remembers explicit choices when browser

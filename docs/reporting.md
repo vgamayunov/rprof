@@ -20,6 +20,10 @@ Version-1 bootstrap JSON is supported up to 16 MiB, using an explicitly unknown
 legacy host/session identity. Saved partial v2 captures preserve missing-footer,
 truncation, and checkpointed loss status in reports.
 
+`rprof view` uses an [indexed, windowed server](indexed-viewer.md): the first launch
+builds a reusable sidecar, and zoom/pan/expansion load detail on demand. Standalone
+`report --format html` retains the offline snapshot behavior described below.
+
 ## Offline timeline
 
 `timeline.html` embeds its CSS, JavaScript, and safely escaped JSON. Open it directly
@@ -76,7 +80,9 @@ collector loss, omitted report events, and unresolved dependency endpoints.
 Full-capture text summaries stream without retaining event history. HTML keeps the
 first observations fitting both **200,000 events** and a **64 MiB encoded-event
 budget** by default. Change these with `--max-events` and `--max-report-mib` on
-`report` or `view` (maximum 2 million events / 512 MiB). Starts count as observations;
+`report` (maximum 2 million events / 512 MiB). In indexed `view`, these settings
+instead limit each raw window response, subject to a 20,000-observation / 16 MiB
+server cap. Starts count as observations in standalone exports;
 a completed span can close a retained start even if that completion is omitted.
 Track declarations are retained separately, subject to a 16 MiB encoded metadata
 limit. The underlying reader's shard/track/frame limits still apply.
@@ -85,8 +91,8 @@ Summary counts and category totals include all validated events in the snapshot.
 Timeline omissions are distinct from collector loss and explicitly displayed.
 These budgets are encoded-size limits, not a promise of identical RSS: Rust objects,
 JSON escaping, and browser indices add memory overhead. Very large standalone HTML
-artifacts should use conservative limits; indexed server-side queries are a future
-extension.
+artifacts should use conservative limits. Indexed viewing fetches visible windows
+and metric resolutions instead of retaining the initial event prefix.
 
 The Canvas renderer culls by visible rows and time and samples extremely dense rows
 at up to 5,000 span candidates or 3,000 counter samples per draw. Up to four overlap

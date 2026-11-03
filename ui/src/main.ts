@@ -1,4 +1,4 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
 import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
@@ -15,6 +15,15 @@ type Hit = { x: number; y: number; width: number; height: number; selection: Sel
 const LABEL_WIDTH = 260;
 const MAX_DRAWN_SPANS = 5000;
 const IO_PAGE_SIZE = 100;
+type WindowResponse = { snapshot: string; domain: string; start_ns: string; end_ns: string;
+  spans: Report['spans']; counters: Report['counters']; dependencies: Report['dependencies'];
+  io: Record<string, IoTimeBin[]>; limited: boolean; warnings: string[] };
+type FilePage = { thread: string; offset: number; total: number; tracks: Track[] };
+function localEndpoint(path: string): string | undefined {
+  if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('#')) return undefined;
+  const url = new URL(path, location.href);
+  return url.origin === location.origin && (url.protocol === 'http:' || url.protocol === 'https:') ? url.pathname + url.search : undefined;
+}
 const COLORS = ['#6bcdb0', '#65a8ec', '#e5b46d', '#b29be6', '#e17d91', '#86c6d9', '#cbc988'];
 const MPI_COLOR = '#ff9970';
 const OPENMP_COLOR = '#d5a2ff';
@@ -57,7 +66,7 @@ function optionalNs(value: string | null): string { return value === null ? '—
 
 class Viewer {
   private readonly report: Report;
-  private readonly data: Map<string, TrackData>;
+  private data: Map<string, TrackData>;
   private readonly root: HTMLElement;
   private readonly domainSelect: HTMLSelectElement;
   private readonly filter: HTMLInputElement;
@@ -86,7 +95,20 @@ class Viewer {
   private ioFilesystem = 'all';
   private ioMetric: IoMetric = 'throughput';
   private ioVisible = true;
-  private readonly ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; starts: bigint[]; ends: bigint[]; values: [number, number][]; max: number }>>();
+  private ioPlots = new WeakMap<IoGraph, Map<IoMetric, { bins: IoTimeBin[]; starts: bigint[]; ends: bigint[]; values: [number, number][]; max: number }>>();
+  private windowTimer: ReturnType<typeof setTimeout> | undefined;
+  private windowAbort: AbortController | undefined;
+  private windowKey = '';
+  private loadedWindowKey = '';
+  private hasWindowData = false;
+  private windowCache = new Map<string, WindowResponse>();
+  private windowScopeLimited = false;
+  private currentIoBins: Record<string, IoTimeBin[]> = {};
+  private filePages = new Map<string, FilePage>();
+  private fileAbort = new Map<string, AbortController>();
+  private activeFiles: string | undefined;
+  private readonly windowStatus: HTMLElement;
+  private readonly fileControls: HTMLElement;
   private regionPage = 0;
   private threadPage = 0;
   private selectedRegion: OpenmpRegion | undefined;
@@ -131,6 +153,7 @@ class Viewer {
       <section class="overview"><div class="overview-copy"><div class="eyebrow">CAPTURE OVERVIEW</div><h1 id="session-title">Session</h1><p id="overview-subtitle"></p></div><div class="stat-grid" id="stat-grid"></div></section>
       <div class="workspace"><section class="timeline-section"><div class="toolbar"><div class="toolbar-top"><div class="toolbar-heading"><h2>Timeline</h2><span id="domain-note">CLOCK DOMAINS ARE UNALIGNED</span></div><div class="zoom-controls"><button id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button><button id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button><button id="fit-view" type="button">Fit all</button></div></div><div class="toolbar-fields"><label class="field">Clock domain <select id="domain-select" aria-label="Clock domain"></select></label><label class="field search">Filter <input id="filter-input" type="search" placeholder="Name, category, rank…" aria-label="Filter tracks and events"></label><span id="range-label" class="range-label"></span></div><div class="io-toolbar" id="io-toolbar" hidden><button type="button" id="io-toggle" aria-label="Toggle I/O graph" aria-pressed="true">I/O ▾</button><label class="field">Filesystem <select id="io-fs-select" aria-label="Filesystem"></select></label><label class="field">Metric <select id="io-metric-select" aria-label="I/O metric"><option value="throughput">Throughput · MiB/s</option><option value="iops">Calls/s (IOPS)</option><option value="latency">Average latency · ms</option></select></label><span class="io-legend"><i class="io-read-key"></i> Read <i class="io-write-key"></i> Write</span><span id="io-coverage" class="io-coverage"></span></div></div><div class="ruler-wrap"><div class="track-header">TRACKS <span>▾ collapse</span></div><canvas id="time-ruler" aria-label="Timeline time axis"></canvas></div><div class="plot-scroll" id="timeline-scroll" tabindex="0" aria-label="Timeline tracks; scroll vertically, wheel over plot to zoom, drag to pan"><canvas id="timeline-canvas" aria-label="Interactive timeline spans and counters"></canvas><div id="timeline-spacer"></div></div><div class="timeline-footer"><span><i class="legend-swatch span-key"></i> span <i class="legend-swatch counter-key"></i> counter <i class="legend-swatch incomplete-key"></i> incomplete</span><span>Wheel: zoom · Drag: pan · Shift + wheel: scroll</span></div></section><aside class="sidebar"><section class="side-card" id="detail-panel"><div class="side-title">INSPECTOR</div><div id="detail-content" class="detail-content"></div></section><section class="side-card"><div class="side-title">CATEGORY SUMMARY <span>INCLUSIVE TIME</span></div><div class="category-wrap"><table id="category-table"><thead><tr><th>Category</th><th>Spans</th><th>Time</th></tr></thead><tbody></tbody></table></div><p class="footnote">Inclusive durations may overlap and double-count nested work. Counts cover the full capture, not just retained events.</p></section><section class="side-card"><div class="side-title">CAPTURE STATUS</div><div id="capture-status"></div></section></aside></div>`;
     this.domainSelect = this.get('domain-select') as HTMLSelectElement;
+    if (report.viewer) this.root.querySelector('.brand small')!.textContent = 'INDEXED TIMELINE';
     this.get('fit-view').textContent = 'Reset';
     this.get('fit-view').title = 'Reset zoom to the full capture (Home)';
     this.get('fit-view').setAttribute('aria-label', 'Reset zoom');
@@ -145,10 +168,11 @@ class Viewer {
     for (const child of Array.from(perFile.children).filter(child => !child.classList.contains('io-heading'))) perFileContent.append(child);
     perFileContent.prepend(summary);
     perFile.append(perFileContent);
+    if (report.viewer) perFile.hidden = true;
     if (!report.io_timeline) {
-      perFile.prepend(node('p', 'io-note', 'I/O time series unavailable in this older report; regenerate the report from the capture to view filesystem graphs. Per-file details remain available below.'));
+      if (!report.viewer) perFile.prepend(node('p', 'io-note', 'I/O time series unavailable in this older report; regenerate the report from the capture to view filesystem graphs. Per-file details remain available below.'));
     } else {
-      perFile.hidden = !!report.io_timeline.threads?.length;
+      perFile.hidden = !!report.viewer || !!report.io_timeline.threads?.length;
       this.get('io-toolbar').hidden = false;
       this.get('io-toggle').addEventListener('click', () => {
         this.ioVisible = !this.ioVisible;
@@ -189,6 +213,15 @@ class Viewer {
     this.ruler = this.get('time-ruler') as HTMLCanvasElement;
     this.detail = this.get('detail-content');
     this.rangeLabel = this.get('range-label');
+    this.windowStatus = node('span', 'window-status');
+    this.windowStatus.id = 'window-status';
+    this.fileControls = node('div', 'file-controls');
+    this.fileControls.id = 'file-controls';
+    if (report.viewer) {
+      this.get('range-label').after(this.windowStatus);
+      this.get('io-toolbar').after(this.fileControls);
+      this.windowStatus.textContent = 'Loading window…';
+    }
     if (report.tracks.some(track => track.kind === 'system')) for (const [kind, label] of [['cpu', 'CPU ▸'], ['memory', 'Memory ▸']] as const) {
       const button = node('button', '', label);
       button.type = 'button'; button.setAttribute('aria-label', `Expand ${kind} system graphs`);
@@ -356,6 +389,7 @@ class Viewer {
 
   private setDomain(domain: Domain | undefined): void {
     this.domain = domain;
+    if (this.report.viewer) { this.activeFiles = undefined; this.fileControls.replaceChildren(); }
     this.get('domain-note').textContent = domainClockLabel(this.report, domain?.id);
     this.hideTooltip();
     this.ioPage = 0;
@@ -429,7 +463,7 @@ class Viewer {
     add('all', `All filesystem + unknown groups (${storage.length})`);
     for (const fs of files) add(fs.id, `${fs.host} · ${fs.mount_point || '(no mount)'} · ${fs.filesystem_type || 'unknown type'} · ${fs.device || 'unknown device'}${fs.kind === 'non_filesystem' ? ' · non-file I/O' : fs.kind === 'unknown' ? ' · unknown' : ''}`);
     const series = this.report.io_timeline!;
-    this.get('io-coverage').textContent = `Full-capture POSIX rates · ${series.omitted_events} filesystem / ${series.scope_omitted_events || '0'} thread observations omitted · ${this.report.summary.dropped} capture drops${series.threads?.length ? ' · files appear only inside expanded threads' : ' · regenerate report for thread drill-down'} · no calls means latency unknown`;
+    this.get('io-coverage').textContent = `${this.report.viewer ? 'Indexed, selected-window' : 'Full-capture'} POSIX rates · ${series.omitted_events} filesystem / ${series.scope_omitted_events || '0'} ${this.report.viewer ? 'thread catalog omissions' : 'thread observations omitted'} · ${this.report.summary.dropped} capture drops${series.threads?.length ? ' · files appear only inside expanded threads' : this.report.viewer ? ' · no indexed thread catalog available' : ' · regenerate report for thread drill-down'} · no calls means latency unknown`;
   }
 
   private renderPager(parent: HTMLElement, total: number, page: number, change: (page: number) => void): void {
@@ -999,7 +1033,152 @@ class Viewer {
 
   private schedule(): void {
     if (this.frame) return;
-    this.frame = requestAnimationFrame(() => { this.frame = 0; this.draw(); });
+    this.frame = requestAnimationFrame(() => { this.frame = 0; this.draw(); this.queueWindow(); });
+  }
+
+  private queueWindow(): void {
+    const viewer = this.report.viewer;
+    if (!viewer || !this.domain || !this.plotWidth()) return;
+    const begin = lowerBound(this.rows, row => row.top + row.height > this.scroll.scrollTop);
+    const visible = this.rows.slice(begin).filter(row => row.top < this.scroll.scrollTop + this.scroll.clientHeight);
+    const rawTracks = [...new Set(visible.filter(row => row.kind === 'track' || row.kind === 'counter' && !row.system)
+      .map(row => row.track?.id).filter((id): id is string => !!id))];
+    const rawScopes = [...new Set(visible.filter(row => row.io).map(row => row.io!.key))];
+    const systemIds = new Set<string>();
+    const shards = new Map(this.report.shards.map(shard => [shard.id, shard]));
+    for (const row of visible.filter(row => row.kind === 'counter')) {
+      if (!row.system && row.track) { systemIds.add(row.track.id); continue; }
+      if (row.track && !row.track.id.startsWith('system:')) systemIds.add(row.track.id);
+      else if (row.system) for (const track of this.report.tracks) if (track.kind === 'system' && !track.parent &&
+        track.details.resource === row.system && shards.get(track.shard)?.domain === this.domain.id) systemIds.add(track.id);
+    }
+    const end = this.start + this.visibleDuration();
+    const request = { snapshot: viewer.snapshot, domain: this.domain.id, start_ns: this.start.toString(),
+      end_ns: (end < this.extent() ? end : this.extent()).toString(), pixels: clamp(Math.round(this.plotWidth()), 64, 4096),
+      tracks: rawTracks.slice(0, 64), systems: [...systemIds].slice(0, 1024), io_scopes: rawScopes.slice(0, 32), filesystem: this.ioFilesystem };
+    if (BigInt(request.end_ns) <= this.start) return;
+    const key = JSON.stringify(request);
+    if (key === this.windowKey) return;
+    this.windowKey = key;
+    this.windowScopeLimited = rawTracks.length > 64 || rawScopes.length > 32 || systemIds.size > 1024;
+    if (this.windowTimer) clearTimeout(this.windowTimer);
+    this.windowAbort?.abort();
+    this.windowStatus.textContent = 'Loading window · previous data may be stale';
+    this.windowStatus.dataset.state = 'loading';
+    this.windowTimer = setTimeout(() => { this.windowTimer = undefined; void this.loadWindow(key, request); }, 120);
+  }
+
+  private async loadWindow(key: string, request: { snapshot: string; domain: string; start_ns: string; end_ns: string;
+    pixels: number; tracks: string[]; systems: string[]; io_scopes: string[]; filesystem: string }): Promise<void> {
+    const viewer = this.report.viewer!;
+    const cached = this.windowCache.get(key);
+    if (cached) { this.windowCache.delete(key); this.windowCache.set(key, cached); this.applyWindow(cached); return; }
+    const path = localEndpoint(viewer.endpoint);
+    if (!path) { this.windowStatus.textContent = 'Window unavailable: invalid local endpoint'; return; }
+    const controller = new AbortController(); this.windowAbort = controller;
+    try {
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request), signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json() as WindowResponse;
+      if (controller.signal.aborted || this.windowKey !== key) return;
+      if (result.snapshot !== viewer.snapshot || result.domain !== request.domain || result.start_ns !== request.start_ns ||
+        result.end_ns !== request.end_ns || !Array.isArray(result.spans) || !Array.isArray(result.counters) ||
+        !Array.isArray(result.dependencies) || !result.io) throw new Error('Invalid window response');
+      this.windowCache.set(key, result);
+      while (this.windowCache.size > 2) this.windowCache.delete(this.windowCache.keys().next().value!);
+      this.applyWindow(result);
+    } catch (error) {
+      if (!controller.signal.aborted && this.windowKey === key) {
+        this.windowStatus.textContent = `Window failed (${error instanceof Error ? error.message : 'network error'}) · previous data may be stale`;
+        this.windowStatus.dataset.state = 'error';
+      }
+    } finally { if (this.windowAbort === controller) this.windowAbort = undefined; }
+  }
+
+  private applyWindow(result: WindowResponse): void {
+    this.loadedWindowKey = this.windowKey;
+    this.hasWindowData = true;
+    const old = this.selection;
+    this.report.spans = result.spans;
+    this.report.counters = result.counters;
+    this.report.dependencies = result.dependencies;
+    this.currentIoBins = result.io;
+    setIoWindow(this.report, result.io);
+    this.ioPlots = new WeakMap();
+    this.data = indexReport(this.report);
+    if (old?.kind === 'span') {
+      const span = old.item.span;
+      const found = this.data.get(span.track)?.spans.items.find(item =>
+        span.source_id ? item.span.source_id === span.source_id && item.span.track === span.track : item.span.id === span.id && item.span.track === span.track);
+      this.selection = found ? { kind: 'span', item: found } : undefined;
+    } else if (old?.kind === 'counter') {
+      const counter = old.item.counter;
+      const found = [...(this.data.get(counter.track)?.counters.values() ?? [])].flat().find(item =>
+        item.counter.timestamp_ns === counter.timestamp_ns && item.counter.name === counter.name && item.counter.value === counter.value);
+      this.selection = found ? { kind: 'counter', item: found } : undefined;
+    } else if (old?.kind === 'io') this.selection = undefined;
+    this.updateRelated(); this.showDetails();
+    this.windowStatus.dataset.state = result.limited || this.windowScopeLimited ? 'limited' : 'ready';
+    const bins = Object.values(result.io).reduce((count, values) => count + values.length, 0);
+    this.windowStatus.textContent = `Loaded ${formatNs(BigInt(result.start_ns))}–${formatNs(BigInt(result.end_ns))} · ${result.spans.length} spans · ${result.counters.length} counter samples · ${bins} I/O bins${result.limited || this.windowScopeLimited ? ' · limited: zoom in / expand fewer tracks' : ''}${result.warnings?.length ? ` · ${result.warnings.join('; ')}` : ''}`;
+    this.buildRows(); this.schedule();
+  }
+
+  private showFileControls(thread: string): void {
+    this.activeFiles = thread;
+    const page = this.filePages.get(thread);
+    const count = this.report.tracks.find(track => track.id === thread)?.details['viewer.file_count'] ?? page?.total ?? 0;
+    this.fileControls.replaceChildren(node('span', '', `Files (${count}) · ${page ? `rows ${page.offset + 1}–${page.offset + page.tracks.length} of ${page.total}` : 'loading…'}`));
+    if (!page) return;
+    const previous = node('button', '', 'Previous files'); previous.type = 'button'; previous.disabled = page.offset === 0;
+    previous.addEventListener('click', () => void this.loadFiles(thread, Math.max(0, page.offset - IO_PAGE_SIZE)));
+    const next = node('button', '', 'Next files'); next.type = 'button'; next.disabled = page.offset + page.tracks.length >= page.total;
+    next.addEventListener('click', () => void this.loadFiles(thread, page.offset + page.tracks.length));
+    this.fileControls.append(previous, next);
+  }
+
+  private async loadFiles(thread: string, offset: number): Promise<void> {
+    const viewer = this.report.viewer;
+    if (!viewer) return;
+    const path = localEndpoint(viewer.files_endpoint);
+    if (!path) { this.fileControls.textContent = 'Files unavailable: invalid local endpoint'; return; }
+    this.fileAbort.get(thread)?.abort();
+    const controller = new AbortController(); this.fileAbort.set(thread, controller);
+    this.activeFiles = thread;
+    this.fileControls.textContent = 'Loading files…';
+    try {
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ snapshot: viewer.snapshot, thread, offset, limit: IO_PAGE_SIZE }), signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const page = await response.json() as { snapshot: string; tracks: Track[]; total: number; offset: number; next_offset: number | null };
+      if (controller.signal.aborted || page.snapshot !== viewer.snapshot || page.offset !== offset || !Array.isArray(page.tracks) || page.tracks.length > IO_PAGE_SIZE ||
+        page.tracks.some(track => track.kind !== 'io' || track.parent !== thread)) throw new Error('Invalid files response');
+      const old = this.filePages.get(thread);
+      if (old) this.report.tracks = this.report.tracks.filter(track => !old.tracks.some(file => file.id === track.id));
+      this.filePages.delete(thread);
+      this.filePages.set(thread, { thread, offset, total: page.total, tracks: page.tracks });
+      while (this.filePages.size > 8) {
+        const oldest = this.filePages.keys().next().value!;
+        this.report.tracks = this.report.tracks.filter(track => !this.filePages.get(oldest)!.tracks.some(file => file.id === track.id));
+        this.filePages.delete(oldest);
+        if (this.activeFiles === oldest) this.fileControls.replaceChildren();
+      }
+      this.report.tracks.push(...page.tracks);
+      const retained = new Set(this.report.tracks.map(track => track.id));
+      this.report.spans = this.report.spans.filter(span => retained.has(span.track));
+      this.report.counters = this.report.counters.filter(counter => retained.has(counter.track));
+      if (this.selection?.kind === 'span' && !retained.has(this.selection.item.span.track) ||
+        this.selection?.kind === 'counter' && !retained.has(this.selection.item.counter.track)) {
+        this.selection = undefined; this.showDetails();
+      }
+      this.data = indexReport(this.report);
+      setIoWindow(this.report, this.currentIoBins);
+      this.ioPlots = new WeakMap();
+      if (this.activeFiles === thread) this.showFileControls(thread);
+      this.buildRows(); this.schedule();
+    } catch (error) {
+      if (!controller.signal.aborted) this.fileControls.textContent = `Files failed (${error instanceof Error ? error.message : 'network error'}) · previous page retained`;
+    } finally { if (this.fileAbort.get(thread) === controller) this.fileAbort.delete(thread); }
   }
 
   private draw(): void {
@@ -1182,7 +1361,10 @@ class Viewer {
     const top = y + 10, bottom = y + row.height - 22, height = bottom - top;
     ctx.font = '11px system-ui'; ctx.fillStyle = this.colors.muted;
     if (!samples.length) {
-      ctx.fillText(row.depth === 0 ? 'No aligned samples; expand hosts' : 'No retained samples', LABEL_WIDTH + 8, y + row.height / 2);
+      ctx.fillText(this.report.viewer && (!this.hasWindowData || this.loadedWindowKey !== this.windowKey) ?
+        this.windowStatus.textContent?.startsWith('Window failed') ? 'System window unavailable; previous data may be stale' : 'Loading system samples…' :
+        row.depth === 0 ? 'No aligned samples; expand hosts' : this.report.viewer ? 'No observed samples in this window' : 'No retained samples',
+      LABEL_WIDTH + 8, y + row.height / 2);
       return;
     }
     // Include neighboring observations so a zoomed viewport between samples
@@ -1268,7 +1450,9 @@ class Viewer {
       plot = { bins, values, starts: bins.map(bin => BigInt(bin.start_ns)), ends: bins.map(bin => BigInt(bin.start_ns) + BigInt(bin.duration_ns)), max: max || 1 }; cache.set(this.ioMetric, plot);
     }
     ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
-    if (!plot.bins.length) { ctx.fillText('No full-capture I/O bins available for this selection', LABEL_WIDTH + 8, y + 32); return; }
+    if (!plot.bins.length) { ctx.fillText(this.report.viewer ? !this.hasWindowData || this.loadedWindowKey !== this.windowKey ?
+      this.windowStatus.textContent?.startsWith('Window failed') ? 'I/O window unavailable; previous data may be stale' : 'Loading I/O window…' :
+      'No observed I/O bins in this window' : 'No full-capture I/O bins available for this selection', LABEL_WIDTH + 8, y + 32); return; }
     const first = lowerBound(plot.ends, time => time > this.start);
     const last = lowerBound(plot.starts, time => time >= end);
     const palette = this.theme === 'light' ? ['#176b61', '#af661c'] : ['#6bcdb0', '#e5b46d'];
@@ -1338,6 +1522,15 @@ class Viewer {
     if (x < LABEL_WIDTH) {
       const row = this.rows.find(item => y + this.scroll.scrollTop >= item.top && y + this.scroll.scrollTop < item.top + item.height);
       if (row?.hasChildren) {
+        const opening = this.collapsed.has(row.key);
+        if (this.report.viewer && (row.key.endsWith(':files') || row.key.startsWith('files:')) && row.io === undefined) {
+          const thread = row.key.startsWith('files:') ? row.key.slice('files:'.length) :
+            this.report.io_timeline?.threads?.find(series => `io:thread:${series.domain}:${series.thread_track}:files` === row.key)?.thread_track;
+          if (thread && opening) {
+            this.showFileControls(thread);
+            if (!this.filePages.has(thread)) void this.loadFiles(thread, 0);
+          } else if (thread && !opening && this.activeFiles === thread) { this.activeFiles = undefined; this.fileControls.replaceChildren(); }
+        }
         if ((row.system || (row.io && row.expanded && this.collapsed.has(row.key))) && this.filter.value) { this.filter.value = ''; this.collapsed.add(row.key); }
         else if (this.collapsed.has(row.key)) this.collapsed.delete(row.key); else this.collapsed.add(row.key);
         this.buildRows(); this.schedule();

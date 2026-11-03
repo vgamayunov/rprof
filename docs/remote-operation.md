@@ -4,8 +4,8 @@
 
 Run collection directly on the remote system, using its normal shell or scheduler
 workflow. Run `rprof view` where the capture files are accessible, then forward its
-loopback HTTP port to the local browser with SSH. This requires **no additional
-rprof code** beyond the existing collector and snapshot-viewer commands.
+loopback HTTP port to the local browser with SSH. The indexed viewer serves both
+the HTML and bounded window/file-page queries through this same tunnel.
 
 ```text
 remote system: workload → rprof record → saved capture → rprof view
@@ -46,13 +46,14 @@ Replace `allocated-h100-node` with the actual node name. Use `tst4` and the sele
 access to shared capture storage; forward to that viewer host.
 
 HTTP inside the SSH tunnel is sufficient: SSH encrypts the network connection.
-`rprof view` stays bound to loopback. The current viewer serves a saved snapshot;
+`rprof view` stays bound to loopback. It builds/reuses a disposable index and serves
+windowed data from a saved snapshot;
 browser refresh does not re-read the capture. Re-run the viewer for a newer
 snapshot. Existing SSH configuration handles aliases, keys, and jump hosts.
 
-Validate this workflow during remote collector testing by comparing the tunneled
-view with an offline HTML export of the same capture. No new remote-control API,
-worker service, or tunnel automation is part of the first version.
+See [indexed viewing](indexed-viewer.md) for cache placement and query limits.
+Standalone HTML still works without a server; its retained detail can differ from
+an indexed window. There is no remote job-control API, worker service or tunnel automation.
 
 ## Later feature: open remote files from a local GUI
 

@@ -4,6 +4,8 @@ mod analyze;
 mod clock;
 mod cuda_summary;
 mod html;
+mod index_metrics;
+pub mod indexed;
 mod io_summary;
 mod io_timeline;
 mod model;

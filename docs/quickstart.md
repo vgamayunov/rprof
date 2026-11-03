@@ -111,7 +111,7 @@ Use any capture produced above:
 
 ```bash
 rprof report io.jsonl                              # Text summary
-rprof view io.jsonl --open                         # Local browser viewer
+rprof view io.jsonl --open                         # Indexed viewer; loads zoomed detail
 rprof report io.jsonl --format html -o io.html      # Portable offline HTML
 ```
 
@@ -120,6 +120,8 @@ For remote viewing, run `rprof view io.jsonl --port 8080` remotely, then run
 
 Start with a short representative run. Check slowdown, collector drops, incomplete
 intervals and report omissions before scaling up. PyTorch import currently allows
-256 MiB uncompressed JSON / one million source records per file; the default HTML
-timeline retains the first 200,000 observations or 64 MiB. See [capacity](capacity.md)
+256 MiB uncompressed JSON / one million source records per file; the standalone
+HTML timeline retains the first 200,000 observations or 64 MiB by default. For large
+captures, `rprof view` builds/reuses an index and loads the visible window instead;
+see [indexed viewing](indexed-viewer.md). See [capacity](capacity.md)
 and the linked collector guides for coverage and limits.

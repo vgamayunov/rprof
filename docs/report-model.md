@@ -43,6 +43,7 @@ Report {
     attributes: { [key: string]: string }
   }],
   dependencies: [{ from: string, to: string, relation: string }],
+  viewer?: { endpoint: string, files_endpoint: string, snapshot: string }, // local indexed view only
   mpi?: [{ shard: string, rank: number, name: string, calls: string, errors: string,
     total_ns: string, max_ns: string, logical_bytes: string, calls_with_bytes: string }],
   io?: [{
@@ -54,6 +55,7 @@ Report {
   io_timeline?: { omitted_events: string, scope_omitted_events?: string, filesystems: [{
     id: string, domain: string, host: string, filesystem_type: string,
     mount_point: string, device: string, kind: "filesystem"|"non_filesystem"|"unknown",
+    capture_identity?: string, // opaque capture filesystem identity used by the index
     bin_width_ns: string, bins: [{
       start_ns: string, duration_ns: string, read_bytes: string, write_bytes: string,
       read_ops: string, write_ops: string, other_ops: string, errors: string,

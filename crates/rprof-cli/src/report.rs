@@ -32,10 +32,10 @@ pub struct ReportArgs {
 
 #[derive(Args)]
 pub struct TimelineLimits {
-    /// Maximum raw timeline observations; system gauges and I/O summaries have separate budgets.
+    /// Raw observations per standalone report or indexed window (indexed server cap: 20000).
     #[arg(long, default_value_t = 200_000, value_parser = clap::value_parser!(u32).range(0..=2_000_000))]
     max_events: u32,
-    /// Raw encoded-event retention budget in MiB (excludes system gauges and derived summaries).
+    /// Raw retention budget in MiB; indexed replies have a separate 16 MiB server cap.
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(1..=512))]
     max_report_mib: u32,
 }

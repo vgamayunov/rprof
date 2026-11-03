@@ -43,7 +43,7 @@ enum Action {
     Project(project::ProjectArgs),
     /// Convert torch.profiler/Kineto Chrome JSON into a capture with a separate source clock.
     ImportPytorch(pytorch_import::ImportArgs),
-    /// Serve an offline report snapshot on a loopback-only local browser endpoint.
+    /// Serve an indexed capture with on-demand timeline queries on loopback.
     View(view::ViewArgs),
     /// Merge same-session capture shards deterministically, preserving clock domains.
     Merge {

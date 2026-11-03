@@ -210,6 +210,27 @@ struct Pending {
 }
 
 pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
+    analyze_impl(path, limits, None, false)
+}
+
+pub(crate) fn indexed_metadata(path: &Path, snapshot: u64) -> Result<Report> {
+    analyze_impl(
+        path,
+        Limits {
+            max_events: 0,
+            ..Default::default()
+        },
+        Some(snapshot),
+        true,
+    )
+}
+
+fn analyze_impl(
+    path: &Path,
+    limits: Limits,
+    snapshot: Option<u64>,
+    indexed: bool,
+) -> Result<Report> {
     ensure!(
         limits.max_events <= 2_000_000 && limits.max_bytes <= 512 * 1024 * 1024,
         "report limits exceed 2M events or 512 MiB"
@@ -235,11 +256,17 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     let mut python = crate::python_summary::PythonAnalysis::default();
     let mut pytorch = crate::pytorch_summary::PytorchAnalysis::default();
     let mut system_errors = BTreeMap::<Uuid, u64>::new();
-    let data = scan(path, None, |record| {
-        io.observe(&record);
+    let data = scan(path, snapshot, |record| {
+        // Indexed viewing pages raw file lanes; the standalone per-file table
+        // is not materialized into the bootstrap HTML.
+        if !indexed {
+            io.observe(&record);
+        }
         if limits.retain_timeline {
             io_discovery.observe(&record);
-            system_discovery.observe(&record);
+            if !indexed {
+                system_discovery.observe(&record);
+            }
         }
         clocks.observe(&record);
         mpi.observe(&record);
@@ -272,6 +299,9 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
                     }
                 }
                 if !limits.retain_timeline || matches!(event.payload, Payload::Heartbeat) {
+                    continue;
+                }
+                if indexed && !matches!(event.payload, Payload::Track(_)) {
                     continue;
                 }
                 // System gauges use bounded full-run sampling in the second pass;
@@ -501,7 +531,16 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
     }
     let mut warnings = clock_layout.warnings;
     let mut system_timeline = system_discovery.start(&clock_layout.offsets);
-    let mut io_series = io_discovery.start(&domains, &lookup, &clock_layout.offsets);
+    let (io_metadata, mut io_series) = if indexed {
+        (io_discovery.metadata(&lookup), None)
+    } else {
+        (
+            None,
+            io_discovery.start(&domains, &lookup, &clock_layout.offsets),
+        )
+    };
+    // The metadata path avoids constructing every timeline series up front.
+    // Normal standalone reports retain their existing bounded full-run summaries.
     if io_series.is_some() || !system_timeline.is_empty() {
         // A fixed snapshot keeps a growing capture from changing the binning window.
         scan(path, Some(data.source_bytes), |record| {
@@ -526,7 +565,7 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         }
         Some(series)
     } else {
-        None
+        io_metadata
     };
     for (shard, count) in system_errors {
         if count > 0 {
@@ -673,5 +712,6 @@ pub fn analyze(path: &Path, limits: Limits) -> Result<Report> {
         pmu,
         python,
         pytorch,
+        viewer: None,
     })
 }

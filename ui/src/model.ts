@@ -1,5 +1,6 @@
 export interface Report {
   version: 1;
+  viewer?: { endpoint: string; files_endpoint: string; snapshot: string };
   provenance: { kind: 'measured' | 'synthetic' | 'imported' | 'mixed'; label: string; source: string };
   summary: {
     format: string; session_id: string; complete: boolean; truncated_tail: boolean;
@@ -200,6 +201,11 @@ export interface IoGraph {
   key: string; label: string; search: string; bins: IoTimeBin[] | null;
   children: IoGraph[]; shard: Shard; track?: Track; files?: Track[];
 }
+const remoteIo = new WeakMap<Report, Record<string, IoTimeBin[]>>();
+export function setIoWindow(report: Report, bins: Record<string, IoTimeBin[]>): void {
+  remoteIo.set(report, bins);
+  ioCache.delete(report);
+}
 export function ioMetricValues(bin: IoTimeBin, metric: IoMetric): [number, number] {
   const rates = ioBinMetrics(bin);
   const parse = (value: string, divisor = 1): number => value === '—' ? NaN : Number.parseFloat(value) / divisor;
@@ -229,8 +235,9 @@ export function ioGraph(report: Report, domain: string, filesystem: string): IoG
   }
   const firstShard = report.shards.find(shard => shard.domain === domain);
   if (!firstShard) return undefined;
+  const remote = remoteIo.get(report);
   const root: IoGraph = { key: `io:${domain}`, label: 'I/O · read / write', search: 'io i/o read write throughput iops latency filesystem',
-    bins: aggregateIoBins(fs), children: [], shard: firstShard };
+    bins: remote ? remote[`io:${domain}`] ?? [] : aggregateIoBins(fs), children: [], shard: firstShard };
   const ids = new Set(fs.map(item => item.id));
   const ranks = new Map<string, IoGraph>(), processes = new Map<string, IoGraph>(), threads = new Map<string, IoGraph>();
   for (const series of report.io_timeline.threads ?? []) {
@@ -242,13 +249,13 @@ export function ioGraph(report: Report, domain: string, filesystem: string): IoG
       const key = `io:rank:${domain}:${JSON.stringify([series.shard, series.rank])}`;
       let rank = ranks.get(key);
       if (!rank) { rank = { key, label: `Rank ${series.rank} · ${shard.hostname || shard.name}`, search: `io read write rank:${series.rank} rank ${series.rank} ${shard.hostname} ${shard.name}`,
-        bins: null, children: [], shard }; ranks.set(key, rank); root.children.push(rank); }
+        bins: remote ? remote[key] ?? [] : null, children: [], shard }; ranks.set(key, rank); root.children.push(rank); }
       parent = rank;
     }
     const processKey = `io:process:${domain}:${JSON.stringify([series.shard, series.pid, series.process_instance])}`;
     let process = processes.get(processKey);
     if (!process) { process = { key: processKey, label: `PID ${series.pid} · ${series.process_instance || 'process'}`,
-      search: `io read write pid ${series.pid} ${series.process_instance} ${shard.hostname}`, bins: null, children: [], shard };
+      search: `io read write pid ${series.pid} ${series.process_instance} ${shard.hostname}`, bins: remote ? remote[processKey] ?? [] : null, children: [], shard };
       processes.set(processKey, process); parent.children.push(process); }
     const threadKey = `io:thread:${domain}:${series.thread_track}`;
     let thread = threads.get(threadKey);
@@ -256,7 +263,7 @@ export function ioGraph(report: Report, domain: string, filesystem: string): IoG
       const track = tracks.get(series.thread_track);
       const files = filesByThread.get(series.thread_track) ?? [];
       thread = { key: threadKey, label: `Thread ${series.tid}${track?.name && !track.name.includes(series.tid) ? ` · ${track.name}` : ''}`,
-        search: `io read write tid ${series.tid} ${track?.name ?? ''}`, bins: null, children: [], shard, track, files };
+        search: `io read write tid ${series.tid} ${track?.name ?? ''}`, bins: remote ? remote[threadKey] ?? [] : null, children: [], shard, track, files };
       threads.set(threadKey, thread); process.children.push(thread);
     }
     // A physical thread may contribute to several selected filesystems. Sum each
@@ -374,6 +381,8 @@ export function defaultTimelineCollapsed(report: Report): Set<string> {
   const shards = new Map(report.shards.map(shard => [shard.id, shard]));
   const keys = new Set<string>();
   for (const track of report.tracks) if (track.kind === 'io' && track.parent) keys.add(`files:${track.parent}`);
+  if (report.viewer) for (const track of report.tracks) if (track.kind === 'thread' && Number(track.details['viewer.file_count'] ?? 0) > 0)
+    keys.add(`files:${track.id}`);
   if (report.io_timeline) {
     for (const domain of report.domains) keys.add(`io:${domain.id}`);
     for (const thread of report.io_timeline.threads ?? []) {
@@ -574,10 +583,14 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
   const ioOnly = new Set<string>();
   if (report.io_timeline?.threads?.length) {
     // Suppress the redundant native I/O scaffold, but never suppress mixed
-    // collector tracks, counters, or real non-I/O spans.
+    // collector tracks, counters, or real non-I/O spans. An indexed thread
+    // absent from the bounded I/O catalog keeps its raw Files drill-down.
+    const catalogThreads = new Set(report.io_timeline.threads.map(series => series.thread_track));
     const nonIo = new Set(report.tracks.filter(track => track.kind !== 'io' &&
-      (data.get(track.id)?.counters.size || data.get(track.id)?.spans.items.some(item =>
-        item.span.category !== 'io' && item.span.category !== 'process' && item.span.category !== 'thread'))).map(track => track.id));
+      (report.viewer ? track.details['viewer.has_non_io'] === 'true' ||
+        track.kind === 'thread' && Number(track.details['viewer.file_count'] ?? 0) > 0 && !catalogThreads.has(track.id) :
+        !!data.get(track.id)?.counters.size || !!data.get(track.id)?.spans.items.some(item =>
+          item.span.category !== 'io' && item.span.category !== 'process' && item.span.category !== 'thread'))).map(track => track.id));
     const children = new Map<string, Track[]>();
     for (const track of report.tracks) if (track.parent) {
       if (!children.has(track.parent)) children.set(track.parent, []);
@@ -646,19 +659,20 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
       if (query && !inherited && !hasMatch(graph)) return;
       const filesKey = `${graph.key}:files`;
       const expanded = !collapsed.has(graph.key) || (!!query && !match && !inherited && hasMatch(graph));
-      add({ key: graph.key, kind: 'io', label: graph.label, depth, height: 96, shard: graph.shard,
-        io: graph, hasChildren: graph.children.length > 0 || !!graph.files?.length, expanded });
+       const fileCount = Number(graph.track?.details['viewer.file_count'] ?? graph.files?.length ?? 0);
+       add({ key: graph.key, kind: 'io', label: graph.label, depth, height: 96, shard: graph.shard,
+         io: graph, hasChildren: graph.children.length > 0 || fileCount > 0, expanded });
       if (!expanded) return;
       for (const child of graph.children) addIo(child, depth + 1, inherited || match);
-      if (graph.files?.length) {
-        add({ key: filesKey, kind: 'rank', label: `Files (${graph.files.length}) · optional`, depth: depth + 1,
-          height: ROW_HEIGHT.rank, shard: graph.shard, hasChildren: true, expanded: !collapsed.has(filesKey) });
-        if (!collapsed.has(filesKey)) for (const file of graph.files) {
+       if (fileCount > 0) {
+         add({ key: filesKey, kind: 'rank', label: `Files (${fileCount}) · optional`, depth: depth + 1,
+           height: ROW_HEIGHT.rank, shard: graph.shard, hasChildren: true, expanded: !collapsed.has(filesKey) });
+         if (!collapsed.has(filesKey)) for (const file of graph.files ?? []) {
           const trackData = data.get(file.id);
           if (query && !matchesFilter(file.name, 'io', file.rank, query) &&
             !trackData?.spans.items.some(item => matchesFilter(`${file.name} ${item.span.name}`, item.span.category, file.rank, query))) continue;
-          add({ key: `track:${file.id}`, kind: 'track', label: file.name, depth: depth + 2,
-            height: trackData ? trackRowHeight(trackData.spans) : ROW_HEIGHT.emptyTrack,
+           add({ key: `track:${file.id}`, kind: 'track', label: file.name, depth: depth + 2,
+             height: report.viewer ? ROW_HEIGHT.emptyTrack + SPAN_PITCH * 3 : trackData ? trackRowHeight(trackData.spans) : ROW_HEIGHT.emptyTrack,
             shard: graph.shard, track: file, hasChildren: false });
         }
       }
@@ -671,15 +685,16 @@ export function timelineRows(report: Report, data: Map<string, TrackData>, domai
     const trackData = data.get(track.id);
     const series = [...(trackData?.counters.keys() ?? [])].filter(name => !query || matchesFilter(`${track.name} ${name}`, 'counter', track.rank, query));
     const key = `track:${track.id}`;
-    add({ key, kind: 'track', label: track.name, depth, height: trackData ? trackRowHeight(trackData.spans) : ROW_HEIGHT.emptyTrack,
+    add({ key, kind: 'track', label: track.name, depth, height: report.viewer ? ROW_HEIGHT.emptyTrack + SPAN_PITCH * 3 : trackData ? trackRowHeight(trackData.spans) : ROW_HEIGHT.emptyTrack,
       shard, track, hasChildren: children.length > 0 || series.length > 0 });
     if (collapsed.has(key)) return;
     const next = new Set(ancestors); next.add(track.id);
     for (const child of children) if (child.kind !== 'io') addTrack(child, shard, depth + 1, next);
     const files = children.filter(child => child.kind === 'io');
-    if (files.length) {
+    const fileCount = report.viewer && track.kind === 'thread' ? Number(track.details['viewer.file_count'] ?? files.length) : files.length;
+    if (fileCount) {
       const filesKey = `files:${track.id}`;
-      add({ key: filesKey, kind: 'rank', label: `Files (${files.length}) · optional`, depth: depth + 1,
+      add({ key: filesKey, kind: 'rank', label: `Files (${fileCount}) · optional`, depth: depth + 1,
         height: ROW_HEIGHT.rank, shard, hasChildren: true, expanded: !collapsed.has(filesKey) });
       if (!collapsed.has(filesKey)) for (const file of files) addTrack(file, shard, depth + 2, next);
     }
@@ -773,6 +788,20 @@ export function indexReport(report: Report): Map<string, TrackData> {
   const result = new Map<string, TrackData>();
   for (const track of report.tracks) {
     const groups = counters.get(track.id) ?? new Map<string, IndexedCounter[]>();
+    // Keep unloaded counter rows stable while scrolling an indexed view. Their
+    // definitions are metadata; samples arrive only for the visible window.
+    if (report.viewer && track.details['viewer.counter_series']) {
+      try {
+        const definitions: unknown = JSON.parse(track.details['viewer.counter_series']);
+        if (Array.isArray(definitions)) for (const encoded of definitions.slice(0, 256)) {
+          if (typeof encoded !== 'string') continue;
+          const definition: unknown = JSON.parse(encoded);
+          if (!Array.isArray(definition) || definition.length !== 3 || !definition.every(v => typeof v === 'string')) continue;
+          const key = `${definition[0]} [${definition[1]}; ${definition[2]}]`;
+          if (!groups.has(key)) groups.set(key, []);
+        }
+      } catch { /* Older metadata still works with the observed series. */ }
+    }
     for (const samples of groups.values()) samples.sort((a, b) => a.time < b.time ? -1 : a.time > b.time ? 1 : 0);
     result.set(track.id, { spans: indexSpans(spans.get(track.id) ?? []), counters: groups });
   }
