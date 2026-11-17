@@ -5,6 +5,49 @@ hardware. These are opt-in hardware tests, not part of the CPU-only Cargo suite.
 Keep build products in `target/` and captures/reports in their existing ignored
 directories. Run on allocated compute resources, not a cluster login node.
 
+## CPU STREAM bandwidth
+
+`stream/` is a portable OpenMP implementation of the STREAM Copy, Scale, Add,
+and Triad kernels. Each kernel is timed independently over configurable FP64
+arrays and validates every output element against its reference. Reported
+bandwidth uses the conventional 2-array traffic estimate for Copy/Scale and
+3-array estimate for Add/Triad; it is not a measurement of memory-controller
+traffic.
+
+Build and run the small correctness checks with any C compiler that supports
+OpenMP:
+
+```bash
+make -C miniapps/stream
+make -C miniapps/stream check
+```
+
+The executable is `target/miniapps/stream`. Options are `--elements N`
+(default 16777216 per array), `--iterations N` (default 10), and `--threads N`
+(default: OpenMP runtime maximum). The default three arrays use 384 MiB total.
+Set the thread count explicitly for reproducible runs; the process CPU affinity
+should match the allocated cores.
+
+For example, profile a node allocation with GCC/libgomp system samples:
+
+```bash
+mkdir -p captures/miniapps reports/miniapps
+srun --nodes=1 --ntasks=1 --cpus-per-task=32 --cpu-bind=cores --mem=4G \
+  --time=00:05:00 --job-name=rprof-stream \
+  env OMP_NUM_THREADS=32 \
+  target/release/rprof record --collect system --system-interval-ms 100 \
+  -o "captures/miniapps/stream-$SLURM_JOB_ID.rprof.jsonl" -- \
+  target/miniapps/stream --elements 67108864 --iterations 10 --threads 32
+target/release/rprof report "captures/miniapps/stream-$SLURM_JOB_ID.rprof.jsonl" \
+  --format html -o "reports/miniapps/stream-$SLURM_JOB_ID.html"
+```
+
+The example uses 1.5 GiB for its arrays, in addition to the profiler and runtime.
+For OpenMP event timelines, use a runtime supported by the selected backend:
+LLVM/Intel runtimes with `--collect openmp`, or GCC 13/libgomp with
+`--collect openmp --openmp-backend gomp`. OpenMP event collection is separate
+from system CPU sampling.
+
 ## MPI Allreduce
 
 `allreduce/` performs blocking `MPI_Allreduce` with `MPI_SUM` on FP64 vectors.
