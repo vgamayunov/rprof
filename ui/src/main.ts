@@ -1,5 +1,5 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, isMemorySystem, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, storageBins, SYSTEM_KINDS, SYSTEM_LABELS, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, StorageBin, StorageGraph, SystemKind, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, isMemorySystem, lowerBound, matchesFilter, mpiCallTotals, observedRate, regionThreads, setIoWindow, sortSummaryRows, SPAN_PITCH, SPAN_TOP, storageBins, SYSTEM_KINDS, SYSTEM_LABELS, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaActivity, CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, MpiCallTotal, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, SortDirection, StorageBin, StorageGraph, SummarySortValue, SystemKind, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { formatBytes, formatByteRate, formatMeanLatency } from './model.js';
@@ -14,6 +14,8 @@ document.documentElement.dataset.theme = startingTheme;
 type Selection = { kind: 'span'; item: IndexedSpan } | { kind: 'counter'; item: IndexedCounter } | { kind: 'io'; bin: IoTimeBin; graph: IoGraph } | { kind: 'storage'; bin: StorageBin; graph: StorageGraph };
 type Hit = { x: number; y: number; width: number; height: number; selection: Selection };
 type TimeRange = { start: bigint; end: bigint };
+type TableSort = { column: number; direction: SortDirection };
+type SortColumn<T> = { label: string; value: (row: T) => SummarySortValue; initial: SortDirection };
 
 const LABEL_WIDTH = 260;
 const MAX_DRAWN_SPANS = 5000;
@@ -93,6 +95,9 @@ class Viewer {
   private timeFilter: TimeRange | undefined;
   private frame = 0;
   private ioPage = 0;
+  private readonly hasMpi: boolean;
+  private mpiPage = 0;
+  private mpiSort: TableSort = { column: 2, direction: 'descending' };
   private operationPage = 0;
   private selectedIo: IoSummary | undefined;
   private ioFilesystem = 'all';
@@ -126,6 +131,7 @@ class Viewer {
   private gompBodyPage = 0;
   private cudaDevicePage = 0;
   private cudaActivityPage = 0;
+  private cudaActivitySort: TableSort | undefined;
   private selectedCudaDevice: CudaDevice | undefined;
   private cudaApiPage = 0;
   private cudaRuntimePage = 0;
@@ -155,6 +161,7 @@ class Viewer {
     this.data = indexReport(report);
     this.collapsed = defaultTimelineCollapsed(report);
     this.root = root;
+    this.hasMpi = !!report.mpi?.length || report.shards.some(shard => shard.collectors.includes('mpi'));
     // Only application-owned static markup is used here. All report strings enter via textContent or Canvas.
     root.innerHTML = `<header class="topbar"><div class="brand"><div class="mark">r/</div><div><strong>rprof</strong><small>OFFLINE TIMELINE</small></div></div><div class="header-actions"><div class="header-meta" id="header-meta"></div><button id="theme-toggle" type="button"></button></div></header>
       <section class="overview"><div class="overview-copy"><div class="eyebrow">CAPTURE OVERVIEW</div><h1 id="session-title">Session</h1><p id="overview-subtitle"></p></div><div class="stat-grid" id="stat-grid"></div></section>
@@ -167,6 +174,7 @@ class Viewer {
     this.get('timeline-scroll').setAttribute('aria-label', 'Timeline tracks; wheel scrolls vertically, drag pans time, Shift-drag selects a range');
     this.root.querySelector('.timeline-footer > span:last-child')!.textContent = 'Wheel: scroll rows · Drag: pan · Shift-drag: select · + −: zoom · Home: reset · Esc: clear range';
     this.root.querySelector('.toolbar')!.insertAdjacentHTML('beforeend', `<div class="range-toolbar"><button id="select-range" type="button" aria-pressed="false" title="Drag to select; Shift-drag also selects in pan mode">Select range</button><button id="zoom-selection" type="button" disabled>Zoom to selection</button><button id="filter-selection" type="button" disabled title="Show timeline activity only within the selected interval">Filter by selection</button><button id="clear-selection" type="button" disabled>Clear range</button><span id="selection-range" role="status">Shift-drag to select a time range</span></div>`);
+    if (this.hasMpi) root.insertAdjacentHTML('beforeend', `<section class="io-section mpi-section" id="mpi-panel"><div class="io-heading"><div><h2>MPI call summary</h2><p>Full capture in the selected clock domain, summed across ranks. Inclusive API times can overlap across ranks; they are not elapsed application time.</p></div><span id="mpi-count"></span></div><p class="io-note">Click a column header to sort all rows. Data volume is the sum of known local logical byte extents, not network wire traffic. — means unavailable; partial means some calls lack byte information. Timeline zoom and range filters do not change these totals.</p><div class="io-wrap"><table id="mpi-calls"><thead></thead><tbody></tbody></table></div><div class="io-pager" id="mpi-pager"></div></section>`);
     // Static structure only: measured file names and values are always inserted as text nodes.
     root.insertAdjacentHTML('beforeend', `<section class="io-section" id="io-panel"><div class="io-heading"><div><h2>Per-file I/O</h2><p>Selected clock domain only · completed / requested bytes · observed-window bandwidth (bytes / window, not physical device bandwidth)</p></div><span id="io-count"></span></div><div class="io-wrap"><table id="io-table"><thead><tr><th>Host / file</th><th>Operations</th><th>Errors</th><th>Read (completed / requested)</th><th>Write (completed / requested)</th><th>Read bandwidth</th><th>Write bandwidth</th></tr></thead><tbody></tbody></table></div><div class="io-pager" id="io-pager"></div><div id="io-detail"></div></section>`);
     const perFile = this.get('io-panel');
@@ -448,6 +456,8 @@ class Viewer {
     if (this.report.viewer) { this.activeFiles = undefined; this.fileControls.replaceChildren(); }
     this.get('domain-note').textContent = domainClockLabel(this.report, domain?.id);
     this.hideTooltip();
+    this.mpiPage = 0;
+    if (this.hasMpi) this.renderMpi();
     this.ioPage = 0;
     this.selectedIo = undefined;
     if (this.report.io_timeline) this.renderIoProfile();
@@ -541,6 +551,58 @@ class Viewer {
       body.append(row);
     }
     if (!rows.length) this.emptyCudaRow(body, columns, empty);
+  }
+
+  private sortableHeader<T>(table: HTMLTableElement, columns: readonly SortColumn<T>[], sort: TableSort | undefined,
+    change: (sort: TableSort) => void): void {
+    const head = table.createTHead(); head.replaceChildren();
+    const row = head.insertRow();
+    columns.forEach((column, index) => {
+      const active = sort?.column === index;
+      const next = active ? sort.direction === 'ascending' ? 'descending' : 'ascending' : column.initial;
+      const cell = node('th'); cell.scope = 'col';
+      cell.setAttribute('aria-sort', active ? sort.direction : 'none');
+      const button = node('button', 'summary-sort', column.label);
+      button.type = 'button'; button.id = `${table.id}-sort-${index}`;
+      button.title = `Sort by ${column.label} (${next})`;
+      const indicator = node('span', 'sort-indicator', active ? sort.direction === 'ascending' ? '▲' : '▼' : '↕');
+      indicator.setAttribute('aria-hidden', 'true'); button.append(indicator);
+      button.addEventListener('click', () => {
+        change({ column: index, direction: next });
+        this.get(button.id).focus({ preventScroll: true });
+      });
+      cell.append(button); row.append(cell);
+    });
+  }
+
+  private renderMpi(): void {
+    const totals = mpiCallTotals(this.report, this.domain?.id);
+    const columns: SortColumn<MpiCallTotal>[] = [
+      { label: 'MPI call', value: row => row.name, initial: 'ascending' },
+      { label: 'Calls', value: row => BigInt(row.calls), initial: 'descending' },
+      { label: 'Total time', value: row => BigInt(row.total_ns), initial: 'descending' },
+      { label: 'Max time', value: row => BigInt(row.max_ns), initial: 'descending' },
+      { label: 'Errors', value: row => BigInt(row.errors), initial: 'descending' },
+      { label: 'Data volume (logical)', value: row => BigInt(row.calls_with_bytes) ? BigInt(row.logical_bytes) : undefined, initial: 'descending' },
+    ];
+    const table = this.get('mpi-calls') as HTMLTableElement;
+    this.sortableHeader(table, columns, this.mpiSort, sort => { this.mpiSort = sort; this.mpiPage = 0; this.renderMpi(); });
+    const sorted = sortSummaryRows(totals, columns[this.mpiSort.column]!.value, this.mpiSort.direction);
+    this.get('mpi-count').textContent = `${totals.length} API names · ${totals.reduce((sum, row) => sum + BigInt(row.calls), 0n)} calls`;
+    const body = table.querySelector('tbody')!; body.replaceChildren();
+    for (const entry of sorted.slice(this.mpiPage * IO_PAGE_SIZE, (this.mpiPage + 1) * IO_PAGE_SIZE)) {
+      const row = node('tr');
+      const total = node('td', '', formatNs(BigInt(entry.total_ns))); total.title = `${entry.total_ns} ns`;
+      const max = node('td', '', formatNs(BigInt(entry.max_ns))); max.title = `${entry.max_ns} ns`;
+      const known = BigInt(entry.calls_with_bytes) > 0n;
+      const partial = known && BigInt(entry.calls_with_bytes) < BigInt(entry.calls);
+      const bytes = node('td', '', known ? `${formatBytes(entry.logical_bytes)}${partial ? ' · partial' : ''}` : '—');
+      bytes.title = `${known ? `${entry.logical_bytes} B; ` : ''}${entry.calls_with_bytes}/${entry.calls} calls with known local byte extents`;
+      row.append(node('td', '', entry.name), node('td', '', entry.calls), total, max, node('td', '', entry.errors), bytes);
+      body.append(row);
+    }
+    if (!sorted.length) this.emptyCudaRow(body, columns.length, 'No MPI calls recorded in this clock domain.');
+    this.renderPager(this.get('mpi-pager'), sorted.length, this.mpiPage, page => { this.mpiPage = page; this.renderMpi(); });
   }
 
   private renderPython(): void {
@@ -898,17 +960,28 @@ class Viewer {
     const detail = this.get('cuda-device-detail'); detail.replaceChildren();
     const device = this.selectedCudaDevice;
     if (!device) return;
-    const activities = deviceActivities(this.report, device);
+    const columns: SortColumn<CudaActivity>[] = [
+      { label: 'Context / stream', value: activity => `${activity.context} / ${activity.stream}`, initial: 'ascending' },
+      { label: 'Kind / name', value: activity => `${activity.kind} · ${activity.name}`, initial: 'ascending' },
+      { label: 'Count', value: activity => BigInt(activity.count), initial: 'descending' },
+      { label: 'Inclusive time', value: activity => BigInt(activity.total_ns), initial: 'descending' },
+      { label: 'Max time', value: activity => BigInt(activity.max_ns), initial: 'descending' },
+      { label: 'Bytes', value: activity => activity.kind === 'memcpy' || activity.kind === 'memset' ? BigInt(activity.bytes) : undefined, initial: 'descending' },
+    ];
+    const source = deviceActivities(this.report, device);
+    const activities = this.cudaActivitySort ? sortSummaryRows(source, columns[this.cudaActivitySort.column]!.value, this.cudaActivitySort.direction) : source;
     detail.append(node('h3', '', `${device.name} · GPU ${device.device} · ${device.instance}`),
-      node('p', 'io-note', 'Per-context/stream activity: inclusive durations overlap across streams. Counts and bytes are exact decimal values; no GPU utilization is inferred.'));
+      node('p', 'io-note', 'Per-context/stream activity: inclusive durations overlap across streams. Click a header to sort all rows. Counts and times are exact decimal values; bytes apply to copies/memsets, not kernel memory traffic. No GPU utilization is inferred.'));
     const wrap = node('div', 'io-wrap'); const table = node('table'); table.id = 'cuda-activities';
-    const head = node('thead'); const heading = node('tr');
-    for (const label of ['Context / stream', 'Kind / name', 'Count', 'Inclusive time', 'Max time', 'Bytes']) heading.append(node('th', '', label));
-    head.append(heading); table.append(head); const body = node('tbody');
+    this.sortableHeader(table, columns, this.cudaActivitySort, sort => {
+      this.cudaActivitySort = sort; this.cudaActivityPage = 0; this.renderCudaActivities();
+    });
+    const body = node('tbody');
     for (const activity of activities.slice(this.cudaActivityPage * IO_PAGE_SIZE, (this.cudaActivityPage + 1) * IO_PAGE_SIZE)) {
       const row = node('tr'); row.append(node('td', '', `${activity.context} / ${activity.stream}`),
         node('td', '', `${activity.kind} · ${activity.name}`), node('td', '', activity.count),
-        node('td', '', `${activity.total_ns} ns`), node('td', '', `${activity.max_ns} ns`), node('td', '', `${activity.bytes} B`)); body.append(row);
+        node('td', '', `${activity.total_ns} ns`), node('td', '', `${activity.max_ns} ns`),
+        node('td', '', columns[5]!.value(activity) === undefined ? '—' : `${activity.bytes} B`)); body.append(row);
     }
     if (!activities.length) this.emptyCudaRow(body, 6, 'No timed activity rows for this device; metadata alone is not measured GPU work.');
     table.append(body); wrap.append(table); detail.append(wrap);

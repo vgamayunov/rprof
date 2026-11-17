@@ -79,6 +79,12 @@ Text reports include per-rank API counts, total/max duration, errors, and logica
 bytes, excluding request lifetimes. The overall MPI category is inclusive and may
 double-count overlapping lifetimes and metadata.
 
+The HTML viewer places a sortable MPI call summary below the timeline. It sums
+each API across ranks in the selected clock domain and sorts the full result
+before pagination. Click column headers to toggle direction. Logical byte totals
+include only calls with known extents; unavailable values are shown as unknown,
+partial coverage is labeled, and raw byte counts/coverage are available on hover.
+
 ## Optional clock calibration
 
 `--mpi-clock-sync` must be applied consistently to **every rank in MPI_COMM_WORLD**.

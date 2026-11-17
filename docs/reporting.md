@@ -56,6 +56,18 @@ Controls:
 - **Inspect:** click a span or counter sample for exact values, attributes, and
   correlations. Selecting a correlated span highlights related operations and
   draws visible dependency links.
+- **MPI call summary:** below the timeline, API totals are summed across ranks in
+  the selected clock domain. Click headers to sort by name, calls, total/max time,
+  errors, or known logical data volume; click again to reverse. Missing byte
+  measurements sort last, and partial coverage is marked explicitly.
+- **CUDA kernel/activity sorting:** select a GPU in the CUDA panel, then click a
+  header in its context/stream activity list. Sorting uses the full list before
+  pagination, with exact integer comparisons for counts, nanoseconds and bytes.
+  Kernel memory traffic is not measured; byte totals apply to copies/memsets.
+
+These summary tables cover the full capture in the selected clock domain, not the
+current timeline zoom or selected time range. Summed API/kernel time can overlap
+across ranks/streams. MPI logical byte extents are not network wire volume.
 
 CPU/process/rank, OpenMP thread, GPU device/stream, and I/O tracks are supported by
 the model. The current process collector supplies the real command lifetime;
