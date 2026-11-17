@@ -17,6 +17,10 @@ def suspended_generator():
     yield leaf(2)
 
 
+def delegated_generator():
+    yield from (4, 5)
+
+
 async def suspended_coroutine():
     leaf(3)
     await asyncio.sleep(0.04)
@@ -58,6 +62,7 @@ def main():
                 next(generator)
             except StopIteration:
                 pass
+        assert list(delegated_generator()) == [4, 5]
         with rprof.range("coroutine elapsed"):
             assert asyncio.run(suspended_coroutine()) == 5
         threads = [threading.Thread(target=thread_worker) for _ in range(2)]

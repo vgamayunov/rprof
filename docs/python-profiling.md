@@ -99,8 +99,9 @@ recorded when available; absence is explicitly unknown.
 
 ## Validation and overhead
 
-The six integration tests cover generator/coroutine suspension, threads, ranges-only
-mode, fork/spawn/forkserver, shared Python/I/O track identity, preserved hooks and
+The six integration tests cover generator/coroutine suspension (including delegated
+`yield from`), threads, ranges-only mode, fork/spawn/forkserver, shared Python/I/O
+track identity, preserved hooks and
 site customization, no initialization, exit code 23, and bounded recursion omissions.
 Function, worker and native-I/O checks passed on CPython 3.12.9 locally and on
 `tst3` HBv4; ranges-only mode is additionally checked locally. CI covers 3.10–3.14.

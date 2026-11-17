@@ -262,7 +262,17 @@ def _profile(frame, event, arg):
             state.begin(frame.f_code, id(frame), "call_or_resume")
         elif event == "return":
             end = time.monotonic_ns()
-            opcode = dis.opname[frame.f_code.co_code[frame.f_lasti]] if frame.f_lasti >= 0 else ""
+            bytecode, offset = frame.f_code.co_code, frame.f_lasti
+            opcode = dis.opname[bytecode[offset]] if offset >= 0 else ""
+            # Profile callbacks can report the instruction before YIELD_FROM
+            # (3.10) or the RESUME after YIELD_VALUE (3.13+), not the yield itself.
+            if (sys.version_info[:2] == (3, 10) and offset >= 0 and
+                    offset + 2 < len(bytecode) and
+                    dis.opname[bytecode[offset + 2]] == "YIELD_FROM"):
+                opcode = "YIELD_FROM"
+            elif (opcode == "RESUME" and offset >= 2 and
+                  dis.opname[bytecode[offset - 2]] == "YIELD_VALUE"):
+                opcode = "YIELD_VALUE"
             reason = "yield" if opcode in ("YIELD_VALUE", "YIELD_FROM") else "return" if opcode.startswith("RETURN") else "unwind"
             state.end(frame.f_code, id(frame), reason, end)
     except Exception as error:

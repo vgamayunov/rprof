@@ -423,13 +423,23 @@ async function position(page: Page, name: string, kind: 'span' | 'counter', rank
   const row = rows.find(row => row.track?.id === track.id && (kind === 'span' ? row.kind === 'track' : row.kind === 'counter' && row.series?.startsWith(`${name} [`)));
   if (!row) throw new Error(`Missing visible row for ${name}`);
   const scrollTop = await page.locator('#timeline-scroll').evaluate(element => element.scrollTop);
+  const canvas = page.locator('#timeline-canvas');
+  const box = (await canvas.boundingBox())!;
+  const extent = Number(report.domains.find(domain => domain.id === domainId)!.end_ns);
   let time: bigint;
   let y: number;
+  let spanX: number | undefined;
   if (kind === 'span') {
     const span = report.spans.find(span => span.track === track.id && span.name === name)!;
     const indexed = data.get(track.id)!.spans.items.find(item => item.span.id === span.id)!;
     time = ns === undefined ? indexed.start + (indexed.end - indexed.start) / 2n : BigInt(ns);
     y = row.top - scrollTop + SPAN_TOP + indexed.lane * SPAN_PITCH + 5;
+    if (ns === undefined) {
+      const startX = 260 + (box.width - 260) * Number(indexed.start) / extent;
+      const endX = 260 + (box.width - 260) * Number(indexed.end) / extent;
+      // Click the rendered two-pixel bar, not a fractional time midpoint that rounds outside it.
+      spanX = (Math.max(261, startX) + Math.min(box.width, Math.max(startX + 2, endX))) / 2;
+    }
   } else {
     const samples = data.get(track.id)!.counters.get(row.series!)!;
     const sample = ns === undefined ? samples[0]! : samples.find(sample => sample.time === BigInt(ns))!;
@@ -438,10 +448,7 @@ async function position(page: Page, name: string, kind: 'span' | 'counter', rank
     time = sample.time;
     y = row.top - scrollTop + COUNTER_PLOT_TOP + COUNTER_PLOT_HEIGHT * (1 - (value - Math.min(...values)) / (Math.max(...values) - Math.min(...values) || 1));
   }
-  const canvas = page.locator('#timeline-canvas');
-  const box = (await canvas.boundingBox())!;
-  const extent = Number(report.domains.find(domain => domain.id === domainId)!.end_ns);
-  return { x: 260 + (box.width - 260) * Number(time) / extent, y };
+  return { x: spanX ?? 260 + (box.width - 260) * Number(time) / extent, y };
 }
 
 async function clickEvent(page: Page, name: string, kind: 'span' | 'counter' = 'span', rank?: number, ns?: number): Promise<void> {
@@ -768,6 +775,8 @@ test('CPU and memory use distinct filled utilization areas and leave source gaps
   }, { fraction, top: row.top, height: row.height });
   for (const theme of ['dark', 'light']) {
     if (theme === 'light') await page.getByRole('button', { name: 'Switch to light theme' }).click();
+    // Both themes satisfy the area-color comparison, so first wait for the new canvas palette.
+    await expect.poll(() => canvasCorner(page)).toEqual(theme === 'dark' ? [20, 35, 48, 255] : [240, 245, 248, 255]);
     await expect.poll(async () => {
       const inside = await pixel(.25, cpu), gap = await pixel(.54, cpu);
       return inside[1]! - inside[0]! - (gap[1]! - gap[0]!);
