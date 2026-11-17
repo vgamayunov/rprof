@@ -1,6 +1,6 @@
 use crate::{
     capture_sink::CaptureSink,
-    native_collector::{Mapping, Outcome, pump},
+    native_collector::{Mapping, Outcome, Packet, pump},
     record::monotonic_ns,
 };
 use anyhow::Result;
@@ -285,14 +285,17 @@ impl Decode {
 }
 
 fn consume(
-    receiver: Receiver<MpiEvent>,
+    receiver: Receiver<Packet<MpiEvent>>,
     mapping: &Mapping,
     sink: &Mutex<CaptureSink>,
     origin: u64,
 ) -> Result<Outcome> {
     let mut decoder = Decode::default();
     let mut received = 0;
-    for raw in receiver {
+    for packet in receiver {
+        let Some(raw) = packet.observation(sink, origin, &mut received)? else {
+            continue;
+        };
         if raw.magic != MAGIC
             || raw.version != VERSION
             || !(CALL..=METADATA).contains(&raw.kind)

@@ -91,6 +91,7 @@ pub extern "C" fn rprof_cuda_init() -> i32 {
     INSTANCE.store(rprof_io_protocol::process_instance(), Ordering::Relaxed);
     STATS.store(stats, Ordering::Release);
     SOCKET.store(fd, Ordering::Release);
+    rprof_io_protocol::send_process_name(fd, unsafe { &*stats }, INSTANCE.load(Ordering::Relaxed));
     1
 }
 #[unsafe(no_mangle)]

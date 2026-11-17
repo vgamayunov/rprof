@@ -24,8 +24,8 @@ use rprof_core::{
     stream::{Attribute, Event, Payload},
 };
 use rprof_io_protocol::{
-    IoEvent, MAGIC, PATH_ARGUMENT, PATH_CAPACITY, PATH_TRUNCATED, PATH_UNAVAILABLE, Stats, VERSION,
-    op,
+    IoEvent, MAGIC, PATH_ARGUMENT, PATH_CAPACITY, PATH_TRUNCATED, PATH_UNAVAILABLE,
+    PROCESS_EVENT_SIZE, PROCESS_MAGIC, PROCESS_VERSION, ProcessEvent, Stats, VERSION, op,
 };
 
 use crate::{capture_sink::CaptureSink, record::monotonic_ns};
@@ -352,15 +352,51 @@ fn receive(
     })
 }
 
+pub(crate) enum Packet<T> {
+    Observation(T),
+    Process(Box<ProcessEvent>),
+}
+impl<T> Packet<T> {
+    pub(crate) fn observation(
+        self,
+        sink: &Mutex<CaptureSink>,
+        origin: u64,
+        received: &mut u64,
+    ) -> Result<Option<T>> {
+        match self {
+            Self::Observation(raw) => Ok(Some(raw)),
+            Self::Process(raw) => {
+                let name = if raw.error == 0 {
+                    Ok(String::from_utf8_lossy(&raw.name[..raw.name_len as usize]).into_owned())
+                } else {
+                    Err(raw.error)
+                };
+                let mut out = sink
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+                out.native_process_name(
+                    monotonic_ns()?.saturating_sub(origin),
+                    raw.pid,
+                    raw.instance,
+                    name,
+                )?;
+                *received += 1;
+                Ok(None)
+            }
+        }
+    }
+}
+
 pub(crate) fn pump<T: Copy + Send>(
     socket: &UnixDatagram,
     mapping: &Mapping,
     stop: &AtomicBool,
-    sender: SyncSender<T>,
+    sender: SyncSender<Packet<T>>,
 ) -> Result<()> {
     // Instantiated only with the fixed integer/byte-array POD wire structs.
     let size = std::mem::size_of::<T>();
-    ensure!(size <= 1023, "native wire event exceeds buffer");
+    let max_size = size.max(PROCESS_EVENT_SIZE);
+    ensure!(max_size <= 1023, "native wire event exceeds buffer");
     let mut buffer = [0u8; 1024];
     let mut drain_count = 0;
     let mut draining = false;
@@ -369,7 +405,7 @@ pub(crate) fn pump<T: Copy + Send>(
             socket.set_nonblocking(true)?;
             draining = true;
         }
-        match socket.recv(&mut buffer[..size + 1]) {
+        match socket.recv(&mut buffer[..max_size + 1]) {
             Ok(length) => {
                 if stop.load(Ordering::Acquire) {
                     drain_count += 1;
@@ -378,11 +414,28 @@ pub(crate) fn pump<T: Copy + Send>(
                         "I/O producers remained active after workload cleanup"
                     );
                 }
-                if length != size {
+                let packet = if length == PROCESS_EVENT_SIZE
+                    && u32::from_ne_bytes(buffer[..4].try_into().unwrap()) == PROCESS_MAGIC
+                {
+                    let raw =
+                        unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<ProcessEvent>()) };
+                    if raw.version != PROCESS_VERSION
+                        || raw.pid == 0
+                        || raw.instance == 0
+                        || raw.name_len as usize > raw.name.len()
+                        || (raw.error == 0 && raw.name_len == 0)
+                    {
+                        continue;
+                    }
+                    Packet::Process(Box::new(raw))
+                } else if length == size {
+                    Packet::Observation(unsafe {
+                        std::ptr::read_unaligned(buffer.as_ptr().cast::<T>())
+                    })
+                } else {
                     continue;
-                }
-                let raw = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<T>()) };
-                match sender.try_send(raw) {
+                };
+                match sender.try_send(packet) {
                     Ok(()) => (),
                     Err(TrySendError::Full(_)) => {
                         mapping.stats().dropped.fetch_add(1, Ordering::Relaxed);
@@ -408,7 +461,7 @@ pub(crate) fn pump<T: Copy + Send>(
 }
 
 fn consume(
-    receiver: Receiver<IoEvent>,
+    receiver: Receiver<Packet<IoEvent>>,
     mapping: &Mapping,
     sink: &Mutex<CaptureSink>,
     origin: u64,
@@ -416,7 +469,10 @@ fn consume(
     let mut files = HashMap::<(u64, Vec<u8>, u16), u64>::new();
     let mut filesystem = io_filesystem::Resolver::new();
     let mut received = 0u64;
-    for raw in receiver {
+    for packet in receiver {
+        let Some(raw) = packet.observation(sink, origin, &mut received)? else {
+            continue;
+        };
         let Some(operation) = op::name(raw.operation) else {
             continue;
         };

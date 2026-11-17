@@ -22,6 +22,82 @@ pub fn process_instance() -> u64 {
     u64::from_ne_bytes(id).max(1)
 }
 
+pub const PROCESS_MAGIC: u32 = 0x5250504e;
+pub const PROCESS_VERSION: u16 = 1;
+
+/// Optional metadata shared by the native transports, tied to the sending exec image.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessEvent {
+    pub magic: u32,
+    pub version: u16,
+    pub name_len: u16,
+    pub pid: u32,
+    pub error: i32,
+    pub instance: u64,
+    pub name: [u8; 256],
+}
+pub const PROCESS_EVENT_SIZE: usize = 280;
+const _: () = assert!(std::mem::size_of::<ProcessEvent>() == PROCESS_EVENT_SIZE);
+
+/// Capture the basename inside the process, not via a PID lookup after exit/exec.
+/// Uses only bounded stack storage, atomics and syscalls, including after fork.
+pub fn send_process_name(socket: i32, stats: &Stats, instance: u64) {
+    use std::sync::atomic::Ordering;
+    let saved_errno = unsafe { *libc::__errno_location() };
+    let mut event: ProcessEvent = unsafe { std::mem::zeroed() };
+    event.magic = PROCESS_MAGIC;
+    event.version = PROCESS_VERSION;
+    event.pid = unsafe { libc::getpid() } as u32;
+    event.instance = instance;
+    let mut path = [0u8; 4096];
+    let length = unsafe {
+        libc::syscall(
+            libc::SYS_readlinkat,
+            libc::AT_FDCWD,
+            c"/proc/self/exe".as_ptr(),
+            path.as_mut_ptr(),
+            path.len(),
+        )
+    };
+    if length < 0 {
+        event.error = unsafe { *libc::__errno_location() };
+    } else if length as usize >= path.len() {
+        event.error = libc::ENAMETOOLONG;
+    } else {
+        let path = &path[..length as usize];
+        let start = path
+            .iter()
+            .rposition(|byte| *byte == b'/')
+            .map_or(0, |index| index + 1);
+        let name = &path[start..];
+        if name.is_empty() || name.len() > event.name.len() {
+            event.error = libc::ENAMETOOLONG;
+        } else {
+            event.name[..name.len()].copy_from_slice(name);
+            event.name_len = name.len() as u16;
+        }
+    }
+    stats.attempted.fetch_add(1, Ordering::Relaxed);
+    let sent = unsafe {
+        libc::syscall(
+            libc::SYS_sendto,
+            socket,
+            (&event as *const ProcessEvent).cast::<libc::c_void>(),
+            PROCESS_EVENT_SIZE,
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            std::ptr::null::<libc::sockaddr>(),
+            0 as libc::socklen_t,
+        )
+    };
+    if sent == PROCESS_EVENT_SIZE as libc::c_long {
+        stats.sent.fetch_add(1, Ordering::Relaxed);
+    } else {
+        stats.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe { *libc::__errno_location() = saved_errno };
+}
+
 pub const MAGIC: u32 = 0x5250494f;
 pub const VERSION: u16 = 2;
 pub const STATS_MAGIC: u64 = 0x5250524f46494f31;
@@ -136,5 +212,46 @@ impl Default for Stats {
             source_errors: AtomicU64::new(0),
             finalized: AtomicU64::new(0),
         }
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use std::{
+        os::{
+            fd::AsRawFd,
+            unix::{ffi::OsStrExt, net::UnixDatagram},
+        },
+        sync::atomic::Ordering,
+    };
+
+    #[test]
+    fn executable_metadata_is_captured_in_the_sending_image_without_changing_errno() {
+        let (sender, receiver) = UnixDatagram::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let stats = Stats::default();
+        let instance = process_instance();
+        unsafe { *libc::__errno_location() = libc::ERANGE };
+        send_process_name(sender.as_raw_fd(), &stats, instance);
+        assert_eq!(unsafe { *libc::__errno_location() }, libc::ERANGE);
+        let mut bytes = [0u8; PROCESS_EVENT_SIZE];
+        assert_eq!(receiver.recv(&mut bytes).unwrap(), PROCESS_EVENT_SIZE);
+        let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<ProcessEvent>()) };
+        assert_eq!(event.magic, PROCESS_MAGIC);
+        assert_eq!(event.pid, std::process::id());
+        assert_eq!(event.instance, instance);
+        assert_eq!(event.error, 0);
+        assert_eq!(
+            &event.name[..event.name_len as usize],
+            std::env::current_exe()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .as_bytes()
+        );
+        assert_eq!(stats.attempted.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.sent.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.dropped.load(Ordering::Relaxed), 0);
     }
 }

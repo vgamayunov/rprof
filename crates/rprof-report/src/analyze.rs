@@ -256,6 +256,8 @@ fn analyze_impl(
     let mut python = crate::python_summary::PythonAnalysis::default();
     let mut pytorch = crate::pytorch_summary::PytorchAnalysis::default();
     let mut system_errors = BTreeMap::<Uuid, u64>::new();
+    let mut gpu_errors = BTreeMap::<Uuid, (u64, String)>::new();
+    let mut process_names = BTreeMap::<String, BTreeMap<String, Attribute>>::new();
     let mut storage_errors = BTreeMap::<Uuid, (u64, String)>::new();
     let mut storage_unavailable = BTreeMap::<(Uuid, String), String>::new();
     let data = scan(path, snapshot, |record| {
@@ -279,6 +281,20 @@ fn analyze_impl(
         pytorch.observe(&record);
         if let Record::Chunk(chunk) = record {
             for (event_index, event) in chunk.events.into_iter().enumerate() {
+                if let Payload::Counter(sample) = &event.payload
+                    && sample.name == "process.meta.executable"
+                {
+                    metadata_bytes += serde_json::to_vec(&event)?.len();
+                    ensure!(
+                        metadata_bytes <= 16 * 1024 * 1024,
+                        "report process/track metadata exceeds 16 MiB; use a text summary"
+                    );
+                    process_names.insert(
+                        format!("{}:{}", chunk.shard_id, sample.track_id),
+                        event.attributes,
+                    );
+                    continue;
+                }
                 if let Payload::Counter(sample) = &event.payload
                     && let CounterValue::Integer(value) = sample.value
                 {
@@ -313,6 +329,20 @@ fn analyze_impl(
                 {
                     let previous = system_errors.entry(chunk.shard_id).or_default();
                     *previous = (*previous).max(count);
+                }
+                if let Payload::Counter(sample) = &event.payload
+                    && sample.name == "system.meta.gpu.read_errors"
+                    && let rprof_core::CounterValue::Integer(count) = sample.value
+                {
+                    let previous = gpu_errors.entry(chunk.shard_id).or_default();
+                    if count >= previous.0 {
+                        previous.0 = count;
+                        if let Some(Attribute::Text(detail)) =
+                            event.attributes.get("system.last_error")
+                        {
+                            previous.1 = detail.chars().take(512).collect();
+                        }
+                    }
                 }
                 if let Payload::Span(span) = &event.payload {
                     let stats = categories
@@ -559,6 +589,33 @@ fn analyze_impl(
             dropped: shard.loss.total().to_string(),
         });
     }
+    let mut process_name_errors = 0;
+    for track in &mut tracks {
+        if track.kind != "process" {
+            continue;
+        }
+        if let Some(attributes) = process_names.get(&track.id) {
+            if let Some(Attribute::Text(label)) = attributes.get("process.label") {
+                track.name = label.clone();
+            }
+            for key in [
+                "process.executable",
+                "process.name_source",
+                "process.instance",
+                "process.name_error",
+            ] {
+                if let Some(value) = attributes.get(key) {
+                    let value = match value {
+                        Attribute::Text(value) => value.clone(),
+                        Attribute::Unsigned(value) => value.to_string(),
+                        _ => continue,
+                    };
+                    track.details.insert(key.into(), value);
+                }
+            }
+            process_name_errors += usize::from(attributes.contains_key("process.name_error"));
+        }
+    }
     let track_shards: HashMap<_, _> = tracks
         .iter()
         .map(|t| (t.id.as_str(), t.shard.as_str()))
@@ -573,6 +630,9 @@ fn analyze_impl(
             (offsets[track_shards[counter.track.as_str()]] + local as u128).to_string();
     }
     let mut warnings = clock_layout.warnings;
+    if process_name_errors > 0 {
+        warnings.push(format!("Executable names unavailable for {process_name_errors} process images; PID/image labels are retained. Inspect process.name_error track metadata for details."));
+    }
     let mut system_timeline = system_discovery.start(&clock_layout.offsets);
     let (io_metadata, mut io_series) = if indexed {
         (io_discovery.metadata(&lookup), None)
@@ -613,6 +673,11 @@ fn analyze_impl(
     for (shard, count) in system_errors {
         if count > 0 {
             warnings.push(format!("Host system sampling for shard {shard}: {count} read/parse/topology errors; missing CPU or memory samples are unknown, not zero. Inspect system.meta.read_errors for details."));
+        }
+    }
+    for (shard, (count, error)) in gpu_errors {
+        if count > 0 {
+            warnings.push(format!("GPU monitoring for shard {shard}: {count} NVML read errors; missing utilization or VRAM samples are unknown, not zero. Last: {error}"));
         }
     }
     for (shard, (count, error)) in storage_errors {

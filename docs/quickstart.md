@@ -49,6 +49,10 @@ rprof record --collect openmp --openmp-backend gomp \
 # GPU kernels/copies and CPU CUDA API calls
 rprof record --collect cuda -o cuda.jsonl -- ./app
 
+# Device-wide NVIDIA GPU utilization and VRAM; expand overview -> node -> GPU
+# Uses the driver's NVML library; no CUPTI adapter needed for gauges alone.
+rprof record --collect gpu --gpu-interval-ms 100 -o gpu.jsonl -- ./app
+
 # Linux perf counters (requires permitted perf access; not stack sampling)
 rprof record --collect pmu -o pmu.jsonl -- ./app
 
@@ -65,6 +69,8 @@ Combine compatible collectors with commas, e.g. `--collect io,openmp,pmu`.
 Use `--no-storage` with `--collect io` for POSIX calls alone. See
 [storage monitoring](storage-profiling.md) for block/NFS/Lustre scope and permissions.
 Add `system` for host graphs; `--system-interval-ms 1000` sets their sample interval.
+Add `gpu` for device-wide NVIDIA utilization/VRAM graphs; combine `gpu,cuda` for
+both sampled device metrics and detailed application kernel timelines.
 See [system metrics](system-profiling.md) for multi-host sampling and clock alignment.
 Python `ranges` records annotations added with `rprof_python.range("name")`;
 without annotations it provides interpreter diagnostics, not function spans.

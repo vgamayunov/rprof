@@ -136,6 +136,11 @@ pub extern "C" fn rprof_io_init() {
         (*stats).initialized.fetch_add(1, Ordering::Relaxed);
     }
     SOCKET.store(socket, Ordering::Release);
+    rprof_io_protocol::send_process_name(
+        socket,
+        unsafe { &*stats },
+        INSTANCE.load(Ordering::Relaxed),
+    );
 }
 
 /// Called by the C pthread_atfork child handler. No locks, allocation, or inherited
@@ -157,6 +162,11 @@ pub extern "C" fn rprof_io_after_fork() {
         unsafe {
             (*stats).initialized.fetch_add(1, Ordering::Relaxed);
         }
+        rprof_io_protocol::send_process_name(
+            SOCKET.load(Ordering::Acquire),
+            unsafe { &*stats },
+            INSTANCE.load(Ordering::Relaxed),
+        );
     }
 }
 

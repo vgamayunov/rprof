@@ -1,5 +1,5 @@
-import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, storageBins, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
-import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, StorageBin, StorageGraph, TimelineRow, Track, TrackData } from './model.js';
+import { averageNs, COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, integerPlotValues, ioBinMetrics, ioGraphBins, ioMetricValues, isCollectorHealth, isMemorySystem, lowerBound, matchesFilter, observedRate, regionThreads, setIoWindow, SPAN_PITCH, SPAN_TOP, storageBins, SYSTEM_KINDS, SYSTEM_LABELS, systemPointsConnected, timelineRows, timeToX, visibleSpans, xToTime } from './model.js';
+import type { CudaDevice, CudaRuntime, Domain, IndexedCounter, IndexedSpan, IoGraph, IoMetric, IoSummary, IoTimeBin, OpenmpRegion, OpenmpRuntime, PmuHost, PytorchSource, PythonRuntime, Report, Shard, StorageBin, StorageGraph, SystemKind, TimelineRow, Track, TrackData } from './model.js';
 import { canvasThemes, initialTheme, rememberTheme } from './theme.js';
 import type { Theme } from './theme.js';
 import { formatBytes, formatByteRate, formatMeanLatency } from './model.js';
@@ -76,7 +76,7 @@ class Viewer {
   private readonly ruler: HTMLCanvasElement;
   private readonly detail: HTMLElement;
   private readonly rangeLabel: HTMLElement;
-  private readonly systemButtons = new Map<'cpu' | 'memory', HTMLButtonElement>();
+  private readonly systemButtons = new Map<SystemKind, HTMLButtonElement>();
   private readonly tooltip: HTMLElement;
   private readonly collapsed: Set<string>;
   private readonly hits: Hit[] = [];
@@ -245,9 +245,10 @@ class Viewer {
       });
       this.windowStatus.after(retry);
     }
-    if (report.tracks.some(track => track.kind === 'system')) for (const [kind, label] of [['cpu', 'CPU ▸'], ['memory', 'Memory ▸']] as const) {
-      const button = node('button', '', label);
-      button.type = 'button'; button.setAttribute('aria-label', `Expand ${kind} system graphs`);
+    for (const kind of SYSTEM_KINDS) {
+      if (!report.tracks.some(track => track.kind === 'system' && track.details.resource === kind)) continue;
+      const button = node('button', '', `${SYSTEM_LABELS[kind]} ▸`);
+      button.type = 'button'; button.setAttribute('aria-label', `Expand ${kind.replace('_', ' ')} system graphs`);
       button.addEventListener('click', () => {
         const key = `system:${this.domain?.id}:${kind}`;
         // Search temporarily reveals children: clicking while filtered clears
@@ -1090,9 +1091,9 @@ class Viewer {
       const key = `system:${this.domain?.id}:${kind}`;
       button.hidden = !this.rows.some(row => row.key === key);
       const expanded = this.rows.find(row => row.key === key)?.expanded ?? false;
-      button.textContent = `${kind === 'cpu' ? 'CPU' : 'Memory'} ${expanded ? '▾' : '▸'}`;
+      button.textContent = `${SYSTEM_LABELS[kind]} ${expanded ? '▾' : '▸'}`;
       button.setAttribute('aria-expanded', String(expanded));
-      button.setAttribute('aria-label', `${expanded ? 'Collapse' : 'Expand'} ${kind} system graphs`);
+      button.setAttribute('aria-label', `${expanded ? 'Collapse' : 'Expand'} ${kind.replace('_', ' ')} system graphs`);
     }
     const top = this.rows.at(-1)?.top ?? 0;
     const height = this.rows.at(-1)?.height ?? 0;
@@ -1357,7 +1358,8 @@ class Viewer {
       ctx.fillText(this.ellipsize(ctx, row.label, maxWidth), labelX, y + row.height / 2 + (row.system ? -3 : 4));
       if (row.system) {
         ctx.font = '10px system-ui'; ctx.fillStyle = this.colors.muted;
-        const subtitle = row.system === 'cpu' ? 'CPU utilization · 0–100%' : 'Memory used · includes cache';
+        const subtitle = row.system === 'cpu' ? 'CPU utilization · 0–100%' : row.system === 'memory' ? 'Memory used · includes cache' :
+          row.system === 'gpu' ? 'Device-wide GPU busy · 0–100%' : 'Device-wide VRAM used';
         ctx.fillText(this.ellipsize(ctx, subtitle, maxWidth), labelX, y + row.height / 2 + 13);
       }
       if (row.storage) {
@@ -1535,8 +1537,9 @@ class Viewer {
     const indices: number[] = [];
     for (let i = first; i < last; i += stride) indices.push(i);
     if (last > first && indices.at(-1) !== last - 1) indices.push(last - 1);
-    const values = indices.map(i => Number(samples[i]!.counter.value) / (row.system === 'memory' ? 2 ** 30 : 1));
-    const max = row.system === 'cpu' ? 100 : row.capacity !== undefined ? Number(BigInt(row.capacity)) / 2 ** 30 : Math.max(0, ...values.filter(Number.isFinite));
+    const memory = isMemorySystem(row.system!);
+    const values = indices.map(i => Number(samples[i]!.counter.value) / (memory ? 2 ** 30 : 1));
+    const max = !memory ? 100 : row.capacity !== undefined ? Number(BigInt(row.capacity)) / 2 ** 30 : Math.max(0, ...values.filter(Number.isFinite));
     const range = max || 1;
     ctx.strokeStyle = this.colors.grid; ctx.lineWidth = 1;
     ctx.beginPath();
@@ -1585,7 +1588,7 @@ class Viewer {
     }
     ctx.lineWidth = 1; ctx.textAlign = 'right'; ctx.font = '600 10px system-ui';
     for (const fraction of [0, 1]) {
-      const label = row.system === 'cpu' ? `${max * fraction}%` : `${(max * fraction).toLocaleString(undefined, { maximumSignificantDigits: 4 })} GiB`;
+      const label = !memory ? `${max * fraction}%` : `${(max * fraction).toLocaleString(undefined, { maximumSignificantDigits: 4 })} GiB`;
       const py = fraction ? top + 9 : bottom - 3;
       ctx.strokeStyle = this.colors.background; ctx.lineWidth = 3; ctx.strokeText(label, this.scroll.clientWidth - 8, py);
       ctx.fillStyle = this.colors.muted; ctx.fillText(label, this.scroll.clientWidth - 8, py);
@@ -1593,8 +1596,9 @@ class Viewer {
     ctx.lineWidth = 1; ctx.textAlign = 'left'; ctx.font = '10px system-ui';
     const source = samples[0]!.counter.attributes['system.report_samples'];
     const count = source && source !== String(samples.length) ? `${samples.length}/${source} full-run samples` : `${samples.length} samples`;
-    const scope = row.track?.id.startsWith('system:') ? 'aligned host estimate' : 'host-wide, not application usage';
-    ctx.fillText(`${count} · ${scope}${row.system === 'memory' && row.capacity === undefined ? ' · capacity unknown' : ''}`, LABEL_WIDTH + 8, y + row.height - 5);
+    const scope = row.track?.id.startsWith('system:') ? 'aligned host estimate' :
+      row.system === 'gpu' || row.system === 'gpu_memory' ? 'NVML device-wide, not application usage' : 'host-wide, not application usage';
+    ctx.fillText(`${count} · ${scope}${memory && row.capacity === undefined ? ' · capacity unknown' : ''}`, LABEL_WIDTH + 8, y + row.height - 5);
   }
 
   private drawIoGraph(ctx: CanvasRenderingContext2D, row: TimelineRow, y: number, end: bigint): void {

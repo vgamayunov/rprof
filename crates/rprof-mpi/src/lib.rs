@@ -100,6 +100,7 @@ pub extern "C" fn rprof_mpi_init() {
         (*stats).initialized.fetch_add(1, Ordering::Relaxed);
     }
     SOCKET.store(fd, Ordering::Release);
+    rprof_io_protocol::send_process_name(fd, unsafe { &*stats }, instance);
 }
 
 /// # Safety

@@ -448,9 +448,16 @@ export function ioGraph(report: Report, domain: string, filesystem: string): IoG
     }
     const processKey = `io:process:${domain}:${JSON.stringify([series.shard, series.pid, series.process_instance])}`;
     let process = processes.get(processKey);
-    if (!process) { process = { key: processKey, label: `PID ${series.pid} · ${series.process_instance || 'process'}`,
-      search: `io read write pid ${series.pid} ${series.process_instance} ${shard.hostname}`, bins: remote ? remote[processKey] ?? [] : null, children: [], shard };
-      processes.set(processKey, process); parent.children.push(process); }
+    if (!process) {
+      const threadTrack = tracks.get(series.thread_track);
+      const processTrack = threadTrack?.parent ? tracks.get(threadTrack.parent) : undefined;
+      const named = processTrack?.kind === 'process' && processTrack.shard === series.shard &&
+        processTrack.details.pid === series.pid && processTrack.details['process.instance'] === series.process_instance &&
+        processTrack.details['process.executable'];
+      process = { key: processKey, label: named ? processTrack.name : `PID ${series.pid} · ${series.process_instance || 'process'}`,
+        search: `io read write pid ${series.pid} ${series.process_instance} ${shard.hostname}`, bins: remote ? remote[processKey] ?? [] : null, children: [], shard };
+      processes.set(processKey, process); parent.children.push(process);
+    }
     const threadKey = `io:thread:${domain}:${series.thread_track}`;
     let thread = threads.get(threadKey);
     if (!thread) {
@@ -554,7 +561,7 @@ export interface TrackData { spans: SpanIndex; counters: Map<string, IndexedCoun
 export interface TimelineRow {
   key: string; kind: 'shard' | 'rank' | 'track' | 'counter' | 'io' | 'storage'; label: string; depth: number;
   height: number; top: number; shard: Shard; track?: Track; series?: string; hasChildren: boolean;
-  system?: 'cpu' | 'memory'; capacity?: string; expanded?: boolean; io?: IoGraph; storage?: StorageGraph;
+  system?: SystemKind; capacity?: string; expanded?: boolean; io?: IoGraph; storage?: StorageGraph;
 }
 
 // Canvas row geometry (CSS pixels). Span bars start 7px from the top, are 11px
@@ -565,10 +572,20 @@ export const SPAN_PITCH = 14;
 export const COUNTER_PLOT_TOP = 8;
 export const COUNTER_PLOT_HEIGHT = 18;
 
-const SYSTEM_SERIES = { cpu: 'system.cpu.utilization [%; float]', memory: 'system.memory.used [bytes; integer]' } as const;
+export const SYSTEM_KINDS = ['cpu', 'memory', 'gpu', 'gpu_memory'] as const;
+export type SystemKind = typeof SYSTEM_KINDS[number];
+export const SYSTEM_LABELS = { cpu: 'CPU', memory: 'Memory', gpu: 'GPU', gpu_memory: 'GPU memory' } as const;
+const SYSTEM_SERIES = { cpu: 'system.cpu.utilization [%; float]', memory: 'system.memory.used [bytes; integer]',
+  gpu: 'system.gpu.utilization [%; float]', gpu_memory: 'system.gpu.memory.used [bytes; integer]' } as const;
+const SYSTEM_TITLES = { cpu: 'CPU utilization · host average', memory: 'Memory used incl cache · host total',
+  gpu: 'GPU utilization · device average', gpu_memory: 'GPU memory used · device total' } as const;
+
+export function isMemorySystem(kind: SystemKind): boolean {
+  return kind === 'memory' || kind === 'gpu_memory';
+}
 
 interface SystemGraph { key: string; label: string; track: Track; shard: Shard; series: string;
-  kind: 'cpu' | 'memory'; capacity?: string; children: SystemGraph[]; search: string }
+  kind: SystemKind; capacity?: string; children: SystemGraph[]; search: string }
 const systemCache = new WeakMap<Map<string, TrackData>, Map<string, SystemGraph[]>>();
 
 export function defaultTimelineCollapsed(report: Report): Set<string> {
@@ -591,7 +608,7 @@ export function defaultTimelineCollapsed(report: Report): Set<string> {
     for (const fs of root.children) keys.add(fs.key);
   }
   for (const track of report.tracks) {
-    if (track.kind !== 'system' || track.parent || !['cpu', 'memory'].includes(track.details.resource ?? '')) continue;
+    if (track.kind !== 'system' || track.parent || !Object.hasOwn(SYSTEM_SERIES, track.details.resource ?? '')) continue;
     const domain = shards.get(track.shard)?.domain;
     if (domain) {
       keys.add(`system:${domain}:${track.details.resource}`);
@@ -640,7 +657,7 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
   if (!report.shards || !report.domains) return new Map();
   const shards = new Map(report.shards.map(shard => [shard.id, shard]));
   const children = new Map<string, Track[]>();
-  const sourceGroups = new Map<string, Map<'cpu' | 'memory', Map<string, Track[]>>>();
+  const sourceGroups = new Map<string, Map<SystemKind, Map<string, Track[]>>>();
   for (const track of report.tracks) {
     if (track.kind !== 'system') continue;
     if (track.parent) {
@@ -650,7 +667,7 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
     }
     const shard = shards.get(track.shard);
     const kind = track.details.resource;
-    if (!shard || (kind !== 'cpu' && kind !== 'memory')) continue;
+    if (!shard || (kind !== 'cpu' && kind !== 'memory' && kind !== 'gpu' && kind !== 'gpu_memory')) continue;
     if (!sourceGroups.has(shard.domain)) sourceGroups.set(shard.domain, new Map());
     const byKind = sourceGroups.get(shard.domain)!;
     if (!byKind.has(kind)) byKind.set(kind, new Map());
@@ -661,7 +678,7 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
   }
   for (const domain of report.domains) {
     const graphs: SystemGraph[] = [];
-    for (const kind of ['cpu', 'memory'] as const) {
+    for (const kind of SYSTEM_KINDS) {
       const hosts = sourceGroups.get(domain.id)?.get(kind) ?? new Map<string, Track[]>();
       const hostGraphs: SystemGraph[] = [];
       for (const [hostId, sources] of [...hosts].sort(([a], [b]) => a.localeCompare(b))) {
@@ -673,23 +690,26 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
         const shard = shards.get(root.shard)!;
         const series = SYSTEM_SERIES[kind];
         const samples = data.get(root.id)?.counters.get(series) ?? [];
-        const capacity = kind === 'memory' ? maxSystemCapacity(samples) : undefined;
+        const capacity = isMemorySystem(kind) ? maxSystemCapacity(samples) : undefined;
         const prefix = `system:${domain.id}:${kind}`;
-        const host: SystemGraph = { key: `${prefix}:host:${hostId}`, label: `${shard.hostname || hostId} · ${kind === 'cpu' ? 'CPU average' : 'Memory used incl cache'}${sources.length > 1 ? ` · 1 of ${sources.length} rank sources` : ''}`,
+        const title = kind === 'cpu' ? 'CPU average' : kind === 'memory' ? 'Memory used incl cache' :
+          kind === 'gpu' ? 'GPU average' : 'GPU memory total';
+        const host: SystemGraph = { key: `${prefix}:host:${hostId}`, label: `${shard.hostname || hostId} · ${title}${sources.length > 1 ? ` · 1 of ${sources.length} rank sources` : ''}`,
           track: root, shard, series, kind, capacity, children: [], search: `${hostId} ${shard.hostname} host ${kind} ${series}` };
         const seen = new Set<string>();
         for (const child of (children.get(root.id) ?? []).sort((a, b) => {
           const id = (track: Track) => Number(track.details.resource?.split(':')[1]);
-          return id(a) - id(b) || a.id.localeCompare(b.id);
+          return id(a) - id(b) || a.name.localeCompare(b.name, undefined, { numeric: true }) || a.id.localeCompare(b.id);
         })) {
           const resource = child.details.resource ?? '';
-          if (seen.has(resource) || !resource.startsWith(kind === 'cpu' ? 'cpu:' : 'node:')) continue;
+          if (seen.has(resource) || !resource.startsWith(kind === 'memory' ? 'node:' : `${kind}:`)) continue;
           seen.add(resource);
           const childSamples = data.get(child.id)?.counters.get(series) ?? [];
-          const childCapacity = kind === 'memory' ? maxSystemCapacity(childSamples) : undefined;
+          const childCapacity = isMemorySystem(kind) ? maxSystemCapacity(childSamples) : undefined;
           const number = resource.split(':')[1];
-          host.children.push({ key: `${host.key}:${resource}`, label: kind === 'cpu' ? `Logical CPU ${number}` : `NUMA node ${number}`,
-            track: child, shard, series, kind, capacity: childCapacity, children: [], search: `${host.search} ${resource} ${kind === 'cpu' ? 'logical cpu' : 'numa node'} ${number}` });
+          const label = kind === 'cpu' ? `Logical CPU ${number}` : kind === 'memory' ? `NUMA node ${number}` : child.name;
+          host.children.push({ key: `${host.key}:${resource}`, label,
+            track: child, shard, series, kind, capacity: childCapacity, children: [], search: `${host.search} ${resource} ${label}` });
         }
         hostGraphs.push(host);
       }
@@ -699,13 +719,13 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
       let series = first.series;
       const key = `system:${domain.id}:${kind}`;
       if (hostGraphs.length > 1) {
-        track = { ...first.track, id: key, name: kind === 'cpu' ? 'Host CPU average (sampled estimate)' : 'Host memory total (sampled estimate)' };
+        track = { ...first.track, id: key, name: `${SYSTEM_TITLES[kind]} (sampled estimate)` };
         const samples = aggregateSystem(hostGraphs, data, kind, track.id, domain);
         data.set(track.id, { spans: indexSpans([]), counters: new Map([[series, samples]]) });
       }
-      const capacity = kind === 'memory' && hostGraphs.every(host => host.capacity !== undefined) ?
+      const capacity = isMemorySystem(kind) && hostGraphs.every(host => host.capacity !== undefined) ?
         hostGraphs.reduce((sum, host) => sum + BigInt(host.capacity!), 0n).toString() : undefined;
-      graphs.push({ key, label: kind === 'cpu' ? 'CPU utilization · host average' : 'Memory used incl cache · host total',
+      graphs.push({ key, label: SYSTEM_TITLES[kind],
         track, series, shard: first.shard, kind, capacity, children: hostGraphs,
         search: `${kind} system ${series} ${hostGraphs.map(host => host.search).join(' ')}` });
     }
@@ -714,7 +734,7 @@ function indexSystem(report: Report, data: Map<string, TrackData>): Map<string, 
   return domains;
 }
 
-function aggregateSystem(hosts: SystemGraph[], data: Map<string, TrackData>, kind: 'cpu' | 'memory', track: string, domain: Domain): IndexedCounter[] {
+function aggregateSystem(hosts: SystemGraph[], data: Map<string, TrackData>, kind: SystemKind, track: string, domain: Domain): IndexedCounter[] {
   const lists = hosts.map(host => data.get(host.track.id)?.counters.get(host.series) ?? []);
   const intervals = lists.flatMap(list => list.slice(0, 1).map(item => {
     const value = item.counter.attributes['system.interval_ns'];
@@ -746,16 +766,25 @@ function aggregateSystem(hosts: SystemGraph[], data: Map<string, TrackData>, kin
     }
     if (values.size !== hosts.length) continue;
     const members = [...values.values()];
-    const gap = previous === undefined || bin !== previous + 1n || members.some(item => item.counter.attributes['system.report_gap_before'] === 'true');
+    const weights = members.map(item => kind === 'gpu' ? Number(item.counter.attributes['system.gpu.count']) : 1);
+    if (weights.some(weight => !Number.isSafeInteger(weight) || weight <= 0)) continue;
+    const weight = weights.reduce((sum, value) => sum + value, 0);
+    const gap = previous === undefined || bin !== previous + 1n ||
+      members.some(item => item.counter.attributes['system.report_gap_before'] === 'true' || item.counter.attributes['system.gap_before'] === 'true');
     previous = bin;
-    const value = kind === 'memory' ? members.reduce((sum, item) => sum + BigInt(item.counter.value), 0n).toString() :
-      (members.reduce((sum, item) => sum + Number(item.counter.value), 0) / members.length).toString();
+    const memory = isMemorySystem(kind);
+    const value = memory ? members.reduce((sum, item) => sum + BigInt(item.counter.value), 0n).toString() :
+      (members.reduce((sum, item, i) => sum + Number(item.counter.value) * weights[i]!, 0) / weight).toString();
     // Choose an observed timestamp, never a midpoint outside a partial final bin.
     const latest = members.reduce((time, item) => item.time > time ? item.time : time, 0n);
     const time = latest > BigInt(domain.end_ns) ? BigInt(domain.end_ns) : latest;
-    result.push({ time, counter: { track, name: kind === 'cpu' ? 'system.cpu.utilization' : 'system.memory.used',
-      timestamp_ns: time.toString(), value, value_type: kind === 'cpu' ? 'float' : 'integer', unit: kind === 'cpu' ? '%' : 'bytes',
-      attributes: { 'system.aggregate': kind === 'cpu' ? 'equal-weight mean of host CPU utilization; sampled estimate' : 'sum of host used bytes; sampled estimate',
+    result.push({ time, counter: { track, name: kind === 'cpu' ? 'system.cpu.utilization' : kind === 'memory' ? 'system.memory.used' :
+        kind === 'gpu' ? 'system.gpu.utilization' : 'system.gpu.memory.used',
+      timestamp_ns: time.toString(), value, value_type: memory ? 'integer' : 'float', unit: memory ? 'bytes' : '%',
+      attributes: { 'system.aggregate': kind === 'cpu' ? 'equal-weight mean of host CPU utilization; sampled estimate' :
+          kind === 'gpu' ? 'device-count-weighted mean of host GPU utilization; sampled estimate' :
+          kind === 'gpu_memory' ? 'sum of device-wide GPU used bytes across hosts; sampled estimate' : 'sum of host used bytes; sampled estimate',
+        ...(kind === 'gpu' ? { 'system.gpu.count': String(weight) } : {}),
         'system.coverage': `${hosts.length}/${hosts.length} hosts with fresh observations (same or adjacent bin within half a sample interval)`,
         'system.aggregate_time': latest === time ? 'latest contributing host observation, not a simultaneous measurement' :
           'latest contributing host observation clamped to clock-domain end; not a simultaneous measurement',
@@ -1028,6 +1057,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
 }
 
 export function isCollectorHealth(name: string): boolean {
+  if (name.startsWith('process.meta.')) return true;
   if (name.startsWith('system.meta.') || name.startsWith('storage.meta.')) return true;
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||
     name === 'mpi.clock.uncertainty_ns' || name.startsWith('openmp.meta.') || name.startsWith('cuda.meta.') || name.startsWith('pmu.meta.') ||

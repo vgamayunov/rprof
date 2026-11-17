@@ -59,6 +59,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
     let python_enabled = args.collectors.contains(&CollectorKind::Python);
     let system_enabled = args.collectors.contains(&CollectorKind::System);
+    let gpu_enabled = args.collectors.contains(&CollectorKind::Gpu);
     let storage_enabled =
         args.collectors.contains(&CollectorKind::Storage) || (io_enabled && !args.no_storage);
     ensure!(
@@ -72,6 +73,10 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     ensure!(
         system_enabled || args.system_interval_ms == 1000,
         "--system-interval-ms requires --collect system"
+    );
+    ensure!(
+        gpu_enabled || args.gpu_interval_ms == 1000,
+        "--gpu-interval-ms requires --collect gpu"
     );
     ensure!(
         python_enabled
@@ -92,6 +97,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             args.io_buffer_events as usize,
             inline,
         )?)
+    } else {
+        None
+    };
+    let mut gpu_prepared = if gpu_enabled {
+        Some(crate::gpu_collector::Prepared::new()?)
     } else {
         None
     };
@@ -227,6 +237,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             pmu_enabled.then_some("pmu"),
             python_enabled.then_some("python"),
             system_enabled.then_some("system"),
+            gpu_enabled.then_some("gpu"),
             storage_enabled.then_some("storage"),
         ]
         .into_iter()
@@ -252,6 +263,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut pmu_running = None;
     let mut python_running = None;
     let mut system_running = None;
+    let mut gpu_running: Option<crate::gpu_collector::Running> = None;
     let mut storage_running = None;
     let mut environment = vec![
         (
@@ -337,6 +349,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     } else {
                         u64::MAX
                     })
+                    .min(if gpu_enabled {
+                        args.gpu_interval_ms
+                    } else {
+                        u64::MAX
+                    })
                     .min(if storage_enabled {
                         args.storage_interval_ms
                     } else {
@@ -348,6 +365,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             ..Default::default()
         },
         |notification| {
+            if matches!(&notification, supervisor::Event::Heartbeat { .. })
+                && let Some(gpu) = &mut gpu_running
+            {
+                gpu.sample(&sink, elapsed()?, false)?;
+            }
             let now = elapsed()?;
             let mut out = sink
                 .lock()
@@ -392,6 +414,15 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                             session_id,
                         )?;
                     }
+                    if let Some(prepared) = gpu_prepared.take() {
+                        gpu_running = crate::gpu_collector::Running::start(
+                            prepared,
+                            &mut out,
+                            now,
+                            args.gpu_interval_ms,
+                            session_id,
+                        )?;
+                    }
                     drop(out);
                     if let Some(prepared) = io_prepared.take() {
                         io_running = Some(prepared.start(Arc::clone(&sink), origin)?);
@@ -418,6 +449,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                             args.storage_interval_ms,
                             session_id,
                         )?;
+                    }
+                    if let Some(gpu) = &mut gpu_running {
+                        gpu.sample(&sink, elapsed()?, true)?;
                     }
                 }
                 supervisor::Event::Heartbeat { .. } => {
@@ -470,6 +504,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             system.sample(&mut out, elapsed()?, true)
         })
         .transpose();
+    let gpu_result = gpu_running
+        .map(|gpu| gpu.finish(&sink, elapsed()?))
+        .transpose();
     let io_result = io_running
         .map(native_collector::Running::finish)
         .transpose();
@@ -496,6 +533,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let result = result.and_then(|outcome| {
         storage_result?;
         system_result?;
+        gpu_result?;
         pmu_result?;
         if let Some(python)=python_result?{
             eprintln!("Python: {} packets received; {} observed drops/omitted callbacks; {} initialized interpreters",python.received,python.dropped,python.initialized);
@@ -557,6 +595,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
         .into_inner()
         .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
     let duration_ns = elapsed()?;
+    sink.finish_process_names(duration_ns)?;
     if workload_status.is_some() {
         sink.reliable(Event::new(
             duration_ns,

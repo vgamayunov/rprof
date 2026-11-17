@@ -3,6 +3,7 @@ compile_error!("rprof process supervision currently requires Linux");
 
 mod capture_sink;
 mod cuda_collector;
+mod gpu_collector;
 mod mpi_collector;
 mod native_collector;
 mod openmp_collector;
@@ -119,6 +120,9 @@ pub(crate) struct RecordArgs {
     /// Host CPU/memory sampling interval, including logical CPUs and NUMA nodes.
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
     system_interval_ms: u64,
+    /// Device-wide NVIDIA GPU utilization/VRAM polling interval (NVML driver required).
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
+    gpu_interval_ms: u64,
     /// Host block-device/NFS/Lustre sampling interval (also enabled by --collect io).
     #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(100..=60000))]
     storage_interval_ms: u64,
@@ -153,6 +157,7 @@ pub(crate) enum CollectorKind {
     Pmu,
     Python,
     System,
+    Gpu,
     Storage,
 }
 
