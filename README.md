@@ -276,3 +276,6 @@ TypeScript, generated assets, and headless browser interactions.
 
 See [architecture](docs/architecture.md), the [implementation plan](docs/roadmap.md),
 and [testing](docs/testing.md), including the GPU/MPI test environments.
+
+Hardware validation workloads live in [miniapps/](miniapps/README.md), starting
+with Intel MKL CPU DGEMM and NVIDIA cuBLAS GPU matrix multiplication.
