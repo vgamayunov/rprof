@@ -4,8 +4,46 @@ import { ioGraph, ioGraphBins, ioMetricValues } from '../src/model.ts';
 import { formatBytes, formatByteRate, formatMeanLatency } from '../src/model.ts';
 import { ioFixture } from './io-fixture.ts';
 import { gpuFixture } from './gpu-fixture.ts';
+import { mpiCallTotals, sortSummaryRows } from '../src/model.ts';
 import { aggregateIoBins, averageNs, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, indexSpans, integerPlotValues, ioBinMetrics, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, systemGapPrefix, systemPointsConnected, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
 import type { CudaDevice, IoFilesystem, IoTimeBin, OpenmpRegion, Report, Span } from '../src/model.ts';
+
+test('MPI API totals sum rank sources exactly without leaking other clock domains or inventing byte coverage', () => {
+  const report = ioFixture();
+  report.mpi = [
+    { shard: 's0', rank: 0, name: 'MPI_Send', calls: '9007199254740993', errors: '1', total_ns: '9007199254740993',
+      max_ns: '7', logical_bytes: '9007199254740993', calls_with_bytes: '1' },
+    { shard: 's1', rank: 1, name: 'MPI_Send', calls: '2', errors: '2', total_ns: '20',
+      max_ns: '10', logical_bytes: '0', calls_with_bytes: '0' },
+    { shard: 's2', rank: 0, name: 'MPI_Send', calls: '999', errors: '9', total_ns: '999',
+      max_ns: '999', logical_bytes: '999', calls_with_bytes: '999' },
+    { shard: 's0', rank: 0, name: 'MPI_Barrier', calls: '1', errors: '0', total_ns: '3',
+      max_ns: '3', logical_bytes: '0', calls_with_bytes: '0' },
+  ];
+  const original = structuredClone(report.mpi);
+  const totals = mpiCallTotals(report, '0');
+  assert.deepEqual(totals[0], { name: 'MPI_Send', calls: '9007199254740995', errors: '3', total_ns: '9007199254741013',
+    max_ns: '10', logical_bytes: '9007199254740993', calls_with_bytes: '1' });
+  assert.equal(totals[1]!.calls_with_bytes, '0');
+  assert.equal(mpiCallTotals(report, '1')[0]!.calls, '999');
+  assert.deepEqual(mpiCallTotals(report, undefined), []);
+  assert.deepEqual(report.mpi, original);
+});
+
+test('summary sorting preserves adjacent large integers, natural identifiers, stable ties, and unknowns last', () => {
+  const rows = [
+    { name: 'low', value: 9007199254740992n }, { name: 'unknown', value: undefined },
+    { name: 'high', value: 9007199254740993n }, { name: 'two-a', value: 2n },
+    { name: 'zero', value: 0n }, { name: 'two-b', value: 2n },
+  ];
+  assert.deepEqual(sortSummaryRows(rows, row => row.value, 'descending').map(row => row.name),
+    ['high', 'low', 'two-a', 'two-b', 'zero', 'unknown']);
+  assert.deepEqual(sortSummaryRows(rows, row => row.value, 'ascending').map(row => row.name),
+    ['zero', 'two-a', 'two-b', 'low', 'high', 'unknown']);
+  assert.deepEqual(rows.map(row => row.name), ['low', 'unknown', 'high', 'two-a', 'zero', 'two-b']);
+  assert.deepEqual(sortSummaryRows(['10 / 0', '2 / 10', '2 / 2'], value => value, 'ascending'),
+    ['2 / 2', '2 / 10', '10 / 0']);
+});
 
 test('I/O bins use actual short durations, exact counts, weighted latency and unknown empty-bin latency', () => {
   const bin: IoTimeBin = { start_ns: '1000000000', duration_ns: '250000000', read_bytes: '1048576', write_bytes: '0',

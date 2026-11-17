@@ -131,6 +131,42 @@ export interface MpiCallSummary {
   total_ns: string; max_ns: string; logical_bytes: string; calls_with_bytes: string;
 }
 
+export type MpiCallTotal = Omit<MpiCallSummary, 'shard' | 'rank'>;
+export function mpiCallTotals(report: Report, domain: string | undefined): MpiCallTotal[] {
+  const shards = new Set(report.shards.filter(shard => shard.domain === domain).map(shard => shard.id));
+  const totals = new Map<string, MpiCallTotal>();
+  for (const row of report.mpi ?? []) {
+    if (!shards.has(row.shard)) continue;
+    let total = totals.get(row.name);
+    if (!total) {
+      total = { name: row.name, calls: '0', errors: '0', total_ns: '0', max_ns: '0', logical_bytes: '0', calls_with_bytes: '0' };
+      totals.set(row.name, total);
+    }
+    for (const key of ['calls', 'errors', 'total_ns', 'logical_bytes', 'calls_with_bytes'] as const)
+      total[key] = (BigInt(total[key]) + BigInt(row[key])).toString();
+    if (BigInt(row.max_ns) > BigInt(total.max_ns)) total.max_ns = row.max_ns;
+  }
+  return [...totals.values()];
+}
+
+export type SortDirection = 'ascending' | 'descending';
+export type SummarySortValue = string | bigint | undefined;
+const summaryCollator = new Intl.Collator(undefined, { numeric: true });
+
+// Sort raw values before paging; missing measurements stay last in either direction.
+export function sortSummaryRows<T>(rows: readonly T[], value: (row: T) => SummarySortValue, direction: SortDirection): T[] {
+  return rows.map((row, index) => ({ row, index, value: value(row) })).sort((a, b) => {
+    if (a.value === b.value) return a.index - b.index;
+    if (a.value === undefined) return 1;
+    if (b.value === undefined) return -1;
+    let comparison: number;
+    if (typeof a.value === 'bigint' && typeof b.value === 'bigint') comparison = a.value < b.value ? -1 : 1;
+    else if (typeof a.value === 'string' && typeof b.value === 'string') comparison = summaryCollator.compare(a.value, b.value);
+    else throw new Error('Summary sort values must have matching types');
+    return (direction === 'ascending' ? comparison : -comparison) || a.index - b.index;
+  }).map(item => item.row);
+}
+
 export interface OpenmpSummary {
   runtimes: OpenmpRuntime[]; regions: OpenmpRegion[]; threads: OpenmpThread[];
   tasks_created: string; tasks_completed: string; execution_segments: string;

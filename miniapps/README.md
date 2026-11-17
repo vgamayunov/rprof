@@ -5,6 +5,81 @@ hardware. These are opt-in hardware tests, not part of the CPU-only Cargo suite.
 Keep build products in `target/` and captures/reports in their existing ignored
 directories. Run on allocated compute resources, not a cluster login node.
 
+## MPI Allreduce
+
+`allreduce/` performs blocking `MPI_Allreduce` with `MPI_SUM` on FP64 vectors.
+Each rank contributes deterministic, nonuniform values based on its rank and
+element index. Every result element is checked against an independent exact
+integer formula, so validation does not depend on reduction ordering or a
+floating-point tolerance.
+
+Build the mini-app and PMPI adapter with the **same MPI module**. On `tst3`:
+
+```bash
+module add mpi/hpcx
+make -C miniapps/allreduce
+make mpi PROFILE=release MPICC=mpicc
+```
+
+The executable is `target/miniapps/allreduce`. Options are `--count N` (double
+elements per rank, default 1048576) and `--iterations N` (default 32). Each run
+performs one warm-up and a barrier before the timed calls, then validates the
+full output outside the timing. An additional one-element integer Allreduce
+combines validation failures, and a Reduce reports the slowest rank's elapsed
+time. Thus each rank records `iterations + 2` Allreduce calls, of which
+`iterations + 1` use the requested vector size. Timings are not an overhead
+study; reported logical payload throughput is not network wire bandwidth.
+
+Run small/odd-count and argument checks within an allocation:
+
+```bash
+make -C miniapps/allreduce check MPIRUN_FLAGS="--bind-to core"
+```
+
+### Profile across two nodes
+
+Inside a two-node Slurm allocation, launch **one profiler per MPI rank**, not one
+profiler around `mpirun`. For example, with the HPC-X module active on two
+`hbv4` nodes and all paths on shared storage:
+
+```bash
+module add mpi/hpcx
+export RPROF_SESSION_ID=$(cat /proc/sys/kernel/random/uuid)
+run="$PWD/captures/miniapps/allreduce-$SLURM_JOB_ID-$RPROF_SESSION_ID"
+mkdir -p "$run" reports/miniapps
+mpirun -np 2 --map-by ppr:1:node --bind-to core \
+  -x RPROF_SESSION_ID -x PATH -x LD_LIBRARY_PATH \
+  "$PWD/target/release/rprof" record --collect mpi,system --mpi-clock-sync \
+  --system-interval-ms 100 --queue-chunks 64 --output-dir "$run" -- \
+  "$PWD/target/miniapps/allreduce" --count 8388608 --iterations 128
+target/release/rprof merge -o "$run/merged.jsonl" "$run/"*.rprof.jsonl
+target/release/rprof report "$run/merged.jsonl" --format html \
+  -o "reports/miniapps/allreduce-$SLURM_JOB_ID.html"
+```
+
+This uses one rank/core per node, two 64 MiB buffers per rank, and 128 timed
+64 MiB collectives. Select transport/collective settings appropriate to the
+cluster and propagate them to all ranks; see [MPI profiling](../docs/mpi-profiling.md)
+for the tested HBv4 InfiniBand/UCX configuration. Clock calibration is an
+explicit offset estimate with reported uncertainty, not exact clock alignment.
+Inspect both rank lanes, MPI_Allreduce counts and logical bytes, node identities,
+process names, clock coverage, and capture loss.
+
+### Recorded HBv4 run
+
+On 2026-11-17, `tst3` job 55 used HPC-X 2.24.1 / Open MPI 4.1.9a1 on two
+`hbv4` nodes, with one rank/core per node. The transport was UCX RC over
+`mlx5_ib0:1`, with HCOLL/UCC disabled. All small/odd-count and invalid-argument
+checks passed before profiling.
+
+The 128 timed 64 MiB Allreduces averaged **24.218 ms** using the slower rank's
+elapsed time. Every output element matched the exact reference on both ranks.
+The merged profile retained 130 Allreduce calls per rank (128 timed, one warm-up,
+one validation reduction), with zero MPI errors, dropped records, or retention
+omissions. Estimated clock alignment had a 5,558 ns uncertainty budget and
+708 ns observed offset drift. These are profiled single-core-per-rank measurements,
+not full-node peak throughput or a profiler-overhead comparison.
+
 ## CPU/GPU GEMM
 
 `gemm/` runs double-precision matrix multiplication first on the CPU using Intel

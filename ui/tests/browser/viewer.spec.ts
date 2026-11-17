@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, indexReport, integerPlotValues, SPAN_PITCH, SPAN_TOP, timelineRows } from '../../src/model.ts';
-import type { Report } from '../../src/model.ts';
+import type { CudaActivity, CudaDevice, MpiCallSummary, Report } from '../../src/model.ts';
 import { ioFixture } from '../io-fixture.ts';
 import { storageFixture } from '../storage-fixture.ts';
 import { gpuFixture } from '../gpu-fixture.ts';
@@ -460,6 +460,121 @@ async function canvasCorner(page: Page): Promise<number[]> {
   return page.locator('#timeline-canvas').evaluate(element =>
     Array.from((element as HTMLCanvasElement).getContext('2d')!.getImageData(1, 1, 1, 1).data));
 }
+
+test('MPI summary sits below the timeline and sorts full-domain totals, exact integers and missing volumes before paging', async ({ page }) => {
+  const low = '9007199254740992', high = '9007199254740993';
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loaded(page, injected('mpi-sort', report => {
+    const fixture = ioFixture(0);
+    fixture.domains.push({ id: 'empty', name: 'empty', origin_ns: '0', end_ns: '2000000000' });
+    const api = (name: string, fields: Partial<MpiCallSummary> = {}): MpiCallSummary => ({
+      shard: 's0', rank: 0, name, calls: '1', errors: '0', total_ns: '1', max_ns: '1',
+      logical_bytes: '0', calls_with_bytes: '0', ...fields,
+    });
+    fixture.mpi = [
+      ...Array.from({ length: 101 }, (_, i) => api(`MPI_Test_${String(i).padStart(3, '0')}`, {
+        calls: String(i + 1), total_ns: String((i + 1) * 100), max_ns: String(i + 1),
+        logical_bytes: String((101 - i) * 8), calls_with_bytes: String(i + 1),
+      })),
+      api('MPI_HugeLow', { total_ns: low }), api('MPI_HugeHigh', { total_ns: high }),
+      api('MPI_Allreduce', { calls: '3', total_ns: '1000', max_ns: '500', logical_bytes: '1024', calls_with_bytes: '3' }),
+      api('MPI_Allreduce', { shard: 's1', rank: 1, calls: '2', total_ns: '3000', max_ns: '2000' }),
+      api('MPI_Zero', { calls_with_bytes: '1' }),
+      api('MPI_Foreign', { shard: 's2', total_ns: high }),
+    ];
+    Object.assign(report, fixture);
+  }));
+  const table = page.locator('#mpi-calls');
+  const first = () => table.locator('tbody tr').first().locator('td').first();
+  await expect(page.locator('.workspace + #mpi-panel')).toBeVisible();
+  await expect(page.locator('#mpi-count')).toContainText('105 API names');
+  await expect(table.locator('tbody tr')).toHaveCount(100);
+  await expect(first()).toHaveText('MPI_HugeHigh');
+  await expect(table.locator('tbody tr').nth(1).locator('td').nth(2)).toHaveAttribute('title', `${low} ns`);
+  await expect(table.locator('thead th').nth(2)).toHaveAttribute('aria-sort', 'descending');
+  const allreduce = table.locator('tbody tr').filter({ has: page.getByRole('cell', { name: 'MPI_Allreduce', exact: true }) });
+  await expect(allreduce.locator('td').nth(1)).toHaveText('5');
+  await expect(allreduce.locator('td').nth(5)).toContainText('partial');
+  await expect(allreduce.locator('td').nth(5)).toHaveAttribute('title', '1024 B; 3/5 calls with known local byte extents');
+  await page.locator('#mpi-pager').getByRole('button', { name: 'Next' }).click();
+  await table.getByRole('button', { name: 'Calls', exact: true }).click();
+  await expect(first()).toHaveText('MPI_Test_100');
+  await expect(page.locator('#mpi-pager')).toContainText('1–100 of 105');
+  await expect(table.getByRole('button', { name: 'Calls', exact: true })).toBeFocused();
+  await table.getByRole('button', { name: 'Calls', exact: true }).press('Enter');
+  await expect(first()).toHaveText('MPI_Test_000');
+  await expect(table.locator('thead th').nth(1)).toHaveAttribute('aria-sort', 'ascending');
+  await table.getByRole('button', { name: 'Data volume (logical)', exact: true }).click();
+  await expect(first()).toHaveText('MPI_Allreduce');
+  await table.getByRole('button', { name: 'Data volume (logical)', exact: true }).click();
+  await expect(first()).toHaveText('MPI_Zero');
+  await page.locator('#mpi-pager').getByRole('button', { name: 'Next' }).click();
+  await expect(table.locator('tbody tr').nth(3).locator('td').first()).toHaveText('MPI_HugeLow');
+  await expect(table.locator('tbody tr').last().locator('td').first()).toHaveText('MPI_HugeHigh');
+  await expect(table.locator('tbody tr').last().locator('td').last()).toHaveText('—');
+  await page.getByRole('button', { name: 'Switch to light theme' }).click();
+  await expect(page.locator('#mpi-panel')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
+  await page.locator('#domain-select').selectOption('1');
+  await expect(first()).toHaveText('MPI_Foreign');
+  await expect(table.locator('tbody tr')).toHaveCount(1);
+  await expect(page.locator('#mpi-pager')).toBeEmpty();
+  await page.locator('#domain-select').selectOption('empty');
+  await expect(table).toContainText('No MPI calls recorded in this clock domain.');
+});
+
+test('CUDA kernel columns sort exact full-device values before paging and retain device/domain boundaries', async ({ page }) => {
+  const low = '9007199254740992', high = '9007199254740993';
+  await loaded(page, injected('cuda-sort', report => {
+    const fixture = ioFixture(0);
+    const device = (domain: string, id: string): CudaDevice => ({
+      shard: domain === '0' ? 's0' : 's2', domain, instance: 'image', pid: '45', device: id,
+      name: `GPU ${id}`, identity: `device-${id}`, visible: true, memory_bytes: null,
+      compute_major: null, compute_minor: null, multiprocessors: null,
+      kernels: '101', copies: '1', memsets: '1', kernel_ns: high, copy_ns: '1', copy_bytes: high, memset_bytes: '0', window_ns: high,
+    });
+    const activity = (i: number, fields: Partial<CudaActivity> = {}): CudaActivity => ({
+      shard: 's0', domain: '0', instance: 'image', device: '0', context: i % 2 ? '10' : '2',
+      stream: String(i), kind: 'kernel', name: `kernel-${i}`, count: i === 0 ? low : i === 1 ? high : String(i + 1),
+      total_ns: i === 0 ? high : i === 1 ? low : String(i + 1), max_ns: String(i + 1), bytes: '0', ...fields,
+    });
+    fixture.cuda = {
+      devices: [device('0', '0'), device('0', '1'), device('1', '0')], apis: [], runtimes: [], sources: [],
+      activities: [...Array.from({ length: 101 }, (_, i) => activity(i)),
+        activity(0, { context: '1', stream: '0', kind: 'memcpy', name: 'copy', count: '1', total_ns: '1', max_ns: '1', bytes: high }),
+        activity(0, { context: '1', stream: '1', kind: 'memset', name: 'zero-fill', count: '1', total_ns: '2', max_ns: '2' }),
+        activity(0, { device: '1', name: 'other-device' }),
+        activity(0, { shard: 's2', domain: '1', name: 'foreign-domain' })],
+    };
+    Object.assign(report, fixture);
+  }));
+  await expect(page.locator('#mpi-panel')).toHaveCount(0);
+  await page.locator('#cuda-devices .io-file').first().click();
+  const table = page.locator('#cuda-activities');
+  const first = () => table.locator('tbody tr').first().locator('td').nth(1);
+  await page.locator('#cuda-activity-pager').getByRole('button', { name: 'Next' }).click();
+  await table.getByRole('button', { name: 'Count', exact: true }).click();
+  await expect(first()).toHaveText('kernel · kernel-1');
+  await expect(page.locator('#cuda-activity-pager')).toContainText('1–100 of 103');
+  await expect(table.getByRole('button', { name: 'Count', exact: true })).toBeFocused();
+  await table.getByRole('button', { name: 'Inclusive time', exact: true }).click();
+  await expect(first()).toHaveText('kernel · kernel-0');
+  await table.getByRole('button', { name: 'Max time', exact: true }).click();
+  await expect(first()).toHaveText('kernel · kernel-100');
+  await table.getByRole('button', { name: 'Bytes', exact: true }).click();
+  await expect(first()).toHaveText('memcpy · copy');
+  await table.getByRole('button', { name: 'Bytes', exact: true }).press('Enter');
+  await expect(first()).toHaveText('memset · zero-fill');
+  await expect(table.locator('tbody tr').nth(2).locator('td').last()).toHaveText('—');
+  await table.getByRole('button', { name: 'Context / stream', exact: true }).click();
+  await expect(table.locator('tbody tr').nth(2).locator('td').first()).toHaveText('2 / 0');
+  await page.locator('#cuda-devices .io-file').nth(1).click();
+  await expect(first()).toHaveText('kernel · other-device');
+  await expect(page.locator('#cuda-activity-pager')).toBeEmpty();
+  await page.locator('#domain-select').selectOption('1');
+  await expect(page.locator('#cuda-device-detail')).toBeEmpty();
+  await page.locator('#cuda-devices .io-file').first().click();
+  await expect(first()).toHaveText('kernel · foreign-domain');
+});
 
 test('optional language panels remain absent on old reports', async ({ page }) => {
   await loaded(page);
