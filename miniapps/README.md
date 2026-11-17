@@ -55,8 +55,8 @@ srun --partition=h100 --nodes=1 --ntasks=1 --cpus-per-task=96 \
   --hint=nomultithread --cpu-bind=cores --gres=gpu:1 --mem=16G \
   --time=00:05:00 --job-name=rprof-gemm \
   env OMP_PROC_BIND=spread OMP_PLACES=cores MKL_VERBOSE=1 \
-  target/release/rprof record --collect openmp,cuda,system \
-  --system-interval-ms 100 --queue-chunks 64 \
+  target/release/rprof record --collect openmp,cuda,system,gpu \
+  --system-interval-ms 100 --gpu-interval-ms 100 --queue-chunks 64 \
   -o "captures/miniapps/gemm-$run.rprof.jsonl" -- \
   target/miniapps/gemm --size 8192 --iterations 8
 target/release/rprof report "captures/miniapps/gemm-$run.rprof.jsonl" \
@@ -71,7 +71,10 @@ GEMM GFLOP/s, GPU-event time and maximum absolute validation error. Timing cover
 repeated DGEMMs, not end-to-end application throughput or profiler overhead.
 
 Inspect the CPU worker lanes, GPU kernels and launch correlations, CPU/memory
-graphs, source coverage and losses. MKL's internal OMPT coverage depends on the
+graphs, device-wide GPU utilization/VRAM graphs, source coverage and losses.
+The GPU and GPU memory overviews expand to node and physical GPU; NVML sampling
+includes other processes and is separate from application kernel timing.
+MKL's internal OMPT coverage depends on the
 installed runtime; it is not CPU stack sampling. CPU and GPU work are deliberately
 sequential so their phases are easy to distinguish. Concurrent/overlap workloads
 can be added as separate mini-apps.

@@ -61,6 +61,21 @@ CPU/process/rank, OpenMP thread, GPU device/stream, and I/O tracks are supported
 the model. The current process collector supplies the real command lifetime;
 `fixtures/multitrack.jsonl` demonstrates the richer track types synthetically.
 
+Native process rows include the executable basename before their PID and image
+ID, for example `gemm (PID 1234) / image ...`. Hover a truncated label to see the
+full name. The I/O, MPI, OMPT/GOMP and CUDA transports capture this name inside
+the process image using `/proc/self/exe`; a later PID lookup is not used, so
+exit, exec and PID reuse cannot mislabel old activity. Command-line arguments
+and environment variables are not added by this metadata.
+Native ingress record counts include these metadata packets, separately from
+I/O operation counts and GPU kernel counts.
+
+Rebuild the CLI and native adapters to collect names. Older captures/adapters
+keep the PID/image fallback; names cannot be recovered merely by regenerating
+their HTML. A failed name read retains that fallback with a diagnostic. Process
+identity metadata survives raw-event retention limits and is also used by the
+indexed viewer.
+
 With `--collect io`, real POSIX operations appear on thread/file lanes. The I/O
 view defaults to an aggregate throughput graph **inside the main timeline**. Expand
 rank → process → thread, then explicitly open a thread's Files group for raw file

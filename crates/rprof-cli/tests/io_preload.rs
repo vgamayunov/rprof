@@ -178,8 +178,9 @@ fn real_calls_preserve_data_errno_modes_and_report_exact_bytes() {
     );
     let (calls, summary, attempted, received) = read(&run.capture);
     assert!(summary.is_complete());
-    assert_eq!(attempted, 9);
-    assert_eq!(received, 9);
+    // Nine I/O calls plus one process-name metadata packet.
+    assert_eq!(attempted, 10);
+    assert_eq!(received, 10);
     assert_eq!(calls.len(), 9);
     let filesystem = text(&calls[0], "io.filesystem.id");
     assert!(filesystem.contains(":dev:") && filesystem.contains(":magic:"));
@@ -410,6 +411,20 @@ fn fork_and_exec_use_distinct_process_image_namespaces() {
         let pids: HashSet<_> = calls.iter().map(|c| uint(c, "pid")).collect();
         assert_eq!(images.len(), 2, "{mode}");
         assert_eq!(pids.len(), if same_pid { 1 } else { 2 });
+        let report = rprof_report::analyze(&run.capture, rprof_report::Limits::default()).unwrap();
+        let processes: Vec<_> = report
+            .tracks
+            .iter()
+            .filter(|track| track.kind == "process" && track.parent.is_some())
+            .collect();
+        assert_eq!(processes.len(), 2, "{mode}");
+        assert!(
+            processes
+                .iter()
+                .all(|track| track.details["process.executable"] == "io-workload"
+                    && track.name.starts_with("io-workload (PID ")),
+            "{mode}"
+        );
         let identities: HashSet<_> = calls
             .iter()
             .filter(|c| text(c, "io.filesystem.kind") == "filesystem")
@@ -508,14 +523,22 @@ fn overload_has_explicit_ingress_and_writer_loss_accounting() {
     );
     let (calls, summary, attempted, received) = read(&capture);
     let loss = &summary.shards.values().next().unwrap().loss;
-    assert_eq!(attempted, 3002);
+    assert_eq!(attempted, 3003);
     assert_eq!(attempted, received + loss.ingress);
     assert!(
         loss.ingress > 0,
         "overload fixture did not exercise ingress loss"
     );
-    assert!(calls.len() as u64 <= received);
-    assert!(received - calls.len() as u64 <= loss.queue_full);
+    let report = rprof_report::analyze(&capture, rprof_report::Limits::default()).unwrap();
+    let metadata = report
+        .tracks
+        .iter()
+        .filter(|track| track.details.contains_key("process.name_source"))
+        .count() as u64;
+    assert!(metadata <= 1);
+    let received_io = received - metadata;
+    assert!(calls.len() as u64 <= received_io);
+    assert!(received_io - calls.len() as u64 <= loss.queue_full);
 }
 
 #[test]

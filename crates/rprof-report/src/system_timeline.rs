@@ -18,6 +18,7 @@ type SeriesKey = (Uuid, u64, String);
 #[derive(Clone, Copy)]
 struct Kind {
     memory: bool,
+    gpu: bool,
     root: bool,
     storage: bool,
 }
@@ -33,6 +34,12 @@ impl Kind {
                 "storage.write.latency_ms",
             ]
             .contains(&name)
+        } else if self.gpu {
+            name == if self.memory {
+                "system.gpu.memory.used"
+            } else {
+                "system.gpu.utilization"
+            }
         } else {
             name == if self.memory {
                 "system.memory.used"
@@ -81,13 +88,22 @@ impl Discovery {
                 && (resource == "cpu"
                     || resource.starts_with("cpu:")
                     || resource == "memory"
-                    || resource.starts_with("node:"))
+                    || resource.starts_with("node:")
+                    || resource == "gpu"
+                    || resource.starts_with("gpu:")
+                    || resource == "gpu_memory"
+                    || resource.starts_with("gpu_memory:"))
             {
                 self.tracks.insert(
                     (chunk.shard_id, track.id),
                     Kind {
-                        memory: resource == "memory" || resource.starts_with("node:"),
-                        root: resource == "cpu" || resource == "memory",
+                        memory: resource == "memory"
+                            || resource.starts_with("node:")
+                            || resource.starts_with("gpu_memory"),
+                        gpu: resource == "gpu"
+                            || resource.starts_with("gpu:")
+                            || resource.starts_with("gpu_memory"),
+                        root: ["cpu", "memory", "gpu", "gpu_memory"].contains(&resource.as_str()),
                         storage: false,
                     },
                 );
@@ -99,6 +115,7 @@ impl Discovery {
                     (chunk.shard_id, track.id),
                     Kind {
                         memory: false,
+                        gpu: false,
                         root: false,
                         storage: true,
                     },

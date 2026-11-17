@@ -51,6 +51,7 @@ read-only feature.
 - OMPT collection for LLVM/Intel OpenMP runtimes, with task/work/wait timelines and capability reporting.
 - Target-built GCC 13/libgomp collection, with selectable region/body/API detail and explicit coverage gaps.
 - Sampled host CPU/memory timelines, expandable from overview to hosts, logical CPUs and NUMA nodes.
+- Sampled NVIDIA GPU utilization and VRAM usage, expandable from overview to nodes and physical GPUs.
 - Optional CUDA 13 CUPTI injection adapter with GPU kernels/copies/memsets, CPU API calls,
   stream tracks, launch correlations, device metadata, and source-health reporting.
 - Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
@@ -197,6 +198,12 @@ for SDK compatibility, clock normalization, buffer losses, and validation.
 For host CPU utilization and memory graphs, use `--collect system` (optionally
 `--system-interval-ms 1000`). The timeline expands overview → host → logical CPU/NUMA
 node. See [system profiling](docs/system-profiling.md) for definitions and multi-host collection.
+
+For device-wide NVIDIA GPU utilization and used VRAM, add `--collect gpu`
+(optionally `--gpu-interval-ms 100`). The **GPU** and **GPU memory** graphs expand
+overview → node → GPU, independently of application kernel/stream lanes.
+This uses the installed driver's NVML library, not summed CUPTI kernel durations;
+see [GPU metrics](docs/cuda-profiling.md#device-wide-gpu-utilization-and-memory).
 
 ```sh
 target/release/rprof record --collect pmu -o counters.rprof.jsonl -- ./application

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { ioGraph, ioGraphBins, ioMetricValues } from '../src/model.ts';
 import { formatBytes, formatByteRate, formatMeanLatency } from '../src/model.ts';
 import { ioFixture } from './io-fixture.ts';
+import { gpuFixture } from './gpu-fixture.ts';
 import { aggregateIoBins, averageNs, defaultTimelineCollapsed, deviceActivities, domainClockLabel, formatNs, indexReport, indexSpans, integerPlotValues, ioBinMetrics, isCollectorHealth, matchesFilter, observedRate, regionThreads, ROW_HEIGHT, SPAN_PITCH, systemGapPrefix, systemPointsConnected, timelineRows, timeToX, trackRowHeight, visibleSpans, xToTime } from '../src/model.ts';
 import type { CudaDevice, IoFilesystem, IoTimeBin, OpenmpRegion, Report, Span } from '../src/model.ts';
 
@@ -56,6 +57,18 @@ test('intentional full-run system downsampling preserves lines but genuine sourc
 const span = (id: number, start_ns: string, duration_ns: string): Span => ({
   id, track: 't', name: `span ${id}`, category: 'compute', start_ns, duration_ns,
   correlation: null, incomplete: false, attributes: {},
+});
+
+test('I/O process labels use captured executable names only for the matching process image', () => {
+  for (const matchingImage of [true, false]) {
+    const report = ioFixture();
+    const process = report.tracks.find(track => track.id === 's0:process:101')!;
+    process.name = 'gemm (PID 10) / image 0000000000000065';
+    process.details['process.executable'] = 'gemm';
+    process.details['process.instance'] = matchingImage ? '101' : '202';
+    const rows = timelineRows(report, indexReport(report), '0', 'gemm');
+    assert.equal(rows.some(row => row.io && row.label === process.name), matchingImage);
+  }
 });
 
 test('I/O timeline expands one level at a time; thousands of files require explicit thread-file expansion', () => {
@@ -146,6 +159,7 @@ function systemFixture(): Report {
 test('system overviews precede shards, deduplicate ranks, show exact memory sums and gaps without cross-domain leakage', () => {
   const report = systemFixture();
   assert.equal(isCollectorHealth('system.meta.read_errors'), true);
+  assert.equal(isCollectorHealth('process.meta.executable'), true);
   report.counters.push({ track: 's1:cpu', name: 'system.meta.read_errors', timestamp_ns: '1', value: '2', value_type: 'integer', unit: 'count', attributes: {} });
   const data = indexReport(report);
   const collapsed = defaultTimelineCollapsed(report);
@@ -169,6 +183,43 @@ test('system overviews precede shards, deduplicate ranks, show exact memory sums
   assert.deepEqual(timelineRows(report, data, 'other', '', collapsed).slice(0, 2).map(row => row.key), ['system:other:cpu', 'system:other:memory']);
   assert.equal(timelineRows(report, data, 'aligned', 'node:1', collapsed).some(row => row.key.endsWith('node:1')), true);
   assert.equal(timelineRows(report, data, 'aligned', 'node:1', defaultTimelineCollapsed(report)).find(row => row.key === 'system:aligned:memory')?.expanded, true);
+});
+
+test('GPU gauges expand by host and device, weight devices rather than nodes, and preserve VRAM precision and gaps', () => {
+  const report = gpuFixture(), data = indexReport(report), collapsed = defaultTimelineCollapsed(report);
+  const rows = () => timelineRows(report, data, 'aligned', '', collapsed);
+  assert.deepEqual(rows().filter(row => row.system).map(row => row.key), ['system:aligned:gpu', 'system:aligned:gpu_memory']);
+  const gpu = data.get('system:aligned:gpu')!;
+  const samples = gpu.counters.get('system.gpu.utilization [%; float]')!;
+  assert.deepEqual(samples.map(sample => [sample.time.toString(), sample.counter.value]),
+    [['1000000000', '60'], ['2000000000', '60'], ['4000000000', '60']]);
+  assert.equal(samples[0]!.counter.attributes['system.gpu.count'], '3');
+  assert.equal(systemPointsConnected(gpu.systemGaps!.get('system.gpu.utilization [%; float]')!, 0, 2), false);
+  const memory = data.get('system:aligned:gpu_memory')!.counters.get('system.gpu.memory.used [bytes; integer]')!;
+  assert.equal(memory[0]!.counter.value, '27021597764222979');
+  assert.equal(rows()[1]!.capacity, '54043195528445958');
+  collapsed.delete('system:aligned:gpu');
+  assert.equal(rows().filter(row => row.system === 'gpu').length, 3);
+  collapsed.delete('system:aligned:gpu:host:beta:boot');
+  const leaves = rows().filter(row => row.system === 'gpu' && row.depth === 2);
+  assert.deepEqual(leaves.map(row => row.label), ['GPU 0 · NVIDIA test', 'GPU 1 · NVIDIA test']);
+  assert.match(rows().find(row => row.key === 'system:aligned:gpu:host:alpha:boot')!.label, /1 of 2 rank sources/);
+  assert.ok(timelineRows(report, data, 'aligned', 'GPU-beta-1').some(row => row.system === 'gpu_memory' && row.depth === 2));
+  assert.deepEqual(timelineRows(report, data, 'other', '').filter(row => row.system).map(row => row.key), ['system:other:gpu', 'system:other:gpu_memory']);
+  assert.ok(isCollectorHealth('system.meta.gpu.read_errors'));
+});
+
+test('GPU overviews do not invent weights or readings before indexed samples arrive', () => {
+  const report = gpuFixture();
+  for (const counter of report.counters) if (counter.track === 'beta:gpu') delete counter.attributes['system.gpu.count'];
+  let data = indexReport(report);
+  assert.equal(data.get('system:aligned:gpu')!.counters.get('system.gpu.utilization [%; float]')!.length, 0);
+  report.counters = [];
+  data = indexReport(report);
+  const rows = timelineRows(report, data, 'aligned', '');
+  assert.equal(rows.filter(row => row.system).length, 2);
+  assert.equal(rows[1]!.capacity, undefined);
+  assert.equal(data.get('system:aligned:gpu_memory')!.counters.values().next().value!.length, 0);
 });
 
 test('system gaps are indexed once and decimation never connects across missing samples or coarse aggregation bins', () => {

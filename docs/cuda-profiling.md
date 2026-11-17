@@ -58,6 +58,56 @@ not GPU utilization. Runtime and driver API times can also overlap through nesti
 Activity timing does not measure FLOPs, achieved bandwidth, occupancy, or PMU
 metrics; those require explicit additional profiling support/passes.
 
+## Device-wide GPU utilization and memory
+
+GPU gauges are collected independently of CUPTI:
+
+```sh
+target/release/rprof record --collect system,gpu,cuda \
+  --gpu-interval-ms 100 --system-interval-ms 100 \
+  -o gpu.rprof.jsonl -- ./application
+```
+
+`--collect gpu` dynamically loads the NVIDIA driver's `libnvidia-ml.so.1` (NVML).
+No CUDA toolkit, native adapter build, or GPU is needed to build the CLI; the
+driver and at least one accessible GPU are required when this collector is
+selected. It also works without `--collect cuda`, including alongside another
+tool that owns CUPTI. Initialization/enumeration failures are reported before
+the application launches.
+
+The timeline adds two initially collapsed graphs, independently of the existing
+kernel/stream and host API lanes:
+
+- **GPU**: average utilization -> node average -> physical GPU. A node with two
+  GPUs contributes twice the weight of a node with one GPU to the overall mean.
+- **GPU memory**: total used VRAM -> node total -> physical GPU, in GiB with the
+  observed total capacity as the vertical scale. Exact bytes remain inspectable.
+
+Utilization is NVML's percentage of its driver-defined sampling window during
+which at least one kernel executed. It is not SM occupancy, FLOP efficiency,
+memory-controller utilization, or summed CUPTI kernel duration. Poll timestamps
+use the capture's monotonic clock. The driver averaging-window duration and
+alignment are unknown; polling faster does not improve the driver's resolution
+and can return repeated readings. VRAM is NVML used device memory, including
+driver/system allocations, not framework allocated/reserved bytes.
+
+Sampling defaults to 1000 ms (`--gpu-interval-ms`, range 100..60000). It covers all
+NVML-enumerated physical GPUs accessible to the profiler, **including other
+processes**; it is not filtered by `CUDA_VISIBLE_DEVICES` or assigned to a CPU
+thread. Device UUIDs distinguish per-node GPU identities. The device catalog is
+fixed at capture start; MIG instances are not separately enumerated. NVML may
+not support utilization on a MIG-enabled device: unsupported/failed reads are
+saved as diagnostics and leave gaps, never fake zero utilization or free memory.
+Utilization and memory failures are independent; a node aggregate is emitted
+only when every cataloged GPU supplies that metric for the poll.
+
+A per-host, per-session lease avoids duplicate concurrent MPI-rank sampling;
+retain the owning rank's shard when merging. Cross-node aggregation requires
+the same clock domain and fresh observations. GPU gauges use the same bounded
+full-run retention and indexed-window path as CPU/memory metrics, preserving
+source gaps even when the raw kernel timeline is capped. Older captures without
+NVML samples do not gain inferred GPU gauges; collect a new profile to see them.
+
 ## Buffering, lifecycle, and losses
 
 Eight aligned 1 MiB host activity buffers bound the native pool. Records cross a

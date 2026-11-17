@@ -140,6 +140,7 @@ pub extern "C" fn rprof_omp_init() -> i32 {
     PID.store(unsafe { libc::getpid() }, Ordering::Relaxed);
     STATS.store(stats, Ordering::Release);
     SOCKET.store(fd, Ordering::Release);
+    rprof_io_protocol::send_process_name(fd, unsafe { &*stats }, INSTANCE.load(Ordering::Relaxed));
     1
 }
 #[unsafe(no_mangle)]
@@ -175,6 +176,14 @@ pub unsafe extern "C" fn rprof_omp_begin(
     if PID.load(Ordering::Relaxed) != pid {
         INSTANCE.store(rprof_io_protocol::process_instance(), Ordering::Relaxed);
         PID.store(pid, Ordering::Relaxed);
+        let stats = STATS.load(Ordering::Acquire);
+        if !stats.is_null() {
+            rprof_io_protocol::send_process_name(
+                SOCKET.load(Ordering::Acquire),
+                unsafe { &*stats },
+                INSTANCE.load(Ordering::Relaxed),
+            );
+        }
     }
     event.magic = MAGIC;
     event.version = VERSION;

@@ -3,11 +3,14 @@ use rprof_core::{
     Category, CounterSample, CounterValue, Span, Track, TrackKind,
     stream::{Attribute, Collector, End, EndReason, Event, Header, Loss, Payload, Shard},
 };
-use rprof_report::{Limits, analyze};
+use rprof_report::{
+    Limits, analyze,
+    indexed::{CaptureIndex, WindowRequest},
+};
 use uuid::Uuid;
 
 #[test]
-fn host_cpu_memory_and_children_survive_a_saturated_raw_timeline() {
+fn host_cpu_gpu_memory_and_children_survive_a_saturated_raw_timeline() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("training.jsonl");
     let shard_id = Uuid::new_v4();
@@ -50,6 +53,10 @@ fn host_cpu_memory_and_children_survive_a_saturated_raw_timeline() {
         (2, "memory", None),
         (3, "cpu:0", Some(1)),
         (4, "node:0", Some(2)),
+        (5, "gpu", None),
+        (6, "gpu_memory", None),
+        (7, "gpu:GPU-test", Some(5)),
+        (8, "gpu_memory:GPU-test", Some(6)),
     ] {
         recorder
             .reliable(Event::new(
@@ -82,14 +89,18 @@ fn host_cpu_memory_and_children_survive_a_saturated_raw_timeline() {
                 }),
             ))
             .unwrap();
-        for id in 1..=4 {
+        for id in 1..=8 {
             let memory = id % 2 == 0;
             let mut event = Event::new(
                 at,
                 Payload::Counter(CounterSample {
                     track_id: id,
                     timestamp_ns: at,
-                    name: if memory {
+                    name: if id >= 5 && memory {
+                        "system.gpu.memory.used"
+                    } else if id >= 5 {
+                        "system.gpu.utilization"
+                    } else if memory {
                         "system.memory.used"
                     } else {
                         "system.cpu.utilization"
@@ -134,9 +145,9 @@ fn host_cpu_memory_and_children_survive_a_saturated_raw_timeline() {
     )
     .unwrap();
     assert!(report.spans.is_empty());
-    assert_eq!(report.counters.len(), 100);
+    assert_eq!(report.counters.len(), 200);
     assert_eq!(report.summary.omitted_events, "25");
-    for id in 1..=4 {
+    for id in 1..=8 {
         let samples: Vec<_> = report
             .counters
             .iter()
@@ -154,4 +165,29 @@ fn host_cpu_memory_and_children_survive_a_saturated_raw_timeline() {
             assert_eq!(samples.last().unwrap().value, "9007199254741018");
         }
     }
+    let index = CaptureIndex::open(&path, &dir.path().join("index"), false).unwrap();
+    let response = index
+        .window(
+            WindowRequest {
+                snapshot: index.report().unwrap().viewer.unwrap().snapshot,
+                domain: "0".into(),
+                start_ns: "0".into(),
+                end_ns: "25000000000".into(),
+                pixels: 1000,
+                tracks: vec![],
+                systems: (5..=8).map(|id| format!("{shard_id}:{id}")).collect(),
+                io_scopes: vec![],
+                filesystem: "all".into(),
+            },
+            1000,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+    assert_eq!(response.counters.len(), 100);
+    assert!(
+        response
+            .counters
+            .iter()
+            .all(|sample| sample.name.starts_with("system.gpu."))
+    );
 }

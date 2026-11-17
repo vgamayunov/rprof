@@ -11,6 +11,7 @@ import { COUNTER_PLOT_HEIGHT, COUNTER_PLOT_TOP, defaultTimelineCollapsed, indexR
 import type { Report } from '../../src/model.ts';
 import { ioFixture } from '../io-fixture.ts';
 import { storageFixture } from '../storage-fixture.ts';
+import { gpuFixture } from '../gpu-fixture.ts';
 
 test('offline storage overlays coexist with POSIX, expand by filesystem and keep wheel scrolling', async ({ page }) => {
   const url = injected('storage-offline', report => Object.assign(report, storageFixture()));
@@ -463,6 +464,85 @@ async function canvasCorner(page: Page): Promise<number[]> {
 test('optional language panels remain absent on old reports', async ({ page }) => {
   await loaded(page);
   await expect(page.locator('#python-panel, #pytorch-panel')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /gpu.*system graphs/i })).toHaveCount(0);
+});
+
+test('GPU utilization and VRAM expand overview to host to device and inspect exact samples in both themes', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await loaded(page, injected('gpu-gauges', report => Object.assign(report, gpuFixture())));
+  const report = gpuFixture(), data = indexReport(report), collapsed = defaultTimelineCollapsed(report);
+  const rows = () => timelineRows(report, data, 'aligned', '', collapsed);
+  const canvas = page.locator('#timeline-canvas');
+  for (const theme of ['dark', 'light']) {
+    if (theme === 'light') await page.getByRole('button', { name: 'Switch to light theme' }).click();
+    await expect.poll(() => canvasCorner(page)).toEqual(theme === 'dark' ? [20, 35, 48, 255] : [240, 245, 248, 255]);
+    for (const kind of ['gpu', 'gpu_memory'] as const) {
+      const title = kind.replace('_', ' ');
+      await page.getByRole('button', { name: `Expand ${title} system graphs` }).click();
+      collapsed.delete(`system:aligned:${kind}`);
+      const host = rows().find(row => row.key === `system:aligned:${kind}:host:beta:boot`)!;
+      const scroll = await page.locator('#timeline-scroll').evaluate((element, top) => {
+        element.scrollTop = top; return element.scrollTop;
+      }, host.top);
+      await canvas.click({ position: { x: 50, y: host.top - scroll + host.height / 2 } });
+      collapsed.delete(host.key);
+      const device = rows().find(row => row.key === `${host.key}:${kind}:GPU-beta-1`)!;
+      const deviceScroll = await page.locator('#timeline-scroll').evaluate((element, top) => {
+        element.scrollTop = top; return element.scrollTop;
+      }, device.top);
+      const box = (await canvas.boundingBox())!;
+      await canvas.click({ position: { x: 260 + (box.width - 260) * 2 / 9, y: device.top - deviceScroll + 20 } });
+      await expect(page.locator('#detail-content h3')).toHaveText(kind === 'gpu' ? 'system.gpu.utilization' : 'system.gpu.memory.used');
+      await expect(page.locator('#detail-content')).toContainText(kind === 'gpu' ? '80' : '9007199254740993');
+      await expect(page.locator('#detail-content')).toContainText('NVML device-wide');
+      const expandedHost = rows().find(row => row.key === host.key)!;
+      const top = await page.locator('#timeline-scroll').evaluate((element, top) => {
+        element.scrollTop = top; return element.scrollTop;
+      }, expandedHost.top);
+      await canvas.click({ position: { x: 50, y: expandedHost.top - top + expandedHost.height / 2 } });
+      collapsed.add(host.key);
+      await page.getByRole('button', { name: `Collapse ${title} system graphs` }).click();
+      collapsed.add(`system:aligned:${kind}`);
+    }
+  }
+  await page.locator('#filter-input').fill('GPU-beta-1');
+  await expect(page.getByRole('button', { name: 'Collapse gpu system graphs' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('button', { name: 'Collapse gpu memory system graphs' })).toHaveAttribute('aria-expanded', 'true');
+  await page.getByRole('button', { name: 'Collapse gpu system graphs' }).click();
+  await expect(page.locator('#filter-input')).toHaveValue('');
+  await page.locator('#domain-select').selectOption('other');
+  await expect(page.getByRole('button', { name: 'Expand gpu system graphs' })).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('indexed GPU overviews request host gauges and device expansion fetches the GPU leaves', async ({ page }) => {
+  const url = injected('gpu-indexed', report => {
+    Object.assign(report, gpuFixture());
+    report.counters = [];
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', snapshot: 'gpu-snapshot' };
+  });
+  const source = readFileSync(fileURLToPath(url), 'utf8');
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(source);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const requests: { systems: string[] }[] = [];
+  try {
+    const samples = gpuFixture().counters;
+    await page.route('**/api/window', async route => {
+      const request = route.request().postDataJSON(); requests.push(request);
+      await route.fulfill({ json: { snapshot: request.snapshot, domain: request.domain, start_ns: request.start_ns,
+        end_ns: request.end_ns, spans: [], counters: samples.filter(counter => request.systems.includes(counter.track)),
+        dependencies: [], io: {}, limited: false, warnings: [] } });
+    });
+    await loaded(page, `http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    await expect(page.locator('#window-status')).toContainText('Loaded');
+    expect(requests[0]!.systems).toEqual(expect.arrayContaining(['alpha:gpu', 'beta:gpu', 'alpha:gpu_memory', 'beta:gpu_memory']));
+    expect(requests[0]!.systems.some(id => id.startsWith('foreign:'))).toBe(false);
+    await page.locator('#filter-input').fill('GPU-beta-1');
+    await expect.poll(() => requests.some(request => request.systems.includes('beta:gpu:1'))).toBe(true);
+    await expect.poll(() => requests.some(request => request.systems.includes('beta:gpu_memory:1'))).toBe(true);
+    await expect(page.locator('#window-status')).toContainText('Loaded');
+  } finally { server.close(); await once(server, 'close'); }
 });
 
 test('system graphs drill into hosts and logical CPUs / NUMA nodes in both themes; filter reveals collapsed descendants', async ({ page }) => {
@@ -1452,6 +1532,17 @@ test('native I/O collection produces timeline graphs and opt-in per-thread file 
   const bins = report.io_timeline!.threads!.flatMap(thread => thread.bins);
   expect(bins.reduce((sum, bin) => sum + BigInt(bin.read_bytes), 0n)).toBe(6n);
   expect(bins.reduce((sum, bin) => sum + BigInt(bin.write_bytes), 0n)).toBe(8n);
+  const process = report.tracks.find(track => track.kind === 'process' && track.parent &&
+    track.details['process.executable'] === 'io-workload')!;
+  expect(process).toBeTruthy();
+  expect(process.name).toMatch(/^io-workload \(PID \d+\) \/ image /);
+  await page.locator('#filter-input').fill('io-workload');
+  const processRow = timelineRows(report, indexReport(report), '0', 'io-workload').find(row => row.io && row.label === process.name)!;
+  const scrollTop = await page.locator('#timeline-scroll').evaluate((element, top) => {
+    element.scrollTop = top; return element.scrollTop;
+  }, processRow.top);
+  await page.locator('#timeline-canvas').hover({ position: { x: 180, y: processRow.top - scrollTop + processRow.height / 2 } });
+  await expect(page.locator('#timeline-tooltip')).toHaveText(process.name);
   await page.locator('#filter-input').fill('pwrite');
   const collapsed = defaultTimelineCollapsed(report);
   const rows = timelineRows(report, indexReport(report), '0', 'pwrite', collapsed);
