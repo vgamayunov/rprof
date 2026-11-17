@@ -62,6 +62,13 @@ fn python_segments_preserve_suspension_threads_ranges_and_results() {
             .unwrap();
         assert_eq!(generator.segments, "3");
         assert_eq!(generator.yields, "2");
+        let delegated = py
+            .functions
+            .iter()
+            .find(|f| f.name == "delegated_generator")
+            .unwrap();
+        assert_eq!(delegated.segments, "3");
+        assert_eq!(delegated.yields, "2");
         let coro = py
             .functions
             .iter()

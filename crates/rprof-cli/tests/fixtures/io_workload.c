@@ -23,7 +23,8 @@ static void *cancel_run(void *opaque) {
     struct cancel_args *args = opaque;
     char byte;
     pthread_barrier_wait(args->barrier);
-    (void)read(args->fd, &byte, 1);
+    ssize_t result = read(args->fd, &byte, 1);
+    fprintf(stderr, "cancellation read unexpectedly returned %zd (errno=%d)\n", result, errno);
     abort();
 }
 static void *thread_run(void *opaque) {

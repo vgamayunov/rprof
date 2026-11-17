@@ -131,7 +131,13 @@ __attribute__((visibility("hidden"))) void *rprof_gomp_target(unsigned slot) {
     p = dlsym(RTLD_NEXT, names[slot]);
     if (!p) {
       static const char message[] = "rprof-gomp: missing GCC libgomp entry point\n";
-      (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+      size_t offset = 0;
+      while (offset < sizeof(message) - 1) {
+        ssize_t written = write(STDERR_FILENO, message + offset, sizeof(message) - 1 - offset);
+        if (written > 0) offset += (size_t)written;
+        else if (written < 0 && errno == EINTR) continue;
+        else break;
+      }
       _exit(127); /* Calling a nonexistent real function has no valid ABI. */
     }
     atomic_store_explicit(&targets[slot], p, memory_order_release);
