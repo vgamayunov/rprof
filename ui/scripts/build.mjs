@@ -4,8 +4,11 @@ import { checkProjectionWasm } from './check-projection-wasm.mjs';
 
 const check = process.argv.includes('--check');
 if (check) await checkProjectionWasm();
+const worker = await build({ entryPoints: ['src/stacks-worker.ts'], bundle: true, minify: true,
+  format: 'iife', target: 'es2022', legalComments: 'none', write: false, logLevel: 'silent' });
 const outputs = [
-  { entryPoints: ['src/main.ts'], outfile: 'dist/viewer.js', bundle: true, minify: true, format: 'iife', target: 'es2022', legalComments: 'none' },
+  { entryPoints: ['src/main.ts'], outfile: 'dist/viewer.js', bundle: true, minify: true, format: 'iife', target: 'es2022', legalComments: 'none',
+    define: { STACK_WORKER_SOURCE: JSON.stringify(worker.outputFiles[0].text) } },
   { entryPoints: ['src/viewer.css'], outfile: 'dist/viewer.css', bundle: true, minify: true, legalComments: 'none' },
 ];
 

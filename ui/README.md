@@ -10,6 +10,13 @@ uses the system preference initially and remembers explicit choices when browser
 storage is available. Export reports again after rebuilding to include UI updates;
 existing standalone HTML files contain their original embedded viewer bundle.
 
+Stack captures add a **Functions** panel immediately below the timeline.
+`src/stacks.ts` defines the exact aggregation contract, `src/stacks-worker.ts`
+runs offline aggregation in an embedded worker, and `src/stack-panel.ts` handles
+virtualized trees and independent indexed queries. Timeline range filters update
+this panel; zoom/scroll/collapse and function-name search do not change its totals.
+See [stack profiling](../docs/stack-profiling.md).
+
 Projection artifacts (`kind: "rprof-projection"`) use `src/projection.ts` and an
 offline JSON scenario editor. Their embedded `dist/project.wasm` runs the same Rust
 engine as `rprof project`. After changing engine sources or dependencies, install

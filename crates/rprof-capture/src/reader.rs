@@ -6,7 +6,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use rprof_core::{
     CounterValue,
-    stream::{Attribute, End, Event, FORMAT, Header, Loss, Payload, Record, Shard, VERSION},
+    stream::{
+        Attribute, End, Event, FORMAT, Header, Loss, MAX_STACK_DEPTH, MAX_STACKS, Payload, Record,
+        Shard, VERSION,
+    },
 };
 use uuid::Uuid;
 
@@ -42,6 +45,7 @@ impl Summary {
 
 struct State {
     tracks: HashSet<u64>,
+    stacks: HashSet<u64>,
     next_sequence: u64,
 }
 
@@ -54,6 +58,8 @@ pub struct Reader<R> {
     summaries: BTreeMap<Uuid, ShardSummary>,
     states: HashMap<Uuid, State>,
     total_tracks: usize,
+    total_stacks: usize,
+    stack_bytes: usize,
     metadata_bytes: usize,
     line: u64,
     truncated: bool,
@@ -68,6 +74,8 @@ impl<R: BufRead> Reader<R> {
             summaries: BTreeMap::new(),
             states: HashMap::new(),
             total_tracks: 0,
+            total_stacks: 0,
+            stack_bytes: 0,
             metadata_bytes: 0,
             line: 0,
             truncated: false,
@@ -124,8 +132,8 @@ impl<R: BufRead> Reader<R> {
                 header.format
             );
             ensure!(
-                header.schema_version == VERSION,
-                "unsupported schema version {} (expected {})",
+                (2..=VERSION).contains(&header.schema_version),
+                "unsupported schema version {} (expected 2..={})",
                 header.schema_version,
                 VERSION
             );
@@ -157,6 +165,7 @@ impl<R: BufRead> Reader<R> {
                     shard.shard_id,
                     State {
                         tracks: HashSet::new(),
+                        stacks: HashSet::new(),
                         next_sequence: 0,
                     },
                 );
@@ -194,6 +203,27 @@ impl<R: BufRead> Reader<R> {
                 validate_loss(&summary.loss, &chunk.loss)?;
                 summary.loss = chunk.loss.clone();
                 for event in &chunk.events {
+                    if let Payload::StackTrace(stack) = &event.payload {
+                        ensure!(
+                            self.header.as_ref().unwrap().schema_version >= 3,
+                            "stack records require capture version 3"
+                        );
+                        ensure!(
+                            self.total_stacks < MAX_STACKS,
+                            "stack dictionary limit exceeded"
+                        );
+                        self.stack_bytes += serde_json::to_vec(stack)?.len();
+                        ensure!(
+                            self.stack_bytes <= 32 * 1024 * 1024,
+                            "stack dictionary exceeds 32 MiB"
+                        );
+                        self.total_stacks += 1;
+                    } else if matches!(event.payload, Payload::StackSample(_)) {
+                        ensure!(
+                            self.header.as_ref().unwrap().schema_version >= 3,
+                            "stack records require capture version 3"
+                        );
+                    }
                     validate_event(event, state, summary, &mut self.total_tracks)?;
                 }
             }
@@ -262,6 +292,39 @@ fn validate_event(
         }
     }
     match &event.payload {
+        Payload::StackTrace(stack) => {
+            ensure!(
+                !stack.frames.is_empty() && stack.frames.len() <= MAX_STACK_DEPTH,
+                "stack must have 1..={MAX_STACK_DEPTH} frames"
+            );
+            ensure!(
+                stack
+                    .frames
+                    .iter()
+                    .all(|f| !f.key.is_empty() && !f.name.is_empty()),
+                "stack frame identity/name must not be empty"
+            );
+            ensure!(
+                state.stacks.insert(stack.id),
+                "duplicate stack {}",
+                stack.id
+            );
+        }
+        Payload::StackSample(sample) => {
+            ensure!(
+                state.tracks.contains(&sample.track_id),
+                "stack sample references unknown track"
+            );
+            ensure!(
+                sample.stack_id.is_none_or(|id| state.stacks.contains(&id)),
+                "stack sample references unknown stack"
+            );
+            ensure!(
+                sample.timestamp_ns <= event.timestamp_ns,
+                "stack sample follows observation"
+            );
+            ensure!(sample.period_ns > 0, "stack sample period must be positive");
+        }
         Payload::Track(track) => {
             ensure!(
                 !state.tracks.contains(&track.id),

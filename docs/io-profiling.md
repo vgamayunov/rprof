@@ -178,14 +178,16 @@ or unsupported kernel fields can leave labels unknown/attribution partial. Faile
 opens are not assigned a filesystem by guessing a path prefix. Mount labels are
 best-effort snapshots, not continuously refreshed mount history.
 
-The native I/O wire is now version 2 (392 bytes). Rebuild both the CLI and preload
+The native I/O wire is now version 3 (400 bytes). Rebuild both the CLI and preload
 library when updating; the persisted capture schema remains stream v2.
 
 ## Buffering and loss accounting
 
 The injected Rust runtime uses fixed storage and atomics, with no event allocation,
 JSON serialization, capture-file output, or blocking queue submission in callbacks.
-It sends 392-byte observations over a nonblocking inherited Unix datagram socket.
+It sends 400-byte observations over a nonblocking inherited Unix datagram socket.
+With `--collect stacks,io`, optional bounded call-site snapshots use the same
+transport and have independent references; see [stack profiling](stack-profiling.md).
 An external ingress thread feeds a bounded raw-event queue; a separate thread
 converts observations into the existing capture writer. This decouples short bursts
 from JSON conversion without blocking the workload on capture storage.

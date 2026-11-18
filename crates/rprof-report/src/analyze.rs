@@ -258,6 +258,7 @@ fn analyze_impl(
     let mut system_errors = BTreeMap::<Uuid, u64>::new();
     let mut gpu_errors = BTreeMap::<Uuid, (u64, String)>::new();
     let mut process_names = BTreeMap::<String, BTreeMap<String, Attribute>>::new();
+    let mut has_stacks = false;
     let mut storage_errors = BTreeMap::<Uuid, (u64, String)>::new();
     let mut storage_unavailable = BTreeMap::<(Uuid, String), String>::new();
     let data = scan(path, snapshot, |record| {
@@ -281,6 +282,10 @@ fn analyze_impl(
         pytorch.observe(&record);
         if let Record::Chunk(chunk) = record {
             for (event_index, event) in chunk.events.into_iter().enumerate() {
+                has_stacks |= matches!(
+                    event.payload,
+                    Payload::StackTrace(_) | Payload::StackSample(_)
+                );
                 if let Payload::Counter(sample) = &event.payload
                     && sample.name == "process.meta.executable"
                 {
@@ -358,7 +363,12 @@ fn analyze_impl(
                         pending.remove(&(chunk.shard_id, span.track_id, correlation));
                     }
                 }
-                if !limits.retain_timeline || matches!(event.payload, Payload::Heartbeat) {
+                if !limits.retain_timeline
+                    || matches!(
+                        event.payload,
+                        Payload::Heartbeat | Payload::StackTrace(_) | Payload::StackSample(_)
+                    )
+                {
                     continue;
                 }
                 if indexed && !matches!(event.payload, Payload::Track(_)) {
@@ -509,7 +519,7 @@ fn analyze_impl(
                         to: key(chunk.shard_id, to_correlation_id),
                         relation,
                     }),
-                    Payload::Heartbeat => (),
+                    Payload::Heartbeat | Payload::StackTrace(_) | Payload::StackSample(_) => (),
                 }
             }
         }
@@ -768,6 +778,20 @@ fn analyze_impl(
     let pmu = pmu.finish(&shards, &mut warnings);
     let python = python.finish(&shards, &mut warnings);
     let pytorch = pytorch.finish(&shards, &mut warnings);
+    let has_stacks = has_stacks
+        || shards
+            .iter()
+            .any(|s| s.collectors.iter().any(|c| c == "stacks"));
+    let stacks = if !has_stacks || !limits.retain_timeline {
+        None
+    } else if indexed {
+        Some(crate::stacks::Data {
+            complete: true,
+            ..Default::default()
+        })
+    } else {
+        crate::stacks::collect(path, data.source_bytes, &shards)?
+    };
     Ok(Report {
         source_bytes: data.source_bytes,
         version: 1,
@@ -787,11 +811,10 @@ fn analyze_impl(
         },
         summary: ReportSummary {
             format: if data.legacy {
-                "legacy v1 JSON"
+                "legacy v1 JSON".into()
             } else {
-                "rprof stream v2"
-            }
-            .into(),
+                format!("rprof stream v{}", summary.header.schema_version)
+            },
             session_id: if data.legacy {
                 "unknown (legacy)".into()
             } else {
@@ -831,5 +854,6 @@ fn analyze_impl(
         python,
         pytorch,
         viewer: None,
+        stacks,
     })
 }

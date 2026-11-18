@@ -1,6 +1,9 @@
+import type { StackData } from './stacks.js';
+
 export interface Report {
   version: 1;
-  viewer?: { endpoint: string; files_endpoint: string; snapshot: string };
+  viewer?: { endpoint: string; files_endpoint: string; snapshot: string; stacks_endpoint?: string };
+  stacks?: StackData;
   provenance: { kind: 'measured' | 'synthetic' | 'imported' | 'mixed'; label: string; source: string };
   summary: {
     format: string; session_id: string; complete: boolean; truncated_tail: boolean;
@@ -1093,6 +1096,7 @@ export function indexReport(report: Report): Map<string, TrackData> {
 }
 
 export function isCollectorHealth(name: string): boolean {
+  if (name.startsWith('stacks.meta.')) return true;
   if (name.startsWith('process.meta.')) return true;
   if (name.startsWith('system.meta.') || name.startsWith('storage.meta.')) return true;
   return /^(io|mpi|openmp)\.(attempted_events|received_events|ingress_dropped_events|initialized_images)$/.test(name) ||

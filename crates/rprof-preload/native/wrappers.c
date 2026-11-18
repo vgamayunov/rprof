@@ -99,7 +99,8 @@ static void check_fortified_flags(int flags) {
     errno = incoming_errno;                                                    \
     struct rprof_io_event event;                                               \
     int collect = rprof_io_begin(&event, op, fd_arg, other_arg, path_arg,      \
-                                 flags_arg, offset_arg, count_arg);           \
+                                 flags_arg, offset_arg, count_arg,            \
+                                 (uintptr_t)__builtin_frame_address(0));      \
     errno = incoming_errno
 
 #define FINISH(value) do {                                                    \

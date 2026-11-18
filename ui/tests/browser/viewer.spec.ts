@@ -12,6 +12,122 @@ import type { CudaActivity, CudaDevice, MpiCallSummary, Report } from '../../src
 import { ioFixture } from '../io-fixture.ts';
 import { storageFixture } from '../storage-fixture.ts';
 import { gpuFixture } from '../gpu-fixture.ts';
+import { stackFixture } from '../stack-fixture.ts';
+import { aggregateStacks } from '../../src/stacks.ts';
+import type { StackQuery } from '../../src/stacks.ts';
+
+test('function trees use an offline worker, collapse both orientations and preserve scope during search and zoom', async ({ page }) => {
+  await loaded(page, injected('functions-offline', report => Object.assign(report, stackFixture())));
+  const panel = page.locator('#functions-panel');
+  await expect(page.locator('#functions-status')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('#functions-total')).toContainText('312 ns');
+  await expect(panel.getByRole('button', { name: 'Expand main', exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Expand main', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'compute', exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Collapse main', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'compute', exact: true })).toHaveCount(0);
+  await page.locator('#functions-orientation').selectOption('bottom-up');
+  await expect(page.locator('#functions-status')).toHaveAttribute('data-state', 'ready');
+  await expect(panel.getByRole('button', { name: 'Expand work', exact: true })).toBeVisible();
+  await panel.getByRole('button', { name: 'Expand work', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'compute', exact: true })).toBeVisible();
+  await page.locator('#functions-search').fill('read_batch');
+  await expect(panel.getByRole('button', { name: 'read_batch', exact: true })).toBeVisible();
+  await expect(page.locator('#functions-total')).toContainText('312 ns');
+  await page.locator('#zoom-in').click();
+  await expect(page.locator('#functions-status')).toContainText('Full clock domain');
+  await page.locator('#filter-input').fill('rank:1');
+  await expect(page.locator('#functions-total')).toContainText('Scoped total: 0 ns');
+  await page.locator('#domain-select').selectOption('other');
+  await expect(page.locator('#functions-total')).toContainText('999 ns');
+});
+
+test('function range filtering clips GPU execution while resolving its earlier host launch', async ({ page }) => {
+  await loaded(page, injected('functions-range', report => Object.assign(report, stackFixture())));
+  await page.locator('#functions-metric').selectOption('gpu_time');
+  await expect(page.locator('#functions-status')).toHaveAttribute('data-state', 'ready');
+  const canvas = await page.locator('#timeline-canvas').boundingBox();
+  if (!canvas) throw new Error('Missing timeline canvas');
+  const width = canvas.width - 260;
+  await page.keyboard.down('Shift');
+  await page.mouse.move(canvas.x + 260 + width * .13, canvas.y + 50);
+  await page.mouse.down();
+  await page.mouse.move(canvas.x + 260 + width * .15, canvas.y + 50, { steps: 5 });
+  await page.mouse.up();
+  await page.keyboard.up('Shift');
+  await page.locator('#filter-selection').click();
+  await expect(page.locator('#functions-status')).toHaveAttribute('data-state', 'ready');
+  await expect(page.locator('#functions-status')).not.toContainText('Full clock domain');
+  await expect(page.locator('#functions-panel').getByRole('button', { name: 'train_step', exact: true })).toBeVisible();
+  await expect(page.locator('#functions-total')).toContainText('Unattributed: 0 ns');
+  await page.locator('#clear-selection').click();
+  await expect(page.locator('#functions-total')).toContainText('Scoped total: 40 ns');
+});
+
+test('indexed function queries are independent of timeline rows and expose errors and explicit retry', async ({ page }) => {
+  const fixture = stackFixture();
+  const url = injected('functions-indexed', report => {
+    Object.assign(report, fixture);
+    report.viewer = { endpoint: '/api/window', files_endpoint: '/api/files', stacks_endpoint: '/api/stacks', snapshot: 'stack-snapshot' };
+    report.stacks = { ...fixture.stacks, traces: {}, facts: [], sources: {}, links: [] };
+  });
+
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/html' }); response.end(readFileSync(fileURLToPath(url)));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  let fail = false;
+  const queries: StackQuery[] = [];
+  try {
+    await page.route('**/api/window', async route => {
+      const q = route.request().postDataJSON();
+      await route.fulfill({ json: { ...q, spans: [], counters: [], dependencies: [], io: {}, limited: false, warnings: [] } });
+    });
+    await page.route('**/api/stacks', async route => {
+      const q: StackQuery = route.request().postDataJSON(); queries.push(q);
+      if (fail) await route.fulfill({ status: 400, json: { error: 'Function query deliberately unavailable' } });
+      else await route.fulfill({ json: aggregateStacks(fixture.stacks!, fixture.tracks, q) });
+    });
+    await loaded(page, `http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+    await expect(page.locator('#functions-total')).toContainText('312 ns');
+    const count = queries.length;
+    await page.locator('#zoom-in').click();
+    await page.waitForTimeout(250);
+    expect(queries.length).toBe(count);
+    fail = true;
+    await page.locator('#functions-metric').selectOption('io_time');
+    await expect(page.locator('#functions-status')).toContainText('previous results may be stale');
+    await expect(page.locator('#functions-status')).toHaveAttribute('data-state', 'error');
+    fail = false;
+    await page.getByRole('button', { name: 'Retry functions' }).click();
+    await expect(page.locator('#functions-total')).toContainText('Scoped total: 100 ns');
+  } finally { server.close(); await once(server, 'close'); }
+});
+
+test('large function trees virtualize expanded rows and retain keyboard collapse behavior', async ({ page }) => {
+  await loaded(page, injected('functions-large', report => {
+    const fixture = stackFixture(); Object.assign(report, fixture);
+    fixture.stacks!.facts = []; fixture.stacks!.traces = {};
+    for (let i = 0; i < 2000; i++) {
+      fixture.stacks!.traces[`trace-${i}`] = { status: 'unknown', frames: [
+        { key: 'root', name: 'root', module: '', language: 'native', address: '' },
+        { key: `fn-${i}`, name: `function ${i}`, module: 'workload', language: 'native', address: '' },
+      ] };
+      fixture.stacks!.facts.push({ domain: 'd', track: 's:t', stack: `trace-${i}`, correlation: null,
+        name: 'CPU samples', metric: 'cpu', start_ns: '20', end_ns: '20', weight: '1' });
+    }
+  }));
+  await expect(page.locator('#functions-scroll')).toHaveAttribute('aria-rowcount', '2001');
+  expect(await page.locator('.function-row').count()).toBeLessThan(50);
+  const root = page.getByRole('button', { name: 'Collapse root', exact: true });
+  await root.focus(); await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('#functions-scroll')).toHaveAttribute('aria-rowcount', '1');
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('#functions-scroll')).toHaveAttribute('aria-rowcount', '2001');
+  await page.locator('#functions-search').fill('function 1999');
+  await expect(page.getByRole('button', { name: 'function 1999', exact: true })).toBeVisible();
+  await expect(page.locator('#functions-total')).toContainText('2.000 µs');
+});
 
 test('offline storage overlays coexist with POSIX, expand by filesystem and keep wheel scrolling', async ({ page }) => {
   const url = injected('storage-offline', report => Object.assign(report, storageFixture()));

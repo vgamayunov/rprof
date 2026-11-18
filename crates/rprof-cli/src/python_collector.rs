@@ -474,9 +474,16 @@ fn consume(
             continue;
         }
         let at = now - origin;
+        // Pin before waiting for symbolization's sink lock: the interpreter can
+        // finish while native module symbols are being decoded.
+        let symbols = (m.kind == "runtime" && m.backend == "stacks" && m.initialized)
+            .then(|| crate::stack_symbols::open_python_map(m.pid, m.image));
         let mut out = sink
             .lock()
             .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+        if let Some(symbols) = symbols {
+            out.stack_symbols.pin_python(m.pid, m.image, m.at, symbols);
+        }
         out.set_ingress_loss(
             "python",
             known_loss

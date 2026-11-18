@@ -2,7 +2,7 @@
 
 ## Versioning and framing
 
-`record` writes version 2 (`*.rprof.jsonl`): compact JSON records separated by
+`record` writes version 3 (`*.rprof.jsonl`): compact JSON records separated by
 newlines. The newline commits a complete frame. Each frame is at most **1 MiB**,
 including its newline. Frames are:
 
@@ -24,9 +24,18 @@ Unknown additive JSON fields are ignored. New required fields or event variants
 require an explicit compatibility decision and, when breaking, a version bump.
 
 The CLI still reads bootstrap version-1 whole-document captures up to 16 MiB.
-New captures and `merge` use v2 only; v1 lacks session/clock identity, so it cannot
+New captures and `merge` use v3; readers also accept v2. V1 lacks session/clock identity, so it cannot
 be safely merged by inventing that information. Schema types for v1 remain at
-the `rprof-core` crate root, while v2 types live in `rprof_core::stream`.
+the `rprof-core` crate root, while streaming types live in `rprof_core::stream`.
+
+V3 adds `stack_trace` and `stack_sample` event payloads. Stack definitions contain
+bounded root-to-leaf frame metadata and a shard-local ID; samples reference a
+declared stack (or explicitly lack one) and preserve a positive CPU-clock period.
+Definitions require the reliable writer path. Dictionaries are bounded to 65,536
+entries / 32 MiB per file, and traces to 128 frames. Optional API `stack.id`
+attributes are best-effort references; missing definitions remain unattributed.
+See [stack profiling](stack-profiling.md). Older readers reject v3 rather than
+silently interpreting new sampling records as counters or spans.
 
 ## Identity, timestamps, and event semantics
 

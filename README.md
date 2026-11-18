@@ -56,6 +56,8 @@ read-only feature.
   stream tracks, launch correlations, device metadata, and source-health reporting.
 - Linux perf counters with pre-exec setup, explicit scope, raw/multiplexing values,
   capability diagnostics, and PMU text/HTML summaries.
+- Opt-in frame-pointer CPU stacks, mixed CPython/native stacks on supported builds,
+  native MPI/CUDA/I/O call sites, and filtered top-down/bottom-up function trees.
 - Versioned hardware/workload projection profiles, dependency/resource schedules,
   explicit strong/weak node sweeps, and an offline editor running the Rust engine in WASM.
 - CPython instrumented segments and ranges, plus SDK-free PyTorch/Kineto imports
@@ -194,6 +196,13 @@ and CPU–GPU correlations are preserved. See [CUDA profiling](docs/cuda-profili
 for SDK compatibility, clock normalization, buffer losses, and validation.
 
 ### Collect Linux perf counters
+
+For function attribution, use `--collect stacks`, or `--collect stacks,python`
+for supported mixed Python/native chains. The **Functions** panel below the
+timeline has collapsible top-down/bottom-up views and independent CPU, MPI,
+CUDA and I/O cost channels. See [stack profiling](docs/stack-profiling.md) for
+frame-pointer requirements, native adapter rebuilds, format compatibility and
+current limitations.
 
 For host CPU utilization and memory graphs, use `--collect system` (optionally
 `--system-interval-ms 1000`). The timeline expands overview → host → logical CPU/NUMA

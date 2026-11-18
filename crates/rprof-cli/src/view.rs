@@ -89,7 +89,7 @@ pub fn view(args: ViewArgs) -> Result<()> {
                 continue;
             };
             let route = request.url().split('?').next().unwrap_or("");
-            if route == "/api/window" || route == "/api/files" {
+            if route == "/api/window" || route == "/api/files" || route == "/api/stacks" {
                 if request.method() != &Method::Post {
                     let _ = request.respond(Response::empty(StatusCode(405)));
                     continue;
@@ -113,6 +113,8 @@ pub fn view(args: ViewArgs) -> Result<()> {
                             limits.max_events,
                             limits.max_bytes,
                         )?)?
+                    } else if route == "/api/stacks" {
+                        serde_json::to_vec(&index.stacks(serde_json::from_slice(&body)?)?)?
                     } else {
                         serde_json::to_vec(&index.files(serde_json::from_slice(&body)?)?)?
                     };

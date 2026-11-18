@@ -46,6 +46,7 @@ unsafe fn env_fd(name: &'static [u8]) -> Option<i32> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rprof_mpi_init() {
+    rprof_io_protocol::stacks::configure();
     let Some(fd) = (unsafe { env_fd(b"RPROF_MPI_FD\0") }) else {
         return;
     };
@@ -98,6 +99,7 @@ pub extern "C" fn rprof_mpi_init() {
     STATS.store(stats, Ordering::Release);
     unsafe {
         (*stats).initialized.fetch_add(1, Ordering::Relaxed);
+        rprof_io_protocol::stacks::initialized(&*stats);
     }
     SOCKET.store(fd, Ordering::Release);
     rprof_io_protocol::send_process_name(fd, unsafe { &*stats }, instance);
@@ -111,6 +113,7 @@ pub unsafe extern "C" fn rprof_mpi_begin(
     event: *mut MpiEvent,
     kind: u16,
     name: *const libc::c_char,
+    frame: usize,
 ) -> i32 {
     if SOCKET.load(Ordering::Acquire) < 0 || event.is_null() {
         return 0;
@@ -142,6 +145,17 @@ pub unsafe extern "C" fn rprof_mpi_begin(
             }
             event.name[index] = byte;
         }
+    }
+    let stats = STATS.load(Ordering::Acquire);
+    if kind == rprof_mpi_protocol::CALL && !stats.is_null() {
+        rprof_io_protocol::stacks::send(
+            SOCKET.load(Ordering::Acquire),
+            unsafe { &*stats },
+            rprof_io_protocol::stacks::MPI,
+            event.instance,
+            event.call_id,
+            frame,
+        );
     }
     event.start_ns = rprof_mpi_now();
     1

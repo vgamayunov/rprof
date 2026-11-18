@@ -32,6 +32,7 @@ struct Decode {
     devices: HashMap<(u32, u64, u32), u64>,
     streams: HashMap<(u32, u64, u32, u32, u32), u64>,
     apis: HashMap<ApiKey, Api>,
+    api_stacks: HashMap<ApiKey, u64>,
     recent: VecDeque<ApiKey>,
     invalid_timing: u64,
     unattributed: u64,
@@ -366,6 +367,27 @@ impl Decode {
                 return Self::metadata(&raw, out, process, at, a);
             }
             self.remember(&raw);
+            let stack_key = (raw.instance, raw.api_domain, raw.correlation);
+            let stack = if raw.kind == API_BEGIN {
+                self.api_stacks.remove(&stack_key);
+                let stack = out.take_event_stack(
+                    rprof_io_protocol::stacks::CUDA,
+                    raw.pid,
+                    raw.instance,
+                    raw.activity_id,
+                );
+                if let Some(id) = stack {
+                    if raw.correlation != 0 && self.api_stacks.len() < MAX_METADATA {
+                        self.api_stacks.insert(stack_key, id);
+                    }
+                }
+                stack
+            } else {
+                self.api_stacks.remove(&stack_key)
+            };
+            if let Some(stack) = stack {
+                a.insert("stack.id".into(), Attribute::Unsigned(stack));
+            }
             let track = out.native_thread(at, raw.pid, raw.instance, raw.tid, None)?;
             let correlation = if raw.correlation != 0 {
                 Some(Self::api_corr(out, &raw, raw.api_domain, raw.correlation)?)
@@ -567,6 +589,7 @@ fn consume(
         received,
         dropped,
         initialized: stats.initialized.load(Ordering::Acquire),
+        stack_images: stats.stack_images.load(Ordering::Acquire),
         source_dropped,
         source_errors: stats.source_errors.load(Ordering::Acquire),
         finalized: stats.finalized.load(Ordering::Acquire),

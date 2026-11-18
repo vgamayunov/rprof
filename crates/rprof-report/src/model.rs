@@ -35,6 +35,8 @@ pub struct Report {
     pub pytorch: Option<PytorchSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer: Option<IndexedViewer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacks: Option<crate::stacks::Data>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +44,8 @@ pub struct IndexedViewer {
     pub endpoint: String,
     pub files_endpoint: String,
     pub snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacks_endpoint: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -528,7 +532,7 @@ pub struct ReportShard {
     pub dropped: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportTrack {
     pub id: String,
     pub shard: String,

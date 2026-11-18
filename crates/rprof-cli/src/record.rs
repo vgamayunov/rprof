@@ -58,6 +58,29 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let cuda_enabled = args.collectors.contains(&CollectorKind::Cuda);
     let pmu_enabled = args.collectors.contains(&CollectorKind::Pmu);
     let python_enabled = args.collectors.contains(&CollectorKind::Python);
+    let stacks_enabled = args.collectors.contains(&CollectorKind::Stacks);
+    ensure!(
+        !stacks_enabled
+            || !python_enabled
+            || matches!(
+                args.python_backend,
+                crate::PythonBackend::Auto | crate::PythonBackend::Stacks
+            ),
+        "--collect stacks,python requires --python-backend auto or stacks; function tracing is not mixed stack sampling"
+    );
+    ensure!(
+        stacks_enabled || args.stack_hz == 99,
+        "--stack-hz requires --collect stacks"
+    );
+    ensure!(
+        args.python_backend != crate::PythonBackend::Stacks || stacks_enabled,
+        "--python-backend stacks requires --collect stacks,python"
+    );
+    let mut stack_prepared = if stacks_enabled {
+        Some(rprof_perf::Prepared::stacks(args.stack_hz)?)
+    } else {
+        None
+    };
     let system_enabled = args.collectors.contains(&CollectorKind::System);
     let gpu_enabled = args.collectors.contains(&CollectorKind::Gpu);
     let storage_enabled =
@@ -93,7 +116,11 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let mut python_prepared = if python_enabled {
         Some(crate::python_collector::Prepared::new(
             &args.python_include,
-            args.python_backend.name(),
+            if stacks_enabled && args.python_backend == crate::PythonBackend::Auto {
+                "stacks"
+            } else {
+                args.python_backend.name()
+            },
             args.io_buffer_events as usize,
             inline,
         )?)
@@ -236,6 +263,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             cuda_enabled.then_some("cuda"),
             pmu_enabled.then_some("pmu"),
             python_enabled.then_some("python"),
+            stacks_enabled.then_some("stacks"),
             system_enabled.then_some("system"),
             gpu_enabled.then_some("gpu"),
             storage_enabled.then_some("storage"),
@@ -332,6 +360,24 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     if let Some(python) = &python_prepared {
         environment.extend(python.environment());
     }
+    environment.push((
+        "RPROF_STACKS".into(),
+        if stacks_enabled { "1" } else { "0" }.into(),
+    ));
+    let stack_child = stack_prepared
+        .as_ref()
+        .map(|prepared| prepared.child.clone());
+    let stack_running = stack_prepared
+        .take()
+        .map(|prepared| {
+            crate::stack_collector::Running::start(
+                prepared,
+                Arc::clone(&sink),
+                origin,
+                args.stack_hz,
+            )
+        })
+        .transpose()?;
     let launch_start = elapsed()?;
     let result = supervisor::supervise(
         &args.command,
@@ -361,6 +407,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     }),
             ),
             perf: pmu_prepared.as_ref().map(|p| p.child.clone()),
+            stack_perf: stack_child,
             environment,
             ..Default::default()
         },
@@ -396,6 +443,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                             start_ns: None,
                         },
                     ))?;
+                    if let Some(stacks) = &stack_running {
+                        stacks.activate();
+                    }
                     if let Some(prepared) = pmu_prepared.take() {
                         pmu_running = Some(crate::pmu_collector::Running::start(
                             prepared,
@@ -481,6 +531,9 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
                     if let Some(python) = &python_running {
                         python.check()?;
                     }
+                    if let Some(stacks) = &stack_running {
+                        stacks.check()?;
+                    }
                 }
             }
             Ok(())
@@ -530,6 +583,16 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
     let python_result = python_running
         .map(crate::python_collector::Running::finish)
         .transpose();
+    let stack_result = stack_running
+        .map(crate::stack_collector::Running::finish)
+        .transpose();
+    let result = match stack_result {
+        Ok(_) => result,
+        Err(stack_error) => match result {
+            Ok(_) => Err(stack_error),
+            Err(error) => Err(error.context(format!("stack sampler: {stack_error:#}"))),
+        },
+    };
     let result = result.and_then(|outcome| {
         storage_result?;
         system_result?;
@@ -541,6 +604,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             ensure!(python.errors==0,"Python instrumentation reported {} errors; inspect the saved capture",python.errors);
         }
         if let Some(io) = io_result? {
+            ensure!(!stacks_enabled || io.stack_images >= io.initialized, "I/O adapter lacks call-site stack support; rebuild librprof_io.so with this rprof version");
             eprintln!("I/O: {} attempted, {} received, {} ingress drops across {} process images", io.attempted, io.received, io.dropped, io.initialized);
             ensure!(io.initialized > 0, "I/O preload collector did not initialize; check dynamic linking, LD_PRELOAD support, and the library path");
             let mut out = sink.lock().map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
@@ -550,6 +614,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             }
         }
         if let Some(mpi) = mpi_result? {
+            ensure!(!stacks_enabled || mpi.stack_images >= mpi.initialized, "MPI adapter lacks call-site stack support; rebuild librprof_mpi.so with this rprof version");
             eprintln!("MPI: {} attempted, {} received, {} ingress drops", mpi.attempted, mpi.received, mpi.dropped);
             ensure!(mpi.initialized > 0, "MPI preload collector did not initialize; use a compatible target-built PMPI library");
             let mut out = sink.lock().map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
@@ -577,6 +642,7 @@ pub(crate) fn record(args: RecordArgs) -> Result<u8> {
             }
         }
         if let Some(cuda)=cuda_result?{
+            ensure!(!stacks_enabled || cuda.stack_images >= cuda.initialized, "CUDA adapter lacks call-site stack support; rebuild librprof_cuda.so with this rprof version");
             eprintln!("CUDA: {} native records attempted, {} received, {} ingress drops; {} CUPTI drops; finalized={}",cuda.attempted,cuda.received,cuda.dropped,cuda.source_dropped,cuda.finalized>=cuda.initialized.max(1));
             let mut out=sink.lock().map_err(|_|anyhow::anyhow!("capture writer lock poisoned"))?;
             let at=elapsed()?;

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use rprof_capture::Recorder;
 use rprof_core::{
     CounterSample, CounterValue, Track, TrackKind,
-    stream::{Attribute, Event, Payload},
+    stream::{Attribute, Event, MAX_STACKS, Payload, StackFrame, StackStatus, StackTrace},
 };
 
 /// The supervisor and external native receiver serialize observations here. Raw
@@ -17,6 +17,11 @@ pub struct CaptureSink {
     process_names: std::collections::HashMap<(u32, u64), std::result::Result<String, i32>>,
     threads: std::collections::HashMap<(u32, u64, u32), u64>,
     correlations: std::collections::HashMap<(&'static str, u64), u64>,
+    pub(crate) stack_symbols: crate::stack_symbols::Symbols,
+    stacks: std::collections::HashMap<(Vec<StackFrame>, StackStatus), u64>,
+    stack_bytes: usize,
+    pub(crate) stack_omitted: u64,
+    event_stacks: std::collections::HashMap<(u16, u32, u64, u64), Option<u64>>,
 }
 
 impl CaptureSink {
@@ -31,7 +36,87 @@ impl CaptureSink {
             process_names: Default::default(),
             threads: Default::default(),
             correlations: Default::default(),
+            stack_symbols: crate::stack_symbols::Symbols::new(),
+            stacks: Default::default(),
+            stack_bytes: 0,
+            stack_omitted: 0,
+            event_stacks: Default::default(),
         }
+    }
+
+    pub fn stack(
+        &mut self,
+        at: u64,
+        mut frames: Vec<StackFrame>,
+        mut status: StackStatus,
+    ) -> Result<Option<u64>> {
+        if frames.is_empty() {
+            self.stack_omitted = self.stack_omitted.saturating_add(1);
+            return Ok(None);
+        }
+        while serde_json::to_vec(&frames)?.len() > 60_000 {
+            frames.remove(0);
+            status = StackStatus::Truncated;
+        }
+        let key = (frames, status);
+        if let Some(&id) = self.stacks.get(&key) {
+            return Ok(Some(id));
+        }
+        let id = self.stacks.len() as u64 + 1;
+        let trace = StackTrace {
+            id,
+            frames: key.0.clone(),
+            status,
+        };
+        let bytes = serde_json::to_vec(&trace)?.len();
+        if self.stacks.len() >= MAX_STACKS || self.stack_bytes + bytes > 32 * 1024 * 1024 {
+            self.stack_omitted = self.stack_omitted.saturating_add(1);
+            return Ok(None);
+        }
+        self.reliable(Event::new(at, Payload::StackTrace(trace)))?;
+        self.stack_bytes += bytes;
+        self.stacks.insert(key, id);
+        Ok(Some(id))
+    }
+
+    pub fn event_stack(
+        &mut self,
+        at: u64,
+        raw: &rprof_io_protocol::stacks::Snapshot,
+    ) -> Result<()> {
+        if self.event_stacks.len() >= 65_536 {
+            self.stack_omitted = self.stack_omitted.saturating_add(1);
+            return Ok(());
+        }
+        let frames = self.stack_symbols.resolve(
+            raw.pid,
+            raw.instance,
+            &raw.addresses[..raw.depth as usize],
+            true,
+        );
+        let id = self.stack(
+            at,
+            frames,
+            if raw.truncated != 0 {
+                StackStatus::Truncated
+            } else {
+                StackStatus::Unknown
+            },
+        )?;
+        self.event_stacks
+            .insert((raw.source, raw.pid, raw.instance, raw.token), id);
+        Ok(())
+    }
+    pub fn take_event_stack(
+        &mut self,
+        source: u16,
+        pid: u32,
+        instance: u64,
+        token: u64,
+    ) -> Option<u64> {
+        self.event_stacks
+            .remove(&(source, pid, instance, token))
+            .flatten()
     }
 
     pub fn set_ingress_loss(&mut self, collector: &'static str, count: u64) {

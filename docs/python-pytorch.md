@@ -20,8 +20,10 @@ rprof report torch.rprof.jsonl --format html -o torch.html
 See [Python collection](python-profiling.md) and [PyTorch import and collection](pytorch-import.md)
 for exact contracts and limits. Function tracing is opt-in and substantially
 perturbs tiny functions; `--python-backend ranges` supports coarser annotations.
-Statistical stack sampling, broader interpreter matrices, and automatic alignment
-of imported framework traces with native captures remain future work.
+[Frame-pointer stack sampling](stack-profiling.md) is available on supported
+CPython builds through `--collect stacks,python`, without enabling function tracing.
+Broader unwinding/interpreter coverage, framework-specific stack normalization,
+and automatic alignment of imported framework traces remain future work.
 
 ## Goal and implementation boundary
 

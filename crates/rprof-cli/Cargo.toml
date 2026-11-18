@@ -30,3 +30,6 @@ signal-hook.workspace = true
 uuid.workspace = true
 tempfile.workspace = true
 tiny_http.workspace = true
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+cpp_demangle = "0.4"
+rustc-demangle = "0.1"

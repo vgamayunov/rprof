@@ -144,6 +144,7 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
     let mut open = HashMap::<(Uuid, u64, u64), OpenActivity>::new();
     let mut endpoints = 0;
     let mut omitted_flows = 0u64;
+    let mut omitted_stacks = 0u64;
     let mut observed = HashMap::<String, u128>::new();
     scan(path, Some(report.source_bytes), |record| {
         let id = match &record {
@@ -278,6 +279,7 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
                                 omitted_flows += 1;
                             }
                         }
+                        Payload::StackTrace(_) | Payload::StackSample(_) => omitted_stacks += 1,
                         Payload::Heartbeat => (),
                     }
                 }
@@ -328,11 +330,18 @@ pub fn write_trace(path: &Path, mut out: impl Write, domain: Option<&str>) -> Re
         }
     }
     out.write_all(b"\n],\"displayTimeUnit\":\"ns\",\"rprof\":")?;
+    let mut warnings = report.summary.warnings;
+    if omitted_stacks > 0 {
+        let warning = "Stack definitions/samples are not included in Chrome Trace export; use the HTML report or indexed viewer for function profiles.";
+        eprintln!("{warning}");
+        warnings.push(warning.into());
+    }
     serde_json::to_writer(
         &mut out,
         &json!({
             "session":report.summary.session_id, "provenance":report.provenance,
-            "clock_domain":selected, "complete":report.summary.complete, "warnings":report.summary.warnings,
+            "clock_domain":selected, "complete":report.summary.complete, "warnings":warnings,
+            "omitted_stack_records":omitted_stacks.to_string(),
             "dropped":report.summary.dropped, "omitted_flow_endpoints_or_links":omitted_flows.to_string(),
             "numeric_note":"Trace timestamps are microseconds; exact ns and integer counter values are retained as strings. Reference viewers may round numeric plots."
         }),

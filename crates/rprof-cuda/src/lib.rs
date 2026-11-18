@@ -38,6 +38,7 @@ unsafe fn env_fd(name: &'static [u8]) -> Option<i32> {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn rprof_cuda_init() -> i32 {
+    rprof_io_protocol::stacks::configure();
     if SOCKET.load(Ordering::Acquire) >= 0 {
         return 1;
     }
@@ -100,6 +101,7 @@ pub extern "C" fn rprof_cuda_activate() {
     if !stats.is_null() {
         unsafe {
             (*stats).initialized.fetch_add(1, Ordering::Relaxed);
+            rprof_io_protocol::stacks::initialized(&*stats);
         }
     }
 }
@@ -140,6 +142,7 @@ pub unsafe extern "C" fn rprof_cuda_begin(
     event: *mut CudaEvent,
     kind: u16,
     name: *const libc::c_char,
+    frame: usize,
 ) -> i32 {
     if SOCKET.load(Ordering::Acquire) < 0 || event.is_null() {
         return 0;
@@ -155,6 +158,17 @@ pub unsafe extern "C" fn rprof_cuda_begin(
     event.tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
     event.instance = INSTANCE.load(Ordering::Relaxed);
     event.activity_id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let stats = STATS.load(Ordering::Acquire);
+    if kind == rprof_cuda_protocol::API_BEGIN && !stats.is_null() {
+        rprof_io_protocol::stacks::send(
+            SOCKET.load(Ordering::Acquire),
+            unsafe { &*stats },
+            rprof_io_protocol::stacks::CUDA,
+            event.instance,
+            event.activity_id,
+            frame,
+        );
+    }
     event.start_ns = rprof_cuda_now();
     event.end_ns = event.start_ns;
     event.device = UNKNOWN;

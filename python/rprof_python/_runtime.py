@@ -319,7 +319,7 @@ def _runtime_metadata(state, forked=False):
                detail=_clean(json.dumps({"include": state.roots, "depth_limit": MAX_DEPTH,
                                         "inline": state.inline,
                                         "code_limit": MAX_CODES, "tool_id": state.tool,
-                                        "scope": "user range lifetimes only" if state.backend == "ranges" else "selected frame execution segments; user ranges are elapsed lifetimes"}), 2048)[0])
+                                        "scope": "mixed frame-pointer sampling; no function tracing" if state.backend == "stacks" else "user range lifetimes only" if state.backend == "ranges" else "selected frame execution segments; user ranges are elapsed lifetimes"}), 2048)[0])
 
 
 def install():
@@ -370,6 +370,17 @@ def install():
             _runtime_metadata(state)
             threading.setprofile(_profile)
             sys.setprofile(_profile)
+        elif backend == "stacks":
+            import sysconfig
+            if not hasattr(sys, "activate_stack_trampoline"):
+                raise RuntimeError("mixed stack sampling requires a CPython 3.12+ perf-trampoline build")
+            if "-fno-omit-frame-pointer" not in (sysconfig.get_config_var("PY_CFLAGS") or ""):
+                raise RuntimeError("mixed stack sampling currently requires CPython built with -fno-omit-frame-pointer; DWARF unwinding is not yet supported")
+            if sys.is_stack_trampoline_active():
+                raise RuntimeError("an existing stack trampoline owns profiling; it was preserved")
+            sys.activate_stack_trampoline("perf")
+            state.initialized = True
+            _runtime_metadata(state)
         elif backend == "ranges":
             state.initialized = True
             _runtime_metadata(state)
@@ -404,6 +415,11 @@ def stop():
             state.error("Python profile hook changed during collection")
         if threading.getprofile() is _profile:
             threading.setprofile(None)
+    elif state.initialized and state.backend == "stacks":
+        if sys.is_stack_trampoline_active():
+            sys.deactivate_stack_trampoline()
+        else:
+            state.error("Python stack trampoline was disabled during collection")
     state.emit("final", finalized=True,
                abandoned=sum(len(t.stack) for t in state.threads) + state.ranges_open,
                inflight=state.active_callbacks)

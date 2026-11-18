@@ -43,7 +43,7 @@ Report {
     attributes: { [key: string]: string }
   }],
   dependencies: [{ from: string, to: string, relation: string }],
-  viewer?: { endpoint: string, files_endpoint: string, snapshot: string }, // local indexed view only
+  viewer?: { endpoint: string, files_endpoint: string, snapshot: string, stacks_endpoint?: string }, // local indexed view only
   mpi?: [{ shard: string, rank: number, name: string, calls: string, errors: string,
     total_ns: string, max_ns: string, logical_bytes: string, calls_with_bytes: string }],
   io?: [{
@@ -110,6 +110,14 @@ explicitly distinct from native monotonic domains, and source export loss is unk
 The HTML shell contains an inert `<script type="application/json" id="rprof-data">`
 with safely escaped JSON, followed by a self-contained script bundle. The UI
 initializes from that element. It makes no network requests and uses no CDN.
+
+Optional `stacks` data is defined in `rprof-report/src/stacks.rs` and
+`ui/src/stacks.ts`: interned frame paths, normalized cost facts, explicit launch
+links, coverage warnings and a separate offline-completeness flag. Frame addresses
+are hexadecimal strings; weights and timestamps are decimal strings. That flag
+describes retention of the filtering dataset, not loss-free or complete collection.
+Indexed reports leave fact arrays empty and provide `viewer.stacks_endpoint`.
+See [stack profiling](stack-profiling.md) for metric/range semantics and limits.
 
 `io` is an additive field; older v1 report models omit it. Its summary covers all
 captured structured I/O spans independently of timeline retention. Fields are

@@ -109,7 +109,9 @@ attributes, so older readers can retain it without applying alignment.
 The nonblocking same-host transport uses shared loss counters and bounded external
 conversion. `--native-buffer-events` defaults to 16,384 per collector
 (`--io-buffer-events` is an alias); MPI observations are 472 bytes. Opaque MPI
-handles and target pointers never enter the wire/capture formats.
+handles and application buffer pointers are not serialized. Opt-in
+[stack profiling](stack-profiling.md) adds separate call-site observations with
+code addresses; rebuild the adapter before using `--collect stacks,mpi`.
 
 The adapter bounds outstanding requests at 8,192, communicator tracking at 2,048,
 and array-operation scratch at 4,096 requests. Scratch uses bounded allocation.

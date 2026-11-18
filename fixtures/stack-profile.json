@@ -1,0 +1,49 @@
+{
+  "tracks": [
+    {"id":"s:p","shard":"s","parent":null,"name":"solver","kind":"process","rank":0,"details":{"pid":"1"}},
+    {"id":"s:t","shard":"s","parent":"s:p","name":"thread 2","kind":"thread","rank":0,"details":{"tid":"2"}},
+    {"id":"s:io","shard":"s","parent":"s:t","name":"/data/input","kind":"io","rank":0,"details":{"resource":"/data/input"}},
+    {"id":"s:gpu","shard":"s","parent":"s:p","name":"GPU stream 1","kind":"gpu_stream","rank":0,"details":{"stream":"1"}},
+    {"id":"other:t","shard":"other","parent":null,"name":"thread 3","kind":"thread","rank":1,"details":{"tid":"3"}}
+  ],
+  "data": {
+    "traces": {
+      "read": {"status":"unknown","frames":[
+        {"key":"main","name":"main","module":"solver","language":"native","address":"0x1000"},
+        {"key":"read_batch","name":"read_batch","module":"app.py","language":"python","address":"0x2000"},
+        {"key":"work","name":"work","module":"libwork.so","language":"native","address":"0x3000"}
+      ]},
+      "compute": {"status":"unknown","frames":[
+        {"key":"main","name":"main","module":"solver","language":"native","address":"0x1000"},
+        {"key":"compute","name":"compute","module":"app.py","language":"python","address":"0x2100"},
+        {"key":"work","name":"work","module":"libwork.so","language":"native","address":"0x3001"}
+      ]},
+      "recursive": {"status":"truncated","frames":[
+        {"key":"main","name":"main","module":"solver","language":"native","address":"0x1000"},
+        {"key":"work","name":"work","module":"libwork.so","language":"native","address":"0x3000"},
+        {"key":"work","name":"work","module":"libwork.so","language":"native","address":"0x3002"}
+      ]},
+      "launch": {"status":"unknown","frames":[
+        {"key":"main","name":"main","module":"solver","language":"native","address":"0x1000"},
+        {"key":"train_step","name":"train_step","module":"app.py","language":"python","address":"0x2200"},
+        {"key":"cuda_launch","name":"cudaLaunchKernel","module":"libcudart.so","language":"native","address":"0x4000"}
+      ]}
+    },
+    "facts": [
+      {"domain":"d","track":"s:t","stack":"read","correlation":null,"name":"CPU samples","metric":"cpu","start_ns":"20","end_ns":"20","weight":"100"},
+      {"domain":"d","track":"s:t","stack":"compute","correlation":null,"name":"CPU samples","metric":"cpu","start_ns":"30","end_ns":"30","weight":"200"},
+      {"domain":"d","track":"s:t","stack":"recursive","correlation":null,"name":"CPU samples","metric":"cpu","start_ns":"40","end_ns":"40","weight":"7"},
+      {"domain":"d","track":"s:t","stack":null,"correlation":null,"name":"CPU samples","metric":"cpu","start_ns":"60","end_ns":"60","weight":"5"},
+      {"domain":"other","track":"other:t","stack":"compute","correlation":null,"name":"CPU samples","metric":"cpu","start_ns":"25","end_ns":"25","weight":"999"},
+      {"domain":"d","track":"s:io","stack":"read","correlation":null,"name":"read","metric":"io_time","start_ns":"50","end_ns":"150","weight":"100"},
+      {"domain":"d","track":"s:io","stack":"read","correlation":null,"name":"read","metric":"io_bytes","start_ns":"150","end_ns":"150","weight":"9007199254740993"},
+      {"domain":"d","track":"s:t","stack":"launch","correlation":"host-launch","name":"cudaLaunchKernel","metric":"cuda_api","start_ns":"1","end_ns":"10","weight":"9"},
+      {"domain":"d","track":"s:gpu","stack":null,"correlation":"kernel","name":"kernel","metric":"gpu_time","start_ns":"120","end_ns":"160","weight":"40"}
+    ],
+    "sources": {"host-launch":["launch"]},
+    "links": [{"from":"host-launch","to":"kernel","priority":2}],
+    "complete": true,
+    "observations": "9",
+    "warnings": ["Synthetic stack fixture; frame-pointer coverage is unknown."]
+  }
+}

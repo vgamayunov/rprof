@@ -32,7 +32,9 @@ SQLite installation or C++ compiler is needed.
   The filter clips spans, sampled graphs and their click targets to the range.
   Inspectors retain the original full event/sample interval and exact values;
   partially intersecting metric bins are not recomputed or prorated. Overview and
-  summary tables remain capture-wide (or their existing selected-domain scope).
+  existing collector summary tables remain capture-wide (or their existing
+  selected-domain scope). The **Functions** panel is recomputed from the selected
+  range using its own complete index, not retained/visible timeline rows.
 - CPU/memory queries choose a resolution appropriate for the window. Coarse buckets
   retain original **first, last, minimum and maximum** observations, with source-gap
   information. Zooming retrieves finer samples, never invented intermediate values.
@@ -114,6 +116,11 @@ new disk-backed *per-file aggregate table* is separate work. The indexed bootstr
 does not compute or embed the standalone per-file table.
 
 ## Portable HTML
+
+Stack captures add `/api/stacks` queries with independent metric, orientation,
+rank/thread grouping and exact range filtering. CPU weights, API durations and
+GPU/byte attribution are separate channels. See [stack profiling](stack-profiling.md)
+for query limits and the separate offline stack-data budget.
 
 `rprof report --format html` remains self-contained and offline. Its raw-event and
 summary budgets still apply; it does not fetch an index. Use it for sharing a compact

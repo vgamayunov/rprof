@@ -16,6 +16,13 @@ initialization is a collector failure with the application's exit status preserv
 
 ## Modes and attribution
 
+For mixed statistical Python/native stacks instead of function tracing, use
+`--collect stacks,python`. Its `auto` backend selects `stacks`, which activates
+supported CPython perf trampolines and preserves explicit user ranges. This
+requires frame-pointer CPython 3.12-3.14 builds and does not support combining the
+sampling mode with the function-tracing backends below. See
+[stack profiling](stack-profiling.md) for coverage and limits.
+
 - `--python-backend auto`: `sys.monitoring` on CPython 3.12+, otherwise the profile
   hook fallback. API support is gated to GIL-enabled CPython 3.10–3.14.
 - `--python-backend monitoring`: instrument start/resume/return/yield/unwind events.
@@ -121,5 +128,6 @@ This is **very high perturbation for tiny functions**, not a low-overhead sample
 Use selected coarse functions, explicit ranges, or the framework-owned operator
 profiler for performance measurements. The ranges-only probe measures disabled
 function tracing, not per-range cost. Startup/import and native collector overhead
-are additional. Lower-overhead native callbacks and statistical sampling remain
-future work; no general overhead bound is claimed.
+are additional. Lower-overhead tracing callbacks and broader unwinding support
+remain separate work. Frame-pointer sampling is now available on supported builds,
+but no general overhead bound is claimed.

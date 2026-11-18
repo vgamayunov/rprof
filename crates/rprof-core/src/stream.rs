@@ -1,4 +1,4 @@
-//! Version 2 streaming schema. Each record is one bounded, newline-terminated JSON
+//! Versioned streaming schema. Each record is one bounded, newline-terminated JSON
 //! frame. A complete prefix is recoverable without a footer. Version 1 remains
 //! available at the crate root for reading bootstrap captures.
 
@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use crate::{CounterSample, Span, Track};
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+pub const MAX_STACK_DEPTH: usize = 128;
+pub const MAX_STACKS: usize = 65_536;
 pub const FORMAT: &str = "rprof-stream";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +90,8 @@ impl Event {
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Payload {
     Track(Track),
+    StackTrace(StackTrace),
+    StackSample(StackSample),
     Span(Span),
     Counter(CounterSample),
     /// An open activity remains useful even if the process or profiler is killed.
@@ -107,6 +111,51 @@ pub enum Payload {
         relation: String,
     },
     Heartbeat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct StackFrame {
+    /// Stable symbol identity within its module/image, distinct from its label.
+    pub key: String,
+    pub name: String,
+    pub module: String,
+    pub language: FrameLanguage,
+    /// Original instruction/return address; never used to combine different images.
+    pub address: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameLanguage {
+    Native,
+    Python,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StackStatus {
+    /// Frame-pointer unwinding cannot establish that omitted frames were absent.
+    Unknown,
+    Truncated,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackTrace {
+    pub id: u64,
+    /// Root/caller first, sampled leaf or event call site last.
+    pub frames: Vec<StackFrame>,
+    pub status: StackStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackSample {
+    pub track_id: u64,
+    pub timestamp_ns: u64,
+    pub stack_id: Option<u64>,
+    /// Recorded cpu-clock sampling period, not an exact function duration.
+    pub period_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

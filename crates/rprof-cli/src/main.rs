@@ -13,6 +13,8 @@ mod python_collector;
 mod pytorch_import;
 mod record;
 mod report;
+mod stack_collector;
+mod stack_symbols;
 mod storage_collector;
 mod supervisor;
 mod system_collector;
@@ -81,6 +83,9 @@ pub(crate) struct RecordArgs {
         default_value = "process"
     )]
     collectors: Vec<CollectorKind>,
+    /// Sample user-space frame-pointer stacks; requires Linux perf permission.
+    #[arg(long, default_value_t = 99, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    stack_hz: u32,
     /// Path to librprof_io.so (default: alongside the rprof executable).
     #[arg(long)]
     io_library: Option<PathBuf>,
@@ -159,6 +164,7 @@ pub(crate) enum CollectorKind {
     System,
     Gpu,
     Storage,
+    Stacks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -167,6 +173,7 @@ pub(crate) enum PythonBackend {
     Monitoring,
     Profile,
     Ranges,
+    Stacks,
 }
 impl PythonBackend {
     fn name(self) -> &'static str {
@@ -175,6 +182,7 @@ impl PythonBackend {
             Self::Monitoring => "monitoring",
             Self::Profile => "profile",
             Self::Ranges => "ranges",
+            Self::Stacks => "stacks",
         }
     }
 }

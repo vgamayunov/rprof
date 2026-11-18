@@ -120,8 +120,8 @@ impl Recorder {
     /// its batch was dropped. A true result may still be in the staging batch.
     pub fn emit(&mut self, event: Event) -> Result<bool> {
         ensure!(
-            !matches!(event.payload, Payload::Track(_)),
-            "track declarations require reliable()"
+            !matches!(event.payload, Payload::Track(_) | Payload::StackTrace(_)),
+            "track and stack declarations require reliable()"
         );
         validate_values(&event)?;
         let bytes = match encode(&event, MAX_EVENT_BYTES) {

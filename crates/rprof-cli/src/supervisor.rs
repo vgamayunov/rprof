@@ -32,6 +32,7 @@ pub struct Config {
     pub environment: Vec<(OsString, OsString)>,
     pub heartbeat_interval: Duration,
     pub perf: Option<rprof_perf::ChildSetup>,
+    pub stack_perf: Option<rprof_perf::ChildSetup>,
 }
 
 impl Default for Config {
@@ -42,6 +43,7 @@ impl Default for Config {
             environment: Vec::new(),
             heartbeat_interval: Duration::from_millis(100),
             perf: None,
+            stack_perf: None,
         }
     }
 }
@@ -293,6 +295,7 @@ pub fn supervise(
     process.envs(config.environment);
     let tty = foreground.as_ref().map(|value| value.fd);
     let perf = config.perf;
+    let stack_perf = config.stack_perf;
     // SAFETY: group/terminal setup and optional perf installation use only
     // syscalls and preallocated/stack data. Perf fds are sent without waiting
     // for the parent, preserving Command::spawn's exec-error handshake.
@@ -306,6 +309,9 @@ pub fn supervise(
                 set_foreground(fd, libc::getpgrp())?;
             }
             if let Some(perf) = &perf {
+                perf.install()?;
+            }
+            if let Some(perf) = &stack_perf {
                 perf.install()?;
             }
             Ok(())

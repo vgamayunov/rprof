@@ -20,7 +20,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const MAX_REPLY: usize = 16 * 1024 * 1024;
 const MAX_RAW: usize = 20_000;
 const MAX_METADATA: usize = 64 * 1024 * 1024;
@@ -224,6 +224,9 @@ impl CaptureIndex {
         let mut report = crate::analyze::indexed_metadata(&input, source.length)?;
         let snapshot = format!("{:x}", Sha256::digest(serde_json::to_vec(&source)?));
         build(&db, &input, source.length, &mut report)?;
+        if report.stacks.is_some() {
+            report.stacks = crate::stacks::index(&db, &input, source.length, &report.shards)?;
+        }
         metrics::pyramid(&db)?;
         ensure!(
             stamp(&input)? == source,
@@ -233,6 +236,7 @@ impl CaptureIndex {
             endpoint: "/api/window".into(),
             files_endpoint: "/api/files".into(),
             snapshot: snapshot.clone(),
+            stacks_endpoint: report.stacks.as_ref().map(|_| "/api/stacks".into()),
         });
         report.io.clear(); // Per-file aggregate browsing is a separate workflow; file lanes are paged below threads.
         report
@@ -292,6 +296,15 @@ impl CaptureIndex {
     }
     pub fn report(&self) -> Result<Report> {
         Ok(serde_json::from_str(&self.metadata)?)
+    }
+    pub fn stacks(&self, query: crate::stacks::Query) -> Result<crate::stacks::Tree> {
+        ensure!(
+            query.snapshot == self.snapshot,
+            "viewer snapshot changed; reload the page"
+        );
+        let report = self.report()?;
+        ensure!(report.stacks.is_some(), "stack data was not collected");
+        crate::stacks::query(&self.db, &report, query)
     }
     pub fn files(&self, query: FilesRequest) -> Result<FilesResponse> {
         ensure!(

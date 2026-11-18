@@ -21,15 +21,16 @@ struct rprof_io_event {
     uint8_t path[256];
     uint64_t fs_magic, mount_namespace;
     uint32_t dev_major, dev_minor, mount_id, file_mode, fs_valid;
+    uint64_t stack_token;
 };
-_Static_assert(sizeof(struct rprof_io_event) == 392, "Rust/C event ABI mismatch");
+_Static_assert(sizeof(struct rprof_io_event) == 400, "Rust/C event ABI mismatch");
 
 void rprof_io_init(void);
 void rprof_io_after_fork(void);
 void rprof_io_fini(void);
 int rprof_io_begin(struct rprof_io_event *event, uint16_t operation, int fd,
                    int other_fd, const char *path, int flags, int64_t offset,
-                   uint64_t requested);
+                   uint64_t requested, uintptr_t frame);
 void rprof_io_end(struct rprof_io_event *event, int64_t result, int error);
 
 #endif

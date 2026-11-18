@@ -7,6 +7,7 @@ import { ProjectionViewer } from './projection.js';
 import type { Projection } from './projection.js';
 import { WindowCache, emptyScopes, hasScopes, windowIdentity } from './window-cache.js';
 import type { WindowRequest, WindowResponse, WindowScopes } from './window-cache.js';
+import { StackPanel } from './stack-panel.js';
 
 const startingTheme = initialTheme();
 document.documentElement.dataset.theme = startingTheme;
@@ -67,6 +68,7 @@ function clamp(value: number, min: number, max: number): number { return Math.mi
 function optionalNs(value: string | null): string { return value === null ? '—' : `${value} ns`; }
 
 class Viewer {
+  private readonly functions: StackPanel;
   private readonly report: Report;
   private data: Map<string, TrackData>;
   private readonly root: HTMLElement;
@@ -238,6 +240,7 @@ class Viewer {
     this.ruler = this.get('time-ruler') as HTMLCanvasElement;
     this.detail = this.get('detail-content');
     this.rangeLabel = this.get('range-label');
+    this.functions = new StackPanel(report, this.root.querySelector<HTMLElement>('.timeline-section')!, localEndpoint);
     this.windowStatus = node('span', 'window-status');
     this.windowStatus.id = 'window-status';
     this.fileControls = node('div', 'file-controls');
@@ -1139,7 +1142,7 @@ class Viewer {
     (this.get('clear-selection') as HTMLButtonElement).disabled = !this.timeRange && !this.timeFilter;
     const text = (range: TimeRange) => `${formatNs(range.start)}–${formatNs(range.end)} (${formatNs(range.end - range.start)})`;
     const label = this.get('selection-range');
-    label.textContent = `${this.timeRange ? `Selected ${text(this.timeRange)}` : 'Shift-drag to select a time range'}${this.timeFilter ? ` · Timeline filter ${text(this.timeFilter)} · summaries remain capture-wide` : ''}`;
+    label.textContent = `${this.timeRange ? `Selected ${text(this.timeRange)}` : 'Shift-drag to select a time range'}${this.timeFilter ? ` · Timeline / functions filter ${text(this.timeFilter)} · other summaries remain capture-wide` : ''}`;
     label.title = this.timeRange ? `${this.timeRange.start}–${this.timeRange.end} ns · domain-relative` : '';
     label.dataset.startNs = this.timeRange?.start.toString() ?? '';
     label.dataset.endNs = this.timeRange?.end.toString() ?? '';
@@ -1189,6 +1192,7 @@ class Viewer {
   }
 
   private schedule(): void {
+    this.functions.setScope(this.domain?.id, this.timeFilter, this.filter.value);
     if (this.frame) return;
     this.frame = requestAnimationFrame(() => { this.frame = 0; this.draw(); this.queueWindow(); });
   }

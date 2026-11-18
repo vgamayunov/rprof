@@ -199,7 +199,30 @@ fn interruption_finalizes_counter_reads_after_workload_cleanup() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Signal the running workload, not a cold profiler still preparing its capture.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let started = fs::read(&path).is_ok_and(|bytes| {
+            bytes
+                .windows(b"\"kind\":\"activity_start\"".len())
+                .any(|part| part == b"\"kind\":\"activity_start\"")
+        });
+        if started {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
+            let _ = child.wait();
+            panic!("profiler did not start its workload within 10 seconds");
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "profiler exited before starting its workload"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
     let status = child.wait().unwrap();
     let report = rprof_report::analyze(&path, Default::default()).unwrap();

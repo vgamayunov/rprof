@@ -285,6 +285,7 @@ pub struct Outcome {
     pub received: u64,
     pub dropped: u64,
     pub initialized: u64,
+    pub stack_images: u64,
     pub source_dropped: u64,
     pub source_errors: u64,
     pub finalized: u64,
@@ -355,6 +356,7 @@ fn receive(
 pub(crate) enum Packet<T> {
     Observation(T),
     Process(Box<ProcessEvent>),
+    Stack(Box<rprof_io_protocol::stacks::Snapshot>),
 }
 impl<T> Packet<T> {
     pub(crate) fn observation(
@@ -365,6 +367,14 @@ impl<T> Packet<T> {
     ) -> Result<Option<T>> {
         match self {
             Self::Observation(raw) => Ok(Some(raw)),
+            Self::Stack(raw) => {
+                let mut out = sink
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("capture writer lock poisoned"))?;
+                out.event_stack(monotonic_ns()?.saturating_sub(origin), &raw)?;
+                *received += 1;
+                Ok(None)
+            }
             Self::Process(raw) => {
                 let name = if raw.error == 0 {
                     Ok(String::from_utf8_lossy(&raw.name[..raw.name_len as usize]).into_owned())
@@ -395,7 +405,9 @@ pub(crate) fn pump<T: Copy + Send>(
 ) -> Result<()> {
     // Instantiated only with the fixed integer/byte-array POD wire structs.
     let size = std::mem::size_of::<T>();
-    let max_size = size.max(PROCESS_EVENT_SIZE);
+    let max_size = size
+        .max(PROCESS_EVENT_SIZE)
+        .max(rprof_io_protocol::stacks::SIZE);
     ensure!(max_size <= 1023, "native wire event exceeds buffer");
     let mut buffer = [0u8; 1024];
     let mut drain_count = 0;
@@ -428,11 +440,51 @@ pub(crate) fn pump<T: Copy + Send>(
                         continue;
                     }
                     Packet::Process(Box::new(raw))
+                } else if length == rprof_io_protocol::stacks::SIZE
+                    && u32::from_ne_bytes(buffer[..4].try_into().unwrap())
+                        == rprof_io_protocol::stacks::MAGIC
+                {
+                    let raw = unsafe {
+                        std::ptr::read_unaligned(
+                            buffer
+                                .as_ptr()
+                                .cast::<rprof_io_protocol::stacks::Snapshot>(),
+                        )
+                    };
+                    if raw.version != rprof_io_protocol::stacks::VERSION
+                        || raw.pid == 0
+                        || raw.instance == 0
+                        || raw.token == 0
+                        || raw.depth as usize > raw.addresses.len()
+                        || raw.truncated > 1
+                        || !matches!(
+                            raw.source,
+                            rprof_io_protocol::stacks::IO
+                                | rprof_io_protocol::stacks::MPI
+                                | rprof_io_protocol::stacks::CUDA
+                        )
+                    {
+                        continue;
+                    }
+                    Packet::Stack(Box::new(raw))
                 } else if length == size {
                     Packet::Observation(unsafe {
                         std::ptr::read_unaligned(buffer.as_ptr().cast::<T>())
                     })
                 } else {
+                    if length >= 4
+                        && matches!(
+                            u32::from_ne_bytes(buffer[..4].try_into().unwrap()),
+                            MAGIC
+                                | rprof_mpi_protocol::MAGIC
+                                | rprof_ompt_protocol::MAGIC
+                                | rprof_cuda_protocol::MAGIC
+                        )
+                    {
+                        anyhow::bail!(
+                            "native collector wire size mismatch; rebuild the adapter with this rprof version"
+                        );
+                    }
                     continue;
                 };
                 match sender.try_send(packet) {
@@ -574,6 +626,14 @@ fn consume(
             ("process_instance".into(), Attribute::Unsigned(raw.instance)),
         ]);
         attrs.extend(filesystem.attributes(&raw));
+        if let Some(stack) = out.take_event_stack(
+            rprof_io_protocol::stacks::IO,
+            raw.pid,
+            raw.instance,
+            raw.stack_token,
+        ) {
+            attrs.insert("stack.id".into(), Attribute::Unsigned(stack));
+        }
         if std::str::from_utf8(path_bytes).is_err() {
             attrs.insert(
                 "io.path_raw_hex".into(),
@@ -605,6 +665,7 @@ fn consume(
         received,
         dropped,
         initialized: stats.initialized.load(Ordering::Acquire),
+        stack_images: stats.stack_images.load(Ordering::Acquire),
         ..Default::default()
     })
 }

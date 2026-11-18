@@ -29,7 +29,8 @@ _Static_assert(sizeof(struct rprof_mpi_event) == 472, "MPI Rust/C ABI mismatch")
 void rprof_mpi_init(void);
 /* Returns 0 if disabled; otherwise zeroes event and fills identity/time/name,
  * assigns a unique call_id, and sets rank/peer/etc to -1. Does not call MPI. */
-int rprof_mpi_begin(struct rprof_mpi_event *event, uint16_t kind, const char *name);
+int rprof_mpi_begin(struct rprof_mpi_event *event, uint16_t kind, const char *name, uintptr_t frame);
+#define rprof_mpi_begin(event, kind, name) rprof_mpi_begin(event, kind, name, (uintptr_t)__builtin_frame_address(0))
 /* Fills wire magic/version if needed, keeps supplied times/IDs, sends once
  * nonblocking and updates shared attempt/loss counters. */
 void rprof_mpi_emit(struct rprof_mpi_event *event);

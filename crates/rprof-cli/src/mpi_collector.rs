@@ -134,6 +134,14 @@ impl Decode {
         }
         match raw.kind {
             CALL => {
+                if let Some(stack) = out.take_event_stack(
+                    rprof_io_protocol::stacks::MPI,
+                    raw.pid,
+                    raw.instance,
+                    raw.call_id,
+                ) {
+                    attrs.insert("stack.id".into(), Attribute::Unsigned(stack));
+                }
                 attrs.insert("mpi.record_type".into(), Attribute::Text("call".into()));
                 attrs.insert(
                     "mpi.abort_entry".into(),
@@ -326,6 +334,7 @@ fn consume(
         received,
         dropped,
         initialized: stats.initialized.load(Ordering::Acquire),
+        stack_images: stats.stack_images.load(Ordering::Acquire),
         ..Default::default()
     })
 }

@@ -1,4 +1,4 @@
-//! Linux counting-only perf events. Installed in the workload before exec, enabled
+//! Linux perf events. Installed in the workload before exec, enabled
 //! by exec, and passed to the supervisor using SCM_RIGHTS. No attach/start race,
 //! preload dependency, sampling interrupts, or allocation in the post-fork hook.
 use std::{
@@ -10,7 +10,10 @@ use std::{
     sync::Arc,
 };
 
+pub mod sampling;
+
 pub const MAX_EVENTS: usize = 32;
+const MAX_HANDOFF: usize = 240;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventSpec {
     pub name: String,
@@ -85,8 +88,17 @@ struct Attr {
     wakeup: u32,
     bp_type: u32,
     config1: u64,
+    config2: u64,
+    branch_sample_type: u64,
+    sample_regs_user: u64,
+    sample_stack_user: u32,
+    clockid: i32,
+    sample_regs_intr: u64,
+    aux_watermark: u32,
+    sample_max_stack: u16,
+    reserved: u16,
 }
-const _: () = assert!(std::mem::size_of::<Attr>() == 64);
+const _: () = assert!(std::mem::size_of::<Attr>() == 112);
 
 #[derive(Clone, Debug)]
 pub struct ChildSetup {
@@ -94,6 +106,7 @@ pub struct ChildSetup {
     specs: Vec<EventSpec>,
     inherit: bool,
     kernel: bool,
+    sampling: Option<sampling::Settings>,
 }
 pub struct Prepared {
     receiver: UnixDatagram,
@@ -108,7 +121,7 @@ pub struct Counter {
 #[repr(C)]
 struct Control {
     _alignment: [usize; 0],
-    bytes: [u8; 256],
+    bytes: [u8; 1024],
 }
 impl Prepared {
     pub fn new(specs: Vec<EventSpec>, inherit: bool, kernel: bool) -> io::Result<Self> {
@@ -127,15 +140,19 @@ impl Prepared {
                 specs,
                 inherit,
                 kernel,
+                sampling: None,
             },
         })
     }
     /// Called only after successful spawn: the child already sent exactly one message.
     pub fn receive(self) -> io::Result<Vec<Counter>> {
-        let mut status = [0i32; MAX_EVENTS];
+        self.receive_descriptors()
+    }
+    fn receive_descriptors(&self) -> io::Result<Vec<Counter>> {
+        let mut status = [0i32; MAX_HANDOFF];
         let mut control = Control {
             _alignment: [],
-            bytes: [0; 256],
+            bytes: [0; 1024],
         };
         let mut iov = libc::iovec {
             iov_base: status.as_mut_ptr().cast(),
@@ -188,7 +205,8 @@ impl Prepared {
         Ok(self
             .child
             .specs
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(status)
             .map(|(spec, error)| Counter {
                 spec,
@@ -206,11 +224,11 @@ impl ChildSetup {
     /// Post-fork/pre-exec: stack storage and Linux syscalls only. Individual open
     /// failures are sent as errno values; the application's exec still proceeds.
     pub fn install(&self) -> io::Result<()> {
-        let mut status = [0i32; MAX_EVENTS];
-        let mut fds = [-1i32; MAX_EVENTS];
+        let mut status = [0i32; MAX_HANDOFF];
+        let mut fds = [-1i32; MAX_HANDOFF];
         let mut count = 0;
         for (index, spec) in self.specs.iter().enumerate() {
-            let attr = Attr {
+            let mut attr = Attr {
                 kind: spec.kind,
                 size: 64,
                 config: spec.config,
@@ -222,9 +240,34 @@ impl ChildSetup {
                     | (1 << 12),
                 ..Default::default()
             };
-            let fd = unsafe {
-                libc::syscall(libc::SYS_perf_event_open, &attr, 0i32, -1i32, -1i32, 8u64)
-            } as i32;
+            let cpu = if let Some(sampling) = &self.sampling {
+                attr.size = std::mem::size_of::<Attr>() as u32;
+                attr.period = sampling.period_ns;
+                attr.read_format = 0;
+                attr.sample_type = 1 | 2 | 4 | (1 << 5) | (1 << 8);
+                attr.flags = 1
+                    | (1 << 1)
+                    | (1 << 5)
+                    | (1 << 6)
+                    | (1 << 8)
+                    | (1 << 9)
+                    | (1 << 12)
+                    | (1 << 13)
+                    | (1 << 18)
+                    | (1 << 21)
+                    | (1 << 23)
+                    | (1 << 24)
+                    | (1 << 25);
+                attr.clockid = libc::CLOCK_MONOTONIC;
+                attr.sample_max_stack = 0;
+                attr.wakeup = 1;
+                sampling.cpus[index]
+            } else {
+                -1
+            };
+            let fd =
+                unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0i32, cpu, -1i32, 8u64) }
+                    as i32;
             if fd < 0 {
                 status[index] = io::Error::last_os_error()
                     .raw_os_error()
@@ -236,7 +279,7 @@ impl ChildSetup {
         }
         let mut control = Control {
             _alignment: [],
-            bytes: [0; 256],
+            bytes: [0; 1024],
         };
         let mut iov = libc::iovec {
             iov_base: status.as_mut_ptr().cast(),
@@ -275,7 +318,23 @@ impl ChildSetup {
                 libc::close(*fd);
             }
         }
-        result
+        result?;
+        if self.sampling.is_some() {
+            // The reader maps every ring before exec can emit loader/sample records.
+            let mut ready = 0u8;
+            let received = unsafe {
+                libc::recv(
+                    self.socket.as_raw_fd(),
+                    (&mut ready as *mut u8).cast(),
+                    1,
+                    0,
+                )
+            };
+            if received != 1 || ready != 1 {
+                return Err(io::Error::from_raw_os_error(libc::EIO));
+            }
+        }
+        Ok(())
     }
 }
 

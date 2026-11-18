@@ -2,6 +2,7 @@
 //! or serialized strings cross the callback boundary. This is not a network format.
 
 use std::sync::atomic::AtomicU64;
+pub mod stacks;
 
 /// A common process-image identity for independently loaded native collectors.
 /// Linux supplies fresh AT_RANDOM bytes at exec; including PID distinguishes fork.
@@ -99,7 +100,7 @@ pub fn send_process_name(socket: i32, stats: &Stats, instance: u64) {
 }
 
 pub const MAGIC: u32 = 0x5250494f;
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const STATS_MAGIC: u64 = 0x5250524f46494f31;
 pub const PATH_CAPACITY: usize = 256;
 pub const PATH_TRUNCATED: u16 = 1;
@@ -180,9 +181,10 @@ pub struct IoEvent {
     pub mount_id: u32,
     pub file_mode: u32,
     pub fs_valid: u32,
+    pub stack_token: u64,
 }
 
-pub const EVENT_SIZE: usize = 392;
+pub const EVENT_SIZE: usize = 400;
 const _: () = assert!(std::mem::size_of::<IoEvent>() == EVENT_SIZE);
 
 /// Shared mmap counters survive fork/exec, _exit and fatal signals. The CLI owns
@@ -198,6 +200,8 @@ pub struct Stats {
     pub source_dropped: AtomicU64,
     pub source_errors: AtomicU64,
     pub finalized: AtomicU64,
+    /// Images that initialized the opt-in call-site stack protocol.
+    pub stack_images: AtomicU64,
 }
 
 impl Default for Stats {
@@ -211,6 +215,7 @@ impl Default for Stats {
             source_dropped: AtomicU64::new(0),
             source_errors: AtomicU64::new(0),
             finalized: AtomicU64::new(0),
+            stack_images: AtomicU64::new(0),
         }
     }
 }

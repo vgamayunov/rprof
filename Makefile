@@ -20,7 +20,7 @@ preload:
 	$(CARGO) build -p rprof-preload $(CARGO_FLAGS)
 	@set -eu; temporary=$$(mktemp "$(PRELOAD).XXXXXX"); \
 		trap 'rm -f "$$temporary"' EXIT; \
-		$(CC) -std=c11 -O2 -g -fPIC -shared -Wall -Wextra -Werror \
+		$(CC) -std=c11 -O2 -g -fno-omit-frame-pointer -fPIC -shared -Wall -Wextra -Werror \
 		crates/rprof-preload/native/wrappers.c target/$(PROFILE)/librprof_preload.a \
 		-Wl,--exclude-libs,ALL -ldl -lpthread -lm -lrt -lutil -o "$$temporary"; \
 		chmod 755 "$$temporary"; mv "$$temporary" "$(PRELOAD)"
@@ -29,7 +29,7 @@ mpi:
 	$(CARGO) build -p rprof-mpi $(CARGO_FLAGS)
 	@set -eu; temporary=$$(mktemp "target/$(PROFILE)/librprof_mpi.so.XXXXXX"); \
 		trap 'rm -f "$$temporary"' EXIT; \
-		$(MPICC) -std=c11 -O2 -g -fPIC -shared -Wall -Wextra -Werror \
+		$(MPICC) -std=c11 -O2 -g -fno-omit-frame-pointer -fPIC -shared -Wall -Wextra -Werror \
 		crates/rprof-mpi/native/wrappers.c target/$(PROFILE)/librprof_mpi.a \
 		-Wl,--exclude-libs,ALL -ldl -lpthread -lm -lrt -lutil -o "$$temporary"; \
 		chmod 755 "$$temporary"; mv "$$temporary" "target/$(PROFILE)/librprof_mpi.so"
@@ -62,7 +62,7 @@ cuda:
 	$(CARGO) build -p rprof-cuda $(CARGO_FLAGS)
 	@set -eu; temporary=$$(mktemp "target/$(PROFILE)/librprof_cuda.so.XXXXXX"); \
 		trap 'rm -f "$$temporary"' EXIT; \
-		$(CXX) -std=c++17 -O2 -g -fPIC -shared -Wall -Wextra -Werror \
+		$(CXX) -std=c++17 -O2 -g -fno-omit-frame-pointer -fPIC -shared -Wall -Wextra -Werror \
 		-I$(CUDA_HOME)/targets/x86_64-linux/include crates/rprof-cuda/native/adapter.cpp target/$(PROFILE)/librprof_cuda.a \
 		-Wl,--exclude-libs,ALL -L$(CUDA_HOME)/targets/x86_64-linux/lib -Wl,-rpath,$(CUDA_HOME)/targets/x86_64-linux/lib \
 		-lcupti -ldl -lpthread -lm -lrt -lutil -o "$$temporary"; \

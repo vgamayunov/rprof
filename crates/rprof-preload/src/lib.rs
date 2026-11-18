@@ -81,6 +81,7 @@ unsafe fn env_fd(name: &'static [u8]) -> Option<i32> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rprof_io_init() {
+    rprof_io_protocol::stacks::configure();
     let Some(socket) = (unsafe { env_fd(b"RPROF_IO_FD\0") }) else {
         return;
     };
@@ -134,6 +135,7 @@ pub extern "C" fn rprof_io_init() {
     INSTANCE.store(nonce(), Ordering::Relaxed);
     unsafe {
         (*stats).initialized.fetch_add(1, Ordering::Relaxed);
+        rprof_io_protocol::stacks::initialized(&*stats);
     }
     SOCKET.store(socket, Ordering::Release);
     rprof_io_protocol::send_process_name(
@@ -161,6 +163,7 @@ pub extern "C" fn rprof_io_after_fork() {
     if !stats.is_null() {
         unsafe {
             (*stats).initialized.fetch_add(1, Ordering::Relaxed);
+            rprof_io_protocol::stacks::initialized(&*stats);
         }
         rprof_io_protocol::send_process_name(
             SOCKET.load(Ordering::Acquire),
@@ -410,6 +413,7 @@ pub unsafe extern "C" fn rprof_io_begin(
     flags: i32,
     offset: i64,
     requested: u64,
+    frame: usize,
 ) -> i32 {
     let socket = SOCKET.load(Ordering::Acquire);
     if socket < 0 || fd == socket || fd == STATS_FD.load(Ordering::Relaxed) || event.is_null() {
@@ -438,6 +442,18 @@ pub unsafe extern "C" fn rprof_io_begin(
     } else {
         event.resource = resource(fd);
         fd_path(event, fd);
+    }
+    event.stack_token = rprof_io_protocol::stacks::next_token();
+    let stats = STATS.load(Ordering::Acquire);
+    if !stats.is_null() {
+        rprof_io_protocol::stacks::send(
+            socket,
+            unsafe { &*stats },
+            rprof_io_protocol::stacks::IO,
+            event.instance,
+            event.stack_token,
+            frame,
+        );
     }
     event.start_ns = now();
     i32::from(event.start_ns != 0)

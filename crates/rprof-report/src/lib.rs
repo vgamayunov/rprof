@@ -14,6 +14,7 @@ mod openmp_summary;
 mod pmu_summary;
 mod python_summary;
 mod pytorch_summary;
+pub mod stacks;
 mod system_timeline;
 mod text;
 mod trace;

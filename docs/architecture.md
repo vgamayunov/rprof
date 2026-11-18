@@ -84,11 +84,11 @@ GNU-runtime adapter supports GCC 13/libgomp; broader projection models remain pl
 | `crates/rprof-ompt` (exists) | OMPT callbacks and Rust transport; runtime-negotiated capabilities |
 | `crates/rprof-gomp` (exists) | Target-fingerprinted GNU C/assembly ABI adapter; shares the Rust OpenMP transport |
 | `crates/rprof-ompt-protocol` (exists) | Pointer-free host callback observations and per-thread sequences |
-| `python/rprof_python` (exists) | Optional CPython monitoring/profile/range bootstrap and framework-owned Torch scheduling; sampling remains planned |
+| `python/rprof_python` (exists) | Optional CPython tracing/ranges, perf-trampoline bootstrap for mixed frame-pointer sampling, and framework-owned Torch scheduling |
 | `crates/rprof-pytorch-import` (exists) | SDK-free bounded Kineto/Chrome import, exact source timestamps, memory and flow preservation |
 | `crates/rprof-cuda` (exists) | Target-SDK C++ CUPTI injection adapter and Rust native transport |
 | `crates/rprof-cuda-protocol` (exists) | Pointer-free CUDA activities, API callbacks, capabilities and diagnostics |
-| `crates/rprof-perf` (exists) | Pre-exec Linux perf counters, descriptor handoff, exact readings; sampling remains planned |
+| `crates/rprof-perf` (exists) | Pre-exec Linux perf counters and frame-pointer CPU sampling, descriptor handoff and mapped-ring startup handshake |
 | `crates/rprof-report` (exists) | Shared streaming analysis, text/HTML rendering and Chrome Trace export |
 | `crates/rprof-project` (exists) | Pure Rust hardware/workload models, bounded phase scheduling, scenario estimates and WASM ABI |
 | `ui/` (exists) | TypeScript/Canvas timeline, shared offline/local-viewer assets, browser tests |
@@ -115,7 +115,7 @@ unwind Rust panics across foreign callbacks.
 - Cross-host alignment needs offset/drift estimates and reported uncertainty;
   CUPTI timestamps need an explicit mapping to the host clock. Do not infer
   communication overlap from uncalibrated clocks.
-- Chunked JSON Lines is the current version-2 streaming format. Frames, writer
+- Chunked JSON Lines is the current version-3 streaming format (v2 remains readable). Frames, writer
   queues, and validation metadata have explicit limits; merger events are spooled
   to disk. A binary/compressed encoding and viewport indices can follow profiling
   of real workloads. See [capture format](capture-format.md) for compatibility.

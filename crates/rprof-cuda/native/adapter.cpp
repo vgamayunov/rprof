@@ -331,6 +331,9 @@ void CUPTIAPI api_callback(void *, CUpti_CallbackDomain domain, CUpti_CallbackId
   Guard guard;
   const auto &c = *static_cast<const CUpti_CallbackData *>(data);
   const bool runtime = domain == CUPTI_CB_DOMAIN_RUNTIME_API;
+  rprof_cuda_event e;
+  if (c.callbackSite == CUPTI_API_ENTER)
+    rprof_cuda_begin(&e, RPROF_CUDA_API_BEGIN, nullptr);
   const uint64_t now = rprof_cuda_now();
   if (c.callbackSite == CUPTI_API_ENTER) {
     if (c.correlationData) *c.correlationData = now;
@@ -343,9 +346,8 @@ void CUPTIAPI api_callback(void *, CUpti_CallbackDomain domain, CUpti_CallbackId
       }
     }
   }
-  rprof_cuda_event e;
-  rprof_cuda_begin(&e, c.callbackSite == CUPTI_API_ENTER ? RPROF_CUDA_API_BEGIN : RPROF_CUDA_API_END,
-                   nullptr);
+  if (c.callbackSite != CUPTI_API_ENTER)
+    rprof_cuda_begin(&e, RPROF_CUDA_API_END, nullptr);
   text(e.name, sizeof(e.name), c.functionName, e);
   e.api_domain = runtime ? RPROF_CUDA_DOMAIN_RUNTIME : RPROF_CUDA_DOMAIN_DRIVER;
   e.operation = cbid; e.correlation = c.correlationId;

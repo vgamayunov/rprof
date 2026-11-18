@@ -31,7 +31,8 @@ static_assert(sizeof(rprof_cuda_event)==608,"CUDA wire ABI mismatch");
 int rprof_cuda_init(void);
 void rprof_cuda_activate(void);
 uint64_t rprof_cuda_now(void);
-int rprof_cuda_begin(struct rprof_cuda_event *,uint16_t kind,const char *name);
+int rprof_cuda_begin(struct rprof_cuda_event *,uint16_t kind,const char *name,uintptr_t frame);
+#define rprof_cuda_begin(event, kind, name) rprof_cuda_begin(event, kind, name, (uintptr_t)__builtin_frame_address(0))
 void rprof_cuda_emit(struct rprof_cuda_event *);
 void rprof_cuda_source_drop(uint64_t records);
 void rprof_cuda_source_error(void);
